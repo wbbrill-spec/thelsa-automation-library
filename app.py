@@ -240,8 +240,14 @@ def launch(key):
 @app.route("/run/<key>")
 @login_required
 def run_now(key):
-    """'Run Now' button — sends user to the sub-app dashboard (same as launch)."""
-    return launch(key)
+    """'Run Now' button — triggers the sub-app pipeline, then shows its dashboard."""
+    url = RENDER_URLS.get(key)
+    if not url:
+        return f"Unknown automation: {key}", 404
+    # For the lead-gen engine, hit /trigger to start the pipeline
+    if key == "lead-gen":
+        return redirect(f"{url}/trigger")
+    return redirect(url)
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────

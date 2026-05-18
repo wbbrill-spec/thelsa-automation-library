@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: thelsa-automation-library
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app
+    envVars:
+      - key: FLASK_SECRET_KEY
+        generateValue: true          # Render auto-generates a secure random value
+      - key: OAUTH_REDIRECT_URI
+        value: https://thelsa-automation-library.onrender.com/auth/callback
+      - key: RATE_ENGINE_URL
+        value: https://thelsa-rate-engine.onrender.com
+      - key: LEAD_GEN_URL
+        value: https://thelsa-lead-gen.onrender.com
+      - key: GOOGLE_CREDENTIALS_B64
+        sync: false                  # Set manually in Render dashboard — never commit

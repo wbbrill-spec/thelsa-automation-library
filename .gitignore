@@ -1,0 +1,15 @@
+# OAuth credentials — NEVER commit these
+web_credentials.json
+data/tokens/
+*.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+venv/
+.venv/
+
+# OS
+.DS_Store

@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Thelsa Automation Library</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #f5f6f8;
+      color: #1a1a2e;
+      min-height: 100vh;
+    }
+
+    /* ── Header ── */
+    header {
+      background: #ffffff;
+      padding: 0 40px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 74px;
+      box-shadow: 0 2px 12px rgba(0,0,0,0.08);
+      border-bottom: 3px solid #c0392b;
+    }
+    .header-brand {
+      display: flex;
+      align-items: center;
+    }
+    .header-logo-img {
+      height: 46px;
+      width: auto;
+      display: block;
+    }
+    .header-badge {
+      background: #f3f4f6;
+      border: 1px solid #e0e0e0;
+      color: #555;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 4px 12px;
+      border-radius: 20px;
+    }
+
+    /* ── Hero ── */
+    .hero {
+      background: white;
+      border-bottom: 1px solid #e8e8e8;
+      padding: 48px 40px 40px;
+      text-align: center;
+    }
+    .hero h1 {
+      font-size: 32px;
+      font-weight: 800;
+      color: #1a1a2e;
+      margin-bottom: 10px;
+    }
+    .hero h1 span { color: #c0392b; }
+    .hero p {
+      font-size: 16px;
+      color: #666;
+      max-width: 560px;
+      margin: 0 auto;
+      line-height: 1.6;
+    }
+
+    /* ── Main content ── */
+    main {
+      max-width: 1100px;
+      margin: 40px auto;
+      padding: 0 24px;
+    }
+
+    .section-label {
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: #999;
+      margin-bottom: 20px;
+    }
+
+    /* ── Automation cards ── */
+    .card-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+      gap: 24px;
+      margin-bottom: 48px;
+    }
+
+    .card {
+      background: white;
+      border-radius: 14px;
+      border: 1px solid #e8e8e8;
+      overflow: hidden;
+      transition: box-shadow 0.2s, transform 0.2s;
+      display: flex;
+      flex-direction: column;
+    }
+    .card:hover {
+      box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+      transform: translateY(-2px);
+    }
+
+    .card-header {
+      padding: 24px 24px 16px;
+      display: flex;
+      align-items: flex-start;
+      gap: 14px;
+      border-bottom: 1px solid #f3f3f3;
+    }
+    .card-icon {
+      width: 48px;
+      height: 48px;
+      border-radius: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 22px;
+      flex-shrink: 0;
+    }
+    .icon-red   { background: #fdecea; }
+    .icon-blue  { background: #e8f0fe; }
+    .icon-green { background: #e6f4ea; }
+    .icon-gold  { background: #fef9e7; }
+
+    .card-meta { flex: 1; }
+    .card-name {
+      font-size: 15px;
+      font-weight: 700;
+      color: #1a1a2e;
+      line-height: 1.3;
+      margin-bottom: 6px;
+    }
+    .card-tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+    }
+    .tag {
+      font-size: 10px;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+    }
+    .tag-active  { background: #e6f4ea; color: #1e7e34; }
+    .tag-dev     { background: #fef9e7; color: #856404; }
+    .tag-ai      { background: #e8f0fe; color: #1967d2; }
+    .tag-email   { background: #fce8e6; color: #c0392b; }
+    .tag-daily   { background: #f3e8ff; color: #7b1fa2; }
+
+    .card-body {
+      padding: 18px 24px;
+      flex: 1;
+    }
+    .card-description {
+      font-size: 13.5px;
+      color: #555;
+      line-height: 1.65;
+      margin-bottom: 14px;
+    }
+    .card-features {
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .card-features li {
+      font-size: 12.5px;
+      color: #666;
+      display: flex;
+      align-items: flex-start;
+      gap: 7px;
+    }
+    .card-features li::before {
+      content: '✓';
+      color: #c0392b;
+      font-weight: 700;
+      flex-shrink: 0;
+      margin-top: 1px;
+    }
+
+    .card-footer {
+      padding: 16px 24px;
+      border-top: 1px solid #f3f3f3;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .card-schedule {
+      font-size: 11px;
+      color: #999;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 9px 18px;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      border: none;
+      text-decoration: none;
+      transition: opacity 0.15s;
+    }
+    .btn:hover { opacity: 0.85; }
+    .btn-primary { background: #c0392b; color: white; }
+    .btn-secondary { background: #f3f4f6; color: #444; border: 1px solid #e0e0e0; }
+    .btn-disabled { background: #f3f4f6; color: #bbb; cursor: default; border: 1px solid #e8e8e8; }
+
+    /* ── Coming soon card ── */
+    .card-coming-soon {
+      opacity: 0.6;
+      pointer-events: none;
+    }
+    .card-coming-soon .card-header { background: #fafafa; }
+
+    /* ── Footer ── */
+    footer {
+      text-align: center;
+      padding: 32px;
+      font-size: 12px;
+      color: #bbb;
+      border-top: 1px solid #e8e8e8;
+      margin-top: 24px;
+    }
+    footer a { color: #c0392b; text-decoration: none; }
+    footer a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <header>
+    <div class="header-brand">
+      <a href="https://www.thelsa.com" target="_blank">
+        <img src="static/thelsa_logo.png" alt="Thelsa Mobility Solutions" class="header-logo-img">
+      </a>
+    </div>
+    <div style="display:flex;align-items:center;gap:16px">
+      <span style="font-size:13px;color:#666">{{USER_NAME}}</span>
+      <a href="/logout" style="font-size:12px;color:#c0392b;text-decoration:none;font-weight:600">Sign out</a>
+      <div class="header-badge">Internal Tools</div>
+    </div>
+  </header>
+
+  <!-- Hero -->
+  <div class="hero">
+    <h1>Automation <span>Library</span></h1>
+    <p>A collection of AI-powered tools built to support Thelsa's growth — from lead generation to pricing automation. Click any tool below to launch it.</p>
+  </div>
+
+  <!-- Main -->
+  <main>
+    <div class="section-label">Active Automations</div>
+    <div class="card-grid">
+
+      <!-- Card 1: TMS Corp Lead Gen Engine -->
+      <div class="card">
+        <div class="card-header">
+          <div class="card-icon icon-red">🌎</div>
+          <div class="card-meta">
+            <div class="card-name">Cross-Border Expansion Lead Gen</div>
+            <div class="card-tags">
+              <span class="tag tag-active">Active</span>
+              <span class="tag tag-ai">AI</span>
+              <span class="tag tag-daily">Daily</span>
+              <span class="tag tag-email">Email</span>
+            </div>
+          </div>
+        </div>
+        <div class="card-body">
+          <p class="card-description">
+            Scans news, Google Alerts, and Reddit every morning to identify US, Canadian, and Mexican SMBs expanding cross-border. Automatically qualifies leads and drafts bilingual outreach emails to HR, Global Mobility, and Procurement contacts.
+          </p>
+          <ul class="card-features">
+            <li>38 monitored sources — news, Google Alerts, Reddit</li>
+            <li>AI qualification filters for SMBs only</li>
+            <li>Bilingual email drafts (English + Spanish)</li>
+            <li>Targets HR, Global Mobility, C&B, Procurement</li>
+            <li>Agent approval required before any email sends</li>
+          </ul>
+        </div>
+        <div class="card-footer">
+          <div class="card-schedule">🕘 Runs daily at 9am Central</div>
+          <div style="display:flex;gap:8px">
+            <a href="/run/lead-gen" class="btn btn-primary">▶ Run Now</a>
+            <a href="/launch/lead-gen" class="btn btn-secondary">Dashboard</a>
+          </div>
+        </div>
+      </div>
+
+      <!-- Card 2: OA-DA Rate Engine -->
+      <div class="card">
+        <div class="card-header">
+          <div class="card-icon icon-blue">💰</div>
+          <div class="card-meta">
+            <div class="card-name">OA-DA Automated Rate Engine</div>
+            <div class="card-tags">
+              <span class="tag tag-active">Active</span>
+              <span class="tag tag-ai">AI</span>
+              <span class="tag tag-email">Email</span>
+            </div>
+          </div>
+        </div>
+        <div class="card-body">
+          <p class="card-description">
+            Automates the generation and delivery of Origin Agent / Destination Agent rate quotes. Reads pricing from the master workbook, generates formatted quote emails, and delivers them via user designated email — eliminating manual rate lookup and email drafting.
+          </p>
+          <ul class="card-features">
+            <li>Reads live pricing from PRECIOS OA-DA workbook</li>
+            <li>Generates formatted, professional rate quotes</li>
+            <li>Sends via user email with full audit log</li>
+            <li>Logs all quotes automatically</li>
+            <li>ISO-compliant quote formatting</li>
+          </ul>
+        </div>
+        <div class="card-footer">
+          <div class="card-schedule">⚡ On-demand</div>
+          <a href="/launch/rate-engine" class="btn btn-primary">Launch Dashboard →</a>
+        </div>
+      </div>
+
+      <!-- Card 3: Coming Soon placeholder -->
+      <div class="card card-coming-soon">
+        <div class="card-header">
+          <div class="card-icon icon-green">🔧</div>
+          <div class="card-meta">
+            <div class="card-name">More automations coming soon</div>
+            <div class="card-tags">
+              <span class="tag tag-dev">In Development</span>
+            </div>
+          </div>
+        </div>
+        <div class="card-body">
+          <p class="card-description">
+            Additional tools are being built to support Thelsa's operations. Check back soon.
+          </p>
+        </div>
+        <div class="card-footer">
+          <div class="card-schedule"></div>
+          <span class="btn btn-disabled">Coming Soon</span>
+        </div>
+      </div>
+
+    </div>
+  </main>
+
+  <footer>
+    <a href="https://www.thelsa.com" target="_blank">thelsa.com</a> &nbsp;·&nbsp; Internal use only
+  </footer>
+
+</body>
+</html>

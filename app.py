@@ -71,13 +71,14 @@ ALLOWED_EMAILS = {
     "mgonzale1371@gmail.com",
     "a.silveyra88@gmail.com",
     "guga.gekko@gmail.com",
+    "sgarzacantu@gmail.com",
+    "wreynolds004@gmail.com",
 }
 
 GMAIL_SCOPES = [
     "openid",
     "https://www.googleapis.com/auth/userinfo.email",
     "https://www.googleapis.com/auth/userinfo.profile",
-    "https://www.googleapis.com/auth/gmail.compose",
 ]
 
 

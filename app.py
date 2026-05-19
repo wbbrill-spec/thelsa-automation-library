@@ -58,6 +58,9 @@ RENDER_URLS = {
     "lead-gen": os.environ.get(
         "LEAD_GEN_URL", "https://thelsa-lead-gen.onrender.com"
     ),
+    "cross-border-engine": os.environ.get(
+        "CROSS_BORDER_ENGINE_URL", "https://thelsa-cross-border-engine.onrender.com"
+    ),
 }
 
 # ── Authorised team members ────────────────────────────────────────────────────

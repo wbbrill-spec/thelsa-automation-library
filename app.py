@@ -254,6 +254,20 @@ def run_now(key):
     return redirect(url)
 
 
+
+# ── Health / keep-alive ────────────────────────────────────────────────────────
+
+@app.route("/health")
+def health():
+    """Unauthenticated health-check used by keep-alive cron to prevent cold starts."""
+    return {"status": "ok"}, 200
+
+
+@app.route("/ping")
+def ping():
+    """Alias of /health for compatibility with UptimeRobot / external monitors."""
+    return "pong", 200
+
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

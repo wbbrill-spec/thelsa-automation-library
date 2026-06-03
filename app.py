@@ -3,10 +3,8 @@ Thelsa Automation Library — Dashboard
 Serves the library landing page and authenticates team members via Google OAuth.
 Each automation tool runs as its own independent Render service; this app just
 links out to them.
-
 Local dev : python3 app.py   →  http://localhost:5000
 Production: deployed to Render — always-on, no ngrok required.
-
 Required environment variables (set in Render dashboard):
   FLASK_SECRET_KEY       — random secret, use Render's "generate" button
   OAUTH_REDIRECT_URI     — https://<your-service>.onrender.com/auth/callback
@@ -14,7 +12,6 @@ Required environment variables (set in Render dashboard):
   RATE_ENGINE_URL        — URL of the OA-DA Rate Engine Render service
   LEAD_GEN_URL           — URL of the TMS Lead Gen Engine Render service
 """
-
 import base64
 import functools
 import hashlib
@@ -25,30 +22,23 @@ import re
 import secrets
 from datetime import timedelta
 from pathlib import Path
-
 from flask import Flask, redirect, request, session, url_for
 from werkzeug.middleware.proxy_fix import ProxyFix
-
 # ── App setup ──────────────────────────────────────────────────────────────────
 app = Flask(__name__, static_folder="static", static_url_path="/static")
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "thelsa-lib-change-me-in-production")
 app.permanent_session_lifetime = timedelta(days=7)
-
 # Trust reverse-proxy headers from Render (and ngrok for local testing)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
-
 # Allow OAuth over plain HTTP only in local dev (Render always uses HTTPS)
 if os.environ.get("FLASK_ENV") == "development":
     os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
-
 BASE      = Path(__file__).resolve().parent
 TOKEN_DIR = BASE / "data" / "tokens"
 TOKEN_DIR.mkdir(parents=True, exist_ok=True)
-
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
-
 # ── Sub-app Render URLs ────────────────────────────────────────────────────────
 # Override with RATE_ENGINE_URL / LEAD_GEN_URL env vars in Render dashboard.
 RENDER_URLS = {
@@ -62,31 +52,14 @@ RENDER_URLS = {
         "CROSS_BORDER_ENGINE_URL", "https://thelsa-cross-border-engine.onrender.com"
     ),
 }
-
-# ── Authorised team members ────────────────────────────────────────────────────
-ALLOWED_EMAILS = {
-    "wbbrill@gmail.com",
-    "vanegasmartha@gmail.com",
-    "guillermo.monroyh@gmail.com",
-    "mgonzale1371@gmail.com",
-    "a.silveyra88@gmail.com",
-    "guga.gekko@gmail.com",
-    "sgarzacantu@gmail.com",
-    "wreynolds004@gmail.com",
-}
-
 GMAIL_SCOPES = [
     "openid",
     "https://www.googleapis.com/auth/userinfo.email",
     "https://www.googleapis.com/auth/userinfo.profile",
 ]
-
-
 # ── OAuth helpers ──────────────────────────────────────────────────────────────
-
 def _load_client_config() -> dict:
     """Load OAuth client config.
-
     Priority:
       1. GOOGLE_CREDENTIALS_B64 env var (base64-encoded JSON) — used on Render
          so the secret never touches the repo.
@@ -105,11 +78,8 @@ def _load_client_config() -> dict:
         "  Encode    : python3 -c \"import base64,pathlib; "
         "print(base64.b64encode(pathlib.Path('web_credentials.json').read_bytes()).decode())\""
     )
-
-
 def _callback_uri() -> str:
     """Return the OAuth callback URI.
-
     On Render, set OAUTH_REDIRECT_URI to
     https://<your-service>.onrender.com/auth/callback so the value is
     stable across deploys and matches what's registered in GCP.
@@ -120,20 +90,14 @@ def _callback_uri() -> str:
     proto = request.headers.get("X-Forwarded-Proto", "http")
     host  = request.headers.get("X-Forwarded-Host", request.host)
     return f"{proto}://{host}/auth/callback"
-
-
 def _make_flow(redirect_uri: str):
     from google_auth_oauthlib.flow import Flow
     return Flow.from_client_config(
         _load_client_config(), scopes=GMAIL_SCOPES, redirect_uri=redirect_uri
     )
-
-
 def _token_path(email: str) -> Path:
     safe = re.sub(r"[^a-z0-9]", "_", email.lower())
     return TOKEN_DIR / f"{safe}.json"
-
-
 def _save_token(email: str, credentials) -> None:
     data = {
         "token":         credentials.token,
@@ -144,8 +108,6 @@ def _save_token(email: str, credentials) -> None:
         "scopes":        list(credentials.scopes or []),
     }
     _token_path(email).write_text(json.dumps(data))
-
-
 def login_required(f):
     @functools.wraps(f)
     def decorated(*args, **kwargs):
@@ -153,10 +115,7 @@ def login_required(f):
             return redirect(url_for("login", next=request.url))
         return f(*args, **kwargs)
     return decorated
-
-
 # ── Auth routes ────────────────────────────────────────────────────────────────
-
 @app.route("/login")
 def login():
     session["oauth_next"] = request.args.get("next", url_for("index"))
@@ -175,8 +134,6 @@ def login():
     session["oauth_state"]         = state
     session["oauth_code_verifier"] = code_verifier
     return redirect(auth_url)
-
-
 @app.route("/auth/callback")
 def auth_callback():
     flow = _make_flow(_callback_uri())
@@ -187,7 +144,6 @@ def auth_callback():
         )
     except Exception as exc:
         return f"OAuth token exchange failed: {exc}", 400
-
     creds = flow.credentials
     try:
         from googleapiclient.discovery import build
@@ -195,32 +151,19 @@ def auth_callback():
         info = svc.userinfo().get().execute()
     except Exception as exc:
         return f"Failed to fetch user info: {exc}", 400
-
     email = (info.get("email") or "").lower()
-    if email not in ALLOWED_EMAILS:
-        return (
-            f"<h2>Access Denied</h2><p>{email} is not authorised to use this tool.</p>"
-            "<p>Contact Bill to request access.</p>",
-            403,
-        )
-
     session["user_email"] = email
     session["user_name"]  = info.get("name", email)
     session.permanent     = True
     _save_token(email, creds)
     logger.info(f"Login: {email}")
     return redirect(session.pop("oauth_next", url_for("index")))
-
-
 @app.route("/logout")
 def logout():
     logger.info(f"Logout: {session.get('user_email')}")
     session.clear()
     return redirect(url_for("login"))
-
-
 # ── Main routes ────────────────────────────────────────────────────────────────
-
 @app.route("/")
 @login_required
 def index():
@@ -229,8 +172,6 @@ def index():
     email = session.get("user_email", "")
     html  = html.replace("{{USER_NAME}}", name).replace("{{USER_EMAIL}}", email)
     return html
-
-
 @app.route("/launch/<key>")
 @login_required
 def launch(key):
@@ -239,8 +180,6 @@ def launch(key):
     if not url:
         return f"Unknown automation: {key}", 404
     return redirect(url)
-
-
 @app.route("/run/<key>")
 @login_required
 def run_now(key):
@@ -252,24 +191,16 @@ def run_now(key):
     if key == "lead-gen":
         return redirect(f"{url}/trigger")
     return redirect(url)
-
-
-
 # ── Health / keep-alive ────────────────────────────────────────────────────────
-
 @app.route("/health")
 def health():
     """Unauthenticated health-check used by keep-alive cron to prevent cold starts."""
     return {"status": "ok"}, 200
-
-
 @app.route("/ping")
 def ping():
     """Alias of /health for compatibility with UptimeRobot / external monitors."""
     return "pong", 200
-
 # ── Entry point ────────────────────────────────────────────────────────────────
-
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     # Allow plain HTTP only for local dev

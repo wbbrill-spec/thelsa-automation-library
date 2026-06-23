@@ -207,3 +207,7 @@ if __name__ == "__main__":
     os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
     print(f"\n  Thelsa Automation Library — http://localhost:{port}\n")
     app.run(host="0.0.0.0", port=port, debug=False)
+
+# Email Campaigns dashboard
+from campaigns import campaigns_bp
+app.register_blueprint(campaigns_bp)

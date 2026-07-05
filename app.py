@@ -211,3 +211,6 @@ if __name__ == "__main__":
 # Email Campaigns dashboard
 from campaigns import campaigns_bp
 app.register_blueprint(campaigns_bp)
+# Engine HTTP triggers (test draft + scheduled draft/monitor)
+from engine_web import engine_bp
+app.register_blueprint(engine_bp)

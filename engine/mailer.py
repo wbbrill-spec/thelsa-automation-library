@@ -10,6 +10,8 @@ Requires the Entra app registration with Graph Mail.ReadWrite (application),
 admin-consented and scoped to only MAILBOX. No Mail.Send is used — the engine
 never sends, it only drafts.
 """
+import os
+
 import requests
 
 from . import config
@@ -25,10 +27,10 @@ def render_body(template_body):
 
 class GraphMailer:
     def __init__(self):
-        import os
-        self.tenant = os.environ["GRAPH_TENANT_ID"]
-        self.client_id = os.environ["GRAPH_CLIENT_ID"]
-        self.secret = os.environ["GRAPH_CLIENT_SECRET"]
+        # .strip() guards against a stray space/newline pasted into the env var.
+        self.tenant = os.environ["GRAPH_TENANT_ID"].strip()
+        self.client_id = os.environ["GRAPH_CLIENT_ID"].strip()
+        self.secret = os.environ["GRAPH_CLIENT_SECRET"].strip()
         self.mailbox = config.MAILBOX
         self._tok = None
 
@@ -40,7 +42,16 @@ class GraphMailer:
             data={"client_id": self.client_id, "client_secret": self.secret,
                   "grant_type": "client_credentials",
                   "scope": "https://graph.microsoft.com/.default"}, timeout=30)
-        r.raise_for_status()
+        if r.status_code != 200:
+            # Surface Microsoft's exact reason (AADSTS code) instead of a bare 401.
+            detail = ""
+            try:
+                j = r.json()
+                detail = j.get("error_description", "") or j.get("error", "")
+            except Exception:
+                detail = r.text[:600]
+            raise RuntimeError(f"Microsoft token request failed [{r.status_code}]: "
+                               f"{detail.splitlines()[0] if detail else r.text[:300]}")
         self._tok = r.json()["access_token"]
         return self._tok
 
@@ -56,7 +67,8 @@ class GraphMailer:
         }
         r = requests.post(f"{GRAPH}/users/{self.mailbox}/messages",
                           headers=self._h(), json=msg, timeout=30)
-        r.raise_for_status()
+        if r.status_code >= 300:
+            raise RuntimeError(f"Graph create_draft failed [{r.status_code}]: {r.text[:400]}")
         d = r.json()
         return {"id": d.get("id", ""), "webLink": d.get("webLink", "")}
 

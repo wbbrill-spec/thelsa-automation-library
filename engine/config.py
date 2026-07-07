@@ -19,6 +19,8 @@ import os
 
 SHEET_ID = os.environ.get("OUTREACH_SHEET_ID", "1QhlNpaLndlcEy3EDgnVwsfc7PjNqO26HysaqjLdy6uc")
 MAILBOX = os.environ.get("MAILBOX", "bbrill@thelsa.com")
+# Mailboxes the engine may draft from; lead-gen round-robins across these.
+ALLOWED_MAILBOXES = [m.strip().lower() for m in os.environ.get("ALLOWED_MAILBOXES", "bbrill@thelsa.com,armandosilveyra@thelsa.com,gustavogonzalez@thelsa.com").split(",") if m.strip()]
 ALERT_EMAIL = os.environ.get("ALERT_EMAIL", "bbrill@thelsa.com")
 DRY_RUN = os.environ.get("DRY_RUN", "0") == "1"
 

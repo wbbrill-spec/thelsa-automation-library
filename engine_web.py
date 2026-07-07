@@ -63,3 +63,63 @@ def cron_monitor():
         return ("forbidden", 403)
     from engine.run import main
     return jsonify(main("monitor"))
+
+
+# ── server-side scheduler ─────────────────────────────────────────────────────
+# Runs the engine on a schedule inside this always-on web service, so drafting and
+# monitoring happen in the cloud — no external trigger, no dependency on any local
+# machine. A file lock ensures only ONE gunicorn worker runs the scheduler, and the
+# engine's own idempotency (draft_created flag, daily cap, processed-message ledger)
+# makes a stray double-run harmless anyway. Set ENABLE_SCHEDULER=0 to disable.
+_sched_lock = None
+_scheduler = None
+
+
+def _sched_draft():
+    try:
+        from engine.run import main
+        print("[scheduler] draft:", main("draft"), flush=True)
+    except Exception as exc:
+        print("[scheduler] draft error:", exc, flush=True)
+
+
+def _sched_monitor():
+    try:
+        from engine.run import main
+        print("[scheduler] monitor:", main("monitor"), flush=True)
+    except Exception as exc:
+        print("[scheduler] monitor error:", exc, flush=True)
+
+
+def _start_scheduler():
+    global _sched_lock
+    if os.environ.get("ENABLE_SCHEDULER", "1") != "1":
+        return None
+    try:  # single-process gate across gunicorn workers
+        import fcntl
+        _sched_lock = open("/tmp/thelsa_scheduler.lock", "w")
+        fcntl.flock(_sched_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except Exception:
+        return None  # another worker already owns the scheduler
+    try:
+        import pytz
+        from apscheduler.schedulers.background import BackgroundScheduler
+        from apscheduler.triggers.cron import CronTrigger
+        tz = pytz.timezone("America/Chicago")
+        sched = BackgroundScheduler(timezone=tz, daemon=True)
+        sched.add_job(_sched_draft,
+                      CronTrigger(day_of_week="mon-fri", hour=7, minute=30, timezone=tz),
+                      id="draft", replace_existing=True, misfire_grace_time=3600, coalesce=True)
+        sched.add_job(_sched_monitor,
+                      CronTrigger(hour="8,16", minute=0, timezone=tz),
+                      id="monitor", replace_existing=True, misfire_grace_time=3600, coalesce=True)
+        sched.start()
+        print("[scheduler] started: draft Mon-Fri 07:30 CT; monitor 08:00 & 16:00 CT",
+              flush=True)
+        return sched
+    except Exception as exc:
+        print("[scheduler] failed to start:", exc, flush=True)
+        return None
+
+
+_scheduler = _start_scheduler()

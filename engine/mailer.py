@@ -26,12 +26,12 @@ def render_body(template_body):
 
 
 class GraphMailer:
-    def __init__(self):
+    def __init__(self, mailbox=None):
         # .strip() guards against a stray space/newline pasted into the env var.
         self.tenant = os.environ["GRAPH_TENANT_ID"].strip()
         self.client_id = os.environ["GRAPH_CLIENT_ID"].strip()
         self.secret = os.environ["GRAPH_CLIENT_SECRET"].strip()
-        self.mailbox = config.MAILBOX
+        self.mailbox = (mailbox or config.MAILBOX).strip()
         self._tok = None
 
     def _token(self):

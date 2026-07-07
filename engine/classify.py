@@ -45,3 +45,15 @@ def is_original_thread(subject):
 
 def domain_of(email):
     return (email or "").split("@")[-1].strip().lower()
+
+
+# Free/shared webmail providers: for these we only ever match a reply by the exact
+# address we emailed, never by domain (matching all of gmail.com would be absurd).
+FREE_EMAIL_DOMAINS = frozenset({
+    "gmail.com", "googlemail.com", "yahoo.com", "yahoo.co.uk", "yahoo.co.in",
+    "yahoo.es", "yahoo.com.mx", "ymail.com", "hotmail.com", "hotmail.co.uk",
+    "hotmail.es", "outlook.com", "outlook.es", "live.com", "msn.com", "aol.com",
+    "icloud.com", "me.com", "mac.com", "protonmail.com", "proton.me", "gmx.com",
+    "gmx.net", "mail.com", "zoho.com", "yandex.com", "qq.com", "163.com",
+    "126.com", "sina.com", "rediffmail.com",
+})

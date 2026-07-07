@@ -1,15 +1,15 @@
 """
 monitor_task.py — Task B: scan the mailbox, classify inbound mail, update state.
 
-SCOPED TO THE CAMPAIGN BY SENDER: the only mail we act on is a message whose
-sender is one of the recipients we emailed in this campaign. That is the sole
-signal — we do NOT rely on the subject line (an agent may trim it, their client
-may change it, or they may start a fresh email). The mailbox's normal business
-mail — customer rate requests, bookings, internal threads — is ignored entirely.
-
-The one exception is a bounce notice: it comes from a mail-server daemon rather
-than the agent, so we detect it and tie it back to a recipient by finding that
-recipient's address inside the bounce body.
+SCOPED TO THE CAMPAIGN BY COMPANY DOMAIN: we act on a message when its sender is
+one of the agents we emailed OR is anyone at the same company domain as an emailed
+agent (so a reply from a colleague at that company still counts). Guardrails:
+  - free webmail domains (gmail, outlook, yahoo, ...) are matched by exact address
+    only, never by domain — matching all of gmail.com would be absurd;
+  - our own mailbox domain (thelsa.com) is excluded from domain matching;
+  - a bounce notice comes from a mail-server daemon, so it is detected first and
+    tied back to the failed recipient via the bounce body.
+Everything else in the inbox is ignored.
 
 Idempotent: every message acted on is logged to activity_log by message_id and
 skipped on later runs. Bookings are flagged for human confirmation, never
@@ -31,6 +31,13 @@ def run(campaign_id, mailer, today=None, run_id=None, since_days=7):
                    if m.get("campaign_id") == campaign_id]
         by_email = {(m.get("email") or "").lower(): m for m in members}
         member_emails = {e for e in by_email if e}
+        own_domain = (config.MAILBOX or "").split("@")[-1].strip().lower()
+        # domain -> representative member, excluding free webmail and our own domain
+        by_domain = {}
+        for e, m in by_email.items():
+            d = classify.domain_of(e)
+            if d and d != own_domain and d not in classify.FREE_EMAIL_DOMAINS:
+                by_domain.setdefault(d, m)
 
         since = (today - timedelta(days=since_days)).strftime("%Y-%m-%dT00:00:00Z")
         msgs = mailer.scan_inbox(since) if mailer else []
@@ -41,29 +48,29 @@ def run(campaign_id, mailer, today=None, run_id=None, since_days=7):
                 continue
             frm = (msg.get("from") or "").lower()
             subj, body = msg.get("subject", ""), msg.get("body", "")
-            member = by_email.get(frm)
 
-            # ---- SCOPE GATE ----
-            # If the sender isn't a campaign recipient, the only thing we care
-            # about is a bounce notice referencing one of our recipients.
-            # Everything else in the inbox is ignored.
-            if member is None:
-                if classify.is_bounce(frm):
-                    target = next((e for e in member_emails
-                                   if e and e in (body or "").lower()), None)
-                    if target:
-                        sheets.append_row("suppression", {"email_or_domain": target,
-                            "reason": "bounce", "date": today.isoformat(),
-                            "source_campaign": campaign_id})
-                        tm = by_email.get(target)
-                        if tm:
-                            sheets.update_fields("campaign_members", tm["_row"],
-                                                 {"stage": "bounced"})
-                        sheets.log_activity(campaign_id, target, "bounce", subj, mid)
-                        counts["bounces"] += 1
+            # Bounce notices come from a mail-server daemon (which may share a
+            # campaign domain), so detect them before the scope match.
+            if classify.is_bounce(frm):
+                target = next((e for e in member_emails
+                               if e and e in (body or "").lower()), None)
+                if target:
+                    sheets.append_row("suppression", {"email_or_domain": target,
+                        "reason": "bounce", "date": today.isoformat(),
+                        "source_campaign": campaign_id})
+                    tm = by_email.get(target)
+                    if tm:
+                        sheets.update_fields("campaign_members", tm["_row"],
+                                             {"stage": "bounced"})
+                    sheets.log_activity(campaign_id, target, "bounce", subj, mid)
+                    counts["bounces"] += 1
                 continue
 
-            # Sender is a campaign recipient -> this is a genuine response.
+            # SCOPE: the exact agent we emailed, or anyone at that company's domain.
+            member = by_email.get(frm) or by_domain.get(classify.domain_of(frm))
+            if member is None:
+                continue
+
             counts["seen"] += 1
 
             def upd(fields):

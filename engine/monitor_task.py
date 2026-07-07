@@ -1,9 +1,19 @@
 """
 monitor_task.py — Task B: scan the mailbox, classify inbound mail, update state.
 
+SCOPED TO THE CAMPAIGN BY SENDER: the only mail we act on is a message whose
+sender is one of the recipients we emailed in this campaign. That is the sole
+signal — we do NOT rely on the subject line (an agent may trim it, their client
+may change it, or they may start a fresh email). The mailbox's normal business
+mail — customer rate requests, bookings, internal threads — is ignored entirely.
+
+The one exception is a bounce notice: it comes from a mail-server daemon rather
+than the agent, so we detect it and tie it back to a recipient by finding that
+recipient's address inside the bounce body.
+
 Idempotent: every message acted on is logged to activity_log by message_id and
 skipped on later runs. Bookings are flagged for human confirmation, never
-auto-finalized.
+auto-finalized. The monitor never creates new contacts/leads.
 """
 from datetime import date, timedelta
 
@@ -20,8 +30,7 @@ def run(campaign_id, mailer, today=None, run_id=None, since_days=7):
         members = [m for m in sheets.read_tab("campaign_members")
                    if m.get("campaign_id") == campaign_id]
         by_email = {(m.get("email") or "").lower(): m for m in members}
-        contact_emails = {(c.get("email") or "").lower()
-                          for c in sheets.read_tab("contacts")}
+        member_emails = {e for e in by_email if e}
 
         since = (today - timedelta(days=since_days)).strftime("%Y-%m-%dT00:00:00Z")
         msgs = mailer.scan_inbox(since) if mailer else []
@@ -34,23 +43,38 @@ def run(campaign_id, mailer, today=None, run_id=None, since_days=7):
             subj, body = msg.get("subject", ""), msg.get("body", "")
             member = by_email.get(frm)
 
-            def upd(fields):
-                if member:
-                    sheets.update_fields("campaign_members", member["_row"], fields)
-
-            if classify.is_bounce(frm):
-                sheets.append_row("suppression", {"email_or_domain": frm, "reason": "bounce",
-                    "date": today.isoformat(), "source_campaign": campaign_id})
-                upd({"stage": "bounced"})
-                sheets.log_activity(campaign_id, frm, "bounce", subj, mid)
-                counts["bounces"] += 1
+            # ---- SCOPE GATE ----
+            # If the sender isn't a campaign recipient, the only thing we care
+            # about is a bounce notice referencing one of our recipients.
+            # Everything else in the inbox is ignored.
+            if member is None:
+                if classify.is_bounce(frm):
+                    target = next((e for e in member_emails
+                                   if e and e in (body or "").lower()), None)
+                    if target:
+                        sheets.append_row("suppression", {"email_or_domain": target,
+                            "reason": "bounce", "date": today.isoformat(),
+                            "source_campaign": campaign_id})
+                        tm = by_email.get(target)
+                        if tm:
+                            sheets.update_fields("campaign_members", tm["_row"],
+                                                 {"stage": "bounced"})
+                        sheets.log_activity(campaign_id, target, "bounce", subj, mid)
+                        counts["bounces"] += 1
                 continue
+
+            # Sender is a campaign recipient -> this is a genuine response.
+            counts["seen"] += 1
+
+            def upd(fields):
+                sheets.update_fields("campaign_members", member["_row"], fields)
 
             cat = classify.classify(subj, body, phrases)
 
             if cat == "unsubscribe":
-                sheets.append_row("suppression", {"email_or_domain": frm, "reason": "unsubscribe",
-                    "date": today.isoformat(), "source_campaign": campaign_id})
+                sheets.append_row("suppression", {"email_or_domain": frm,
+                    "reason": "unsubscribe", "date": today.isoformat(),
+                    "source_campaign": campaign_id})
                 upd({"stage": "stopped"})
                 sheets.log_activity(campaign_id, frm, "unsubscribe", subj, mid)
                 counts["unsubscribes"] += 1
@@ -60,32 +84,22 @@ def run(campaign_id, mailer, today=None, run_id=None, since_days=7):
                                     f"LIKELY BOOKING (confirm): {subj}", mid)
                 counts["bookings_flagged"] += 1  # human confirms; never auto-finalized
 
-            elif cat == "rate_request" and classify.is_original_thread(subj):
+            elif cat == "rate_request":
                 sheets.append_row("rate_requests", {
                     "request_id": f"rr_{mid[-12:] or today.isoformat()}",
-                    "campaign_id": campaign_id if member else "",
-                    "contact_id": member.get("contact_id", "") if member else "",
+                    "campaign_id": campaign_id,
+                    "contact_id": member.get("contact_id", ""),
                     "date": today.isoformat(), "sender_email": frm,
                     "domain": classify.domain_of(frm), "company": "",
                     "subject": subj, "message_id": mid, "lane": "", "status": "new"})
                 upd({"stage": "rate_requested"})
                 sheets.log_activity(campaign_id, frm, "rate_request", subj, mid)
                 counts["rate_requests"] += 1
-                if not member and frm not in contact_emails:  # unknown-domain lead
-                    sheets.append_row("contacts", {
-                        "contact_id": f"in_{mid[-10:]}", "email": frm,
-                        "domain": classify.domain_of(frm), "source": "inbound",
-                        "status": "active", "notes": "LEAD (inbound rate request)"})
-                    counts["leads"] += 1
 
             else:  # other reply — halt sequence, never auto-follow-up
-                if member:
-                    upd({"stage": "replied", "notes": "reply received"})
-                    sheets.log_activity(campaign_id, frm, "replied", subj, mid)
-                    counts["replies"] += 1
-                else:
-                    continue  # unrelated inbound, ignore (not logged)
-            counts["seen"] += 1
+                upd({"stage": "replied", "notes": "reply received"})
+                sheets.log_activity(campaign_id, frm, "replied", subj, mid)
+                counts["replies"] += 1
 
         if run_id:
             sheets.log_run(run_id, campaign_id, "monitor", "ok", str(counts))

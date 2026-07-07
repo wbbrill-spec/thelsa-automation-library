@@ -7,7 +7,7 @@ re-drafted; the daily cap is reconciled against drafts already created today.
 """
 from datetime import date, timedelta
 
-from . import config, sheets, planning
+from . import config, sheets, planning, ai
 
 
 def _templates_by_step(campaign_id):
@@ -28,6 +28,49 @@ def _suppression():
     return emails, domains
 
 
+# Role/shared inboxes get "Dear Partner,"; a real person's inbox gets "Hello X,".
+ROLE_LOCALPARTS = {
+    "rates", "rate", "info", "sales", "admin", "contact", "office", "partners",
+    "partner", "hello", "mail", "enquiries", "enquiry", "quote", "quotes", "ops",
+    "operations", "booking", "bookings", "reception", "general", "support",
+    "accounts", "import", "imports", "export", "exports", "traffic", "moves",
+    "moving", "movements", "customerservice", "cs", "team", "hola", "ventas",
+    "comercial", "trafico", "logistica", "logistics", "gac", "sales1", "info1",
+}
+
+# The AI output must still contain these, or we fall back to the plain template.
+REQUIRED_TOKENS = ("rates@thelsa.com", "469-247-3974")
+
+
+def _greeting(contact):
+    email = (contact.get("email") or "").lower()
+    local = email.split("@")[0] if "@" in email else ""
+    base = "".join(ch for ch in local if ch.isalpha())
+    first = (contact.get("first_name") or "").strip()
+    if not first or base in ROLE_LOCALPARTS:
+        return "Dear Partner,"
+    return f"Hello {first.split()[0]},"
+
+
+def _compose(tpl, contact):
+    """Subject + rendered body for one recipient: fill the greeting, convert the
+    stored '\\n' markers to real newlines, then optionally AI-personalize with a
+    guardrail that falls back to the plain body if anything required is missing."""
+    subject = tpl.get("subject", "")
+    body = ((tpl.get("body", "") or "")
+            .replace("{{greeting}}", _greeting(contact))
+            .replace("\\n", "\n"))
+    if ai.available():
+        try:
+            varied = ai.personalize(body, contact)
+            if (varied and all(tok in varied for tok in REQUIRED_TOKENS)
+                    and "unsubscribe" in varied.lower()):
+                body = varied
+        except Exception:
+            pass  # keep the plain templated body
+    return subject, body
+
+
 def run(campaign_id, mailer, today=None, run_id=None):
     today = today or date.today()
     counts = {"reconciled": 0, "drafted": 0, "skipped": 0, "errors": 0}
@@ -42,6 +85,8 @@ def run(campaign_id, mailer, today=None, run_id=None):
         supp_emails, supp_domains = _suppression()
         members = [m for m in sheets.read_tab("campaign_members")
                    if m.get("campaign_id") == campaign_id]
+        contacts_by_email = {(c.get("email") or "").lower(): c
+                             for c in sheets.read_tab("contacts")}
 
         # 1) Reconcile sends from the mailbox Sent Items
         since = (today - timedelta(days=21)).strftime("%Y-%m-%dT00:00:00Z")
@@ -89,8 +134,11 @@ def run(campaign_id, mailer, today=None, run_id=None):
                 continue
             cv = f"{campaign_id}_s{step}_{tpl.get('variant_id', 'A')}"
             link = ""
+            contact = contacts_by_email.get((m.get("email") or "").lower(),
+                                            {"email": m.get("email")})
+            subject, body = _compose(tpl, contact)
             if not config.DRY_RUN and mailer:
-                d = mailer.create_draft(m.get("email"), tpl.get("subject", ""), tpl.get("body", ""))
+                d = mailer.create_draft(m.get("email"), subject, body)
                 link = d.get("webLink", "")
             sheets.update_fields("campaign_members", m["_row"], {
                 "draft_created": "TRUE", "draft_link": link, "content_version": cv,

@@ -43,7 +43,7 @@ def personalize(body, contact, timeout=30):
     key = os.environ.get("ANTHROPIC_API_KEY")
     if not key:
         return body
-    model = os.environ.get("ANTHROPIC_MODEL", "claude-3-5-haiku-latest")
+    model = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
     company = (contact.get("company") or "").strip() or "unknown"
     country = (contact.get("country") or "").strip() or "unknown"
     city = (contact.get("city") or "").strip() or "unknown"

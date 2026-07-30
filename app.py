@@ -191,8 +191,8 @@ def run_now(key):
     if key == "lead-gen":
         return redirect(f"{url}/trigger")
     return redirect(url)
-# ── Health / keep-alive ────────────────────────────────────────────────────────
-@app.route("/health")
+# ── Health / keep-alive ───────────────────────────────────────────────────────
+app.route("/health")
 def health():
     """Unauthenticated health-check used by keep-alive cron to prevent cold starts."""
     return {"status": "ok"}, 200
@@ -200,7 +200,7 @@ def health():
 def ping():
     """Alias of /health for compatibility with UptimeRobot / external monitors."""
     return "pong", 200
-# ── Entry point ────────────────────────────────────────────────────────────────
+# ── Entry point ─────────────────────────────────────────────────────
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     # Allow plain HTTP only for local dev
@@ -214,3 +214,6 @@ app.register_blueprint(campaigns_bp)
 # Engine HTTP triggers (test draft + scheduled draft/monitor)
 from engine_web import engine_bp
 app.register_blueprint(engine_bp)
+# Move-File Cost & Profit Audit dashboard
+from audit_web import audit_bp
+app.register_blueprint(audit_bp)

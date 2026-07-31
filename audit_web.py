@@ -240,9 +240,30 @@ def compute_metrics(files):
 @audit_bp.route("/audit")
 @_login_required
 def audit():
-    files = reconcile(load_move_files())
+    demo = True
+    try:
+        import mw_live
+        live = mw_live.load_live_files()
+    except Exception:
+        live = None
+    if live:
+        files = reconcile(live)
+        demo = False
+    else:
+        files = reconcile(load_move_files())
     m = compute_metrics(files)
-    return render_template_string(TEMPLATE, m=m, demo=DEMO)
+    return render_template_string(TEMPLATE, m=m, demo=demo)
+
+
+@audit_bp.route("/audit/raw")
+@_login_required
+def audit_raw():
+    from flask import jsonify
+    try:
+        import mw_live
+        return jsonify(mw_live.raw_sample())
+    except Exception as e:
+        return jsonify({"error": str(e)})
 
 
 TEMPLATE = r"""<!DOCTYPE html>

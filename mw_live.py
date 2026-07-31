@@ -29,9 +29,10 @@ _CACHE = {"at": 0.0, "data": None}
 _CACHE_TTL = 600  # seconds
 _MAX_JOBS = 25    # cap the first live pull for speed
  
-# Env-driven base URL; defaults to UAT for safety.
+# Env-driven base URL; defaults to PRODUCTION. Override with MOVEWARE_URL to
+# point at UAT (https://rest.moveconnect.com/movewareUAT/v1) for testing.
 BASE_URL = os.environ.get(
-    "MOVEWARE_URL", "https://rest.moveconnect.com/movewareUAT/v1"
+    "MOVEWARE_URL", "https://rest.moveconnect.com/Moveware/v1"
 ).rstrip("/")
  
  
@@ -140,75 +141,106 @@ def _map_job(job: dict) -> dict | None:
         return None
     job_id = str(job_id)
  
-    client = _code_text(_first(job, "transferee", "customer", default="")) or \
-        _first(job, "transfereeName", "customerName", default="")
-    if isinstance(_first(job, "transferee"), dict):
-        client = _first(job["transferee"], "name", "titleName", default=client)
+    # `job` here is the light list item. The rich job object (dates, services,
+    # method, status) comes back inside the quotes response, so pull that.
+    client = _first(job, "name", "transfereeName", "customerName", default="")
+    coordinator = _code_text(_first(job, "moveManager", default=""))
  
-    currency = _first(job, "currency", default="USD")
-    pack = _date(_first(job, "pack", "upliftStart", "estimatedMove"))
-    delivery = _date(_first(job, "deliveryStart", "estimatedDelivery"))
- 
-    # Quote (selected option) → sell + estimated cost + weight
     sell = est_cost = 0.0
-    declared = None
-    weight = None
+    declared = ins = weight = None
+    rich = {}
     try:
         qd = _get(f"/jobs/{job_id}/quotes")
         quotes = _first(qd, "quotes", default=[]) or []
-        option = None
-        for q in quotes:
-            for opt in (_first(q, "options", default=[]) or []):
-                if _first(opt, "selected") in (True, "true", 1):
-                    option = opt
+        if quotes:
+            q0 = quotes[0]
+            rich = _first(q0, "job", default={}) or {}
+            roles = _first(q0, "roles", default={}) or {}
+            if not client:
+                corp = _first(roles, "corporate", default={}) or {}
+                cust = _first(roles, "customer", default={}) or {}
+                client = _first(corp, "name") or _first(cust, "name") or ""
+            # Selected quote option carries the sell price + measurements.
+            option = None
+            for q in quotes:
+                for opt in (_first(q, "options", default=[]) or []):
+                    if _first(opt, "selected") in (True, "true", 1):
+                        option = opt
+                        break
+                if option:
                     break
+            if option is None:
+                opts = _first(q0, "options", default=[]) or []
+                option = opts[0] if opts else None
             if option:
-                break
-        if option is None and quotes:
-            opts = _first(quotes[0], "options", default=[]) or []
-            option = opts[0] if opts else None
-        if option:
-            weight = _weight_from_measurements(_first(option, "measurements"))
-            for ch in (_first(option, "charges", default=[]) or []):
-                val = _num(_first(ch, "value"))
-                if _classify_charge(ch) == "cost":
-                    est_cost += val
-                else:
-                    sell += val
-                desc = (_first(ch, "description", "details", default="") or "").lower()
-                if "insur" in desc or "valuation" in desc:
-                    declared = _num(_first(ch, "value")) or declared
+                # Sell = option's tax-inclusive value (charges[] is the line
+                # breakdown; sum it for cost lines when present).
+                sell = _num(_first(option, "valueInc", "value", "valueEx"))
+                weight = _weight_from_measurements(
+                    _first(option, "measurements") or _first(q0, "measurements")
+                )
+                for ch in (_first(option, "charges", default=[]) or []):
+                    if _classify_charge(ch) == "cost":
+                        est_cost += _num(_first(ch, "value", "valueInc"))
     except Exception:
         pass
  
-    # Invoices → invoiced amount
+    src = rich or job
+ 
+    # Dates live under job.dates.{uplift,delivery}.date (fallback to list item).
+    dates = _first(src, "dates", default={}) or {}
+    pack = _date(_first(_first(dates, "uplift", default={}) or {}, "date")) or \
+        _date(_first(job, "uplift", "pack", "estimatedMove"))
+    delivery = _date(_first(_first(dates, "delivery", default={}) or {}, "date")) or \
+        _date(_first(job, "delivery", "deliveryStart", "estimatedDelivery"))
+ 
+    # Insurance / declared value from job.services.insurance.
+    services = _first(src, "services", default={}) or {}
+    ins_obj = _first(services, "insurance", default={}) or {}
+    declared = _num(_first(ins_obj, "value")) or None
+    ins = _num(_first(ins_obj, "premium")) or None
+    if not coordinator:
+        mgr = _first(src, "moveManager", default="")
+        coordinator = _code_text(mgr)
+ 
+    # Invoices → invoiced amount.
     invoiced_amt = 0.0
     invoiced = False
     try:
         inv = _get(f"/jobs/{job_id}/invoices")
-        invoices = _first(inv, "invoices", default=[]) or []
-        for it in invoices:
+        for it in (_first(inv, "invoices", default=[]) or []):
             invoiced_amt += _num(_first(it, "value", "total", "amount"))
         invoiced = invoiced_amt > 0
     except Exception:
         pass
  
-    # Actual cost — best available signal now: estimated cost (refined once
-    # /account cost lines are confirmed). Never invents a number.
-    actual_cost = est_cost
+    # Actual cost from the account (creditor/AP) endpoint when present.
+    actual_cost = 0.0
+    try:
+        acc = _get(f"/jobs/{job_id}/account")
+        for a in (_first(acc, "account", default=[]) or []):
+            actual_cost += _num(_first(a, "value", "amount", "total", "cost"))
+    except Exception:
+        pass
+    # If no creditor lines yet, fall back to estimated cost (flagged downstream
+    # as a gap rather than invented profit).
+    if actual_cost == 0:
+        actual_cost = est_cost
+ 
+    mode = _mode(src if src else job)
  
     return {
         "job": job_id,
         "client": client or "",
-        "mode": _mode(job),
+        "mode": mode,
         "est": round(est_cost, 2),
         "act": round(actual_cost, 2),
         "sell": round(sell, 2),
         "inv_amt": round(invoiced_amt, 2),
         "invoiced": invoiced,
         "declared": declared,
-        "ins": None,
-        "coordinator": _code_text(_first(job, "moveManager", default="")),
+        "ins": ins,
+        "coordinator": coordinator,
         "agent": None,
         "pack": pack,
         "delivery": delivery,
@@ -229,15 +261,12 @@ def load_live_files():
             return None
         mapped = []
         for job in jobs[:_MAX_JOBS]:
-            # list items may be light; fetch full job if it lacks fields
-            jid = _first(job, "id", "jobId", "jobNumber", "jobFile")
-            full = job
-            if jid and not _first(job, "transferee", "currency"):
-                try:
-                    full = _get(f"/jobs/{jid}")
-                except Exception:
-                    full = job
-            m = _map_job(full)
+            # _map_job pulls the rich job object from the quotes response,
+            # so the light list item is enough to start from.
+            try:
+                m = _map_job(job)
+            except Exception:
+                m = None
             if m:
                 mapped.append(m)
         if not mapped:

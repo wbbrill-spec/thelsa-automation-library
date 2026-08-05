@@ -217,3 +217,6 @@ app.register_blueprint(engine_bp)
 # Move-File Cost & Profit Audit dashboard
 from audit_web import audit_bp
 app.register_blueprint(audit_bp)
+# FAIM Move-File Quality Audit dashboard (in-app, reuses the library Google login)
+from faim_web import faim_bp
+app.register_blueprint(faim_bp)

@@ -220,3 +220,7 @@ app.register_blueprint(audit_bp)
 # FAIM Move-File Quality Audit dashboard (in-app, reuses the library Google login)
 from faim_web import faim_bp
 app.register_blueprint(faim_bp)
+
+# FAIM dashboard, in-app
+from faim_web import faim_bp
+app.register_blueprint(faim_bp)

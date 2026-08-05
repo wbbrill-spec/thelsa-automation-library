@@ -221,6 +221,3 @@ app.register_blueprint(audit_bp)
 from faim_web import faim_bp
 app.register_blueprint(faim_bp)
 
-# FAIM dashboard, in-app
-from faim_web import faim_bp
-app.register_blueprint(faim_bp)

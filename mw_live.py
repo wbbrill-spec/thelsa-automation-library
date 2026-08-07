@@ -147,6 +147,12 @@ def _map_job(job: dict) -> dict | None:
     coordinator = _code_text(_first(job, "moveManager", default=""))
  
     sell = est_cost = 0.0
+    # Internal-recalculation inputs: the selected option's header value (sell)
+    # should equal the sum of its charge lines. We capture the line total and
+    # the line count so audit_web.check_calculations() can verify "revenue adds
+    # up" and only assert it when line items are actually present.
+    charge_lines_total = 0.0
+    n_charge_lines = 0
     declared = ins = weight = None
     rich = {}
     try:
@@ -180,8 +186,11 @@ def _map_job(job: dict) -> dict | None:
                     _first(option, "measurements") or _first(q0, "measurements")
                 )
                 for ch in (_first(option, "charges", default=[]) or []):
+                    cval = _num(_first(ch, "value", "valueInc"))
+                    charge_lines_total += cval
+                    n_charge_lines += 1
                     if _classify_charge(ch) == "cost":
-                        est_cost += _num(_first(ch, "value", "valueInc"))
+                        est_cost += cval
     except Exception:
         pass
  
@@ -244,6 +253,19 @@ def _map_job(job: dict) -> dict | None:
         "agent": None,
         "pack": pack,
         "delivery": delivery,
+        # Internal-recalculation inputs (revenue side). rev_reported is the
+        # selected option's header value; rev_lines is the sum of that option's
+        # charge lines. When n_rev_lines == 0 the check is skipped (no lines to
+        # add up), so files without a line breakdown never produce false flags.
+        "rev_reported": round(sell, 2),
+        "rev_lines": round(charge_lines_total, 2),
+        "n_rev_lines": n_charge_lines,
+        # Cost side: `act` (actual/creditor total) is itself the sum of account
+        # lines, so there is no separate header to recalc against yet. cost_lines
+        # mirrors est (sum of cost-classified quote charges) for the quote->actual
+        # cost comparison; a true cost internal-recalc needs a cost header field
+        # confirmed via /audit/raw.
+        "cost_lines": round(est_cost, 2),
     }
  
  

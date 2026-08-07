@@ -85,6 +85,14 @@ def load_move_files():
     for i, r in enumerate(rows, 1):
         (client, mode, est, act, sell, inv_amt, invoiced, declared, ins,
          coord, agent, pack, delivery) = r
+        # Demo-only: seed a couple of intentional "revenue doesn't add up"
+        # mismatches so the calculation-accuracy section is visibly populated.
+        # Live data supplies rev_reported / rev_lines from real charge lines.
+        rev_lines = sell
+        if i == 2:
+            rev_lines = sell - 300      # reported header is 300 over the line items
+        elif i == 7:
+            rev_lines = sell + 150      # reported header is 150 under the line items
         files.append({
             "job": f"11{i:04d}", "client": client, "mode": mode,
             "est": est, "act": act, "sell": sell,
@@ -92,6 +100,8 @@ def load_move_files():
             "declared": declared, "ins": ins or None,
             "coordinator": coord, "agent": agent,
             "pack": d(pack), "delivery": d(delivery),
+            "rev_reported": sell, "rev_lines": rev_lines, "n_rev_lines": 4,
+            "cost_lines": est,
         })
     return files
 
@@ -149,6 +159,75 @@ def reconcile(files):
             f["stage"] = "closed" if f["invoiced"] else "resolved"
         else:
             f["stage"] = "gap_flagged"
+    return files
+
+
+# ── Calculation-accuracy check (revenue & cost) ──────────────────────────────────
+# For every ACTIVE file, verify the revenue and cost figures are accurately
+# calculated. Two lenses, per spec ("both"):
+#   1. Internal recalculation  — does each figure add up from its own line items?
+#   2. Quote-to-invoice recon  — do the figures agree across the chain
+#      (quoted sell → client invoice, quoted cost → actual/supplier cost)?
+# Any non-zero difference beyond half-a-cent float noise is flagged; the file's
+# responsible move coordinator is alerted (draft, see coordinator_alerts.py) and
+# the amount rolls up into the "discrepancy by coordinator" dashboard metric.
+CALC_EPS = 0.005
+
+
+def _disc_active(f):
+    # Mirror compute_metrics' notion of "active" (anything not fully closed).
+    return f.get("stage") != "closed"
+
+
+def check_calculations(files):
+    """Attach `disc_flags` (list) and `disc_value` (float) to each file.
+
+    disc_flags entries: {type, label, expected, found, diff}. disc_value is the
+    summed absolute discrepancy across all flags on that file. Only active files
+    are checked; closed files get an empty result.
+    """
+    for f in files:
+        flags = []
+        if _disc_active(f):
+            # 1a) Revenue internal recalculation: the reported revenue header must
+            #     equal the sum of its charge line items. Skipped when no line
+            #     items are available (n_rev_lines == 0) so we never invent a flag
+            #     on files that simply lack a breakdown.
+            rev_rep = f.get("rev_reported")
+            rev_lines = f.get("rev_lines")
+            if f.get("n_rev_lines", 0) and rev_rep is not None and rev_lines is not None:
+                diff = round(rev_rep - rev_lines, 2)
+                if abs(diff) > CALC_EPS:
+                    flags.append({
+                        "type": "revenue_not_summing",
+                        "label": "Revenue total ≠ sum of line items",
+                        "expected": round(rev_lines, 2), "found": round(rev_rep, 2),
+                        "diff": diff,
+                    })
+            # 1b) Revenue quote-to-invoice: the client-invoiced total must equal
+            #     the quoted/agreed sell price.
+            if f.get("invoiced") and f.get("inv_amt", 0):
+                diff = round(f["inv_amt"] - f["sell"], 2)
+                if abs(diff) > CALC_EPS:
+                    flags.append({
+                        "type": "invoiced_vs_quoted",
+                        "label": "Invoiced amount ≠ quoted revenue",
+                        "expected": round(f["sell"], 2), "found": round(f["inv_amt"], 2),
+                        "diff": diff,
+                    })
+            # 2) Cost quote-to-actual: the actual/supplier cost must equal the
+            #    quoted (estimated) cost. Only asserted when both are present.
+            if f.get("est", 0) and f.get("act", 0):
+                diff = round(f["act"] - f["est"], 2)
+                if abs(diff) > CALC_EPS:
+                    flags.append({
+                        "type": "cost_quote_vs_actual",
+                        "label": "Actual cost ≠ quoted cost",
+                        "expected": round(f["est"], 2), "found": round(f["act"], 2),
+                        "diff": diff,
+                    })
+        f["disc_flags"] = flags
+        f["disc_value"] = round(sum(abs(g["diff"]) for g in flags), 2)
     return files
 
 
@@ -219,6 +298,32 @@ def compute_metrics(files):
         key=lambda r: (-r["open_gaps"], r["margin"]),
     )
 
+    # ── Calculation-accuracy discrepancies by move coordinator (active files) ──
+    disc_by_coord = {}
+    disc_files = 0
+    for f in active:
+        dv = f.get("disc_value", 0) or 0
+        c = f.get("coordinator") or "Unassigned"
+        entry = disc_by_coord.setdefault(c, {"coordinator": c, "value": 0.0, "files": 0})
+        if dv > 0:
+            disc_files += 1
+            entry["value"] += dv
+            entry["files"] += 1
+    by_coordinator_disc = sorted(
+        [{"coordinator": e["coordinator"], "value": round(e["value"], 2), "files": e["files"]}
+         for e in disc_by_coord.values() if e["files"]],
+        key=lambda r: -r["value"],
+    )
+    total_disc = round(sum(e["value"] for e in by_coordinator_disc), 2)
+    disc_worklist = sorted(
+        [{"job": f["job"], "client": f["client"],
+          "coordinator": f.get("coordinator") or "Unassigned",
+          "value": f.get("disc_value", 0),
+          "types": ", ".join(sorted({g["label"] for g in f.get("disc_flags", [])}))}
+         for f in active if f.get("disc_value", 0) > 0],
+        key=lambda r: -r["value"],
+    )
+
     return {
         "as_of": today.isoformat(),
         "total_active": len(active), "by_stage": by_stage,
@@ -233,14 +338,16 @@ def compute_metrics(files):
         "tot_rev": round(tot_rev), "tot_cost": round(tot_cost), "tot_profit": round(tot_profit),
         "gross_margin": gross_margin, "neg": neg, "leakage": leakage,
         "modes": modes, "ins_flags": ins_flags, "worklist": worklist,
+        "total_disc": total_disc, "disc_files": disc_files,
+        "coords_affected": len(by_coordinator_disc),
+        "by_coordinator_disc": by_coordinator_disc, "disc_worklist": disc_worklist,
     }
 
 
 # ── Route ───────────────────────────────────────────────────────────────────────
-@audit_bp.route("/audit")
-@_login_required
-def audit():
-    demo = True
+def _load_checked():
+    """Return (files, is_live). Files are reconciled + calculation-checked."""
+    live = None
     try:
         import mw_live
         live = mw_live.load_live_files()
@@ -248,11 +355,48 @@ def audit():
         live = None
     if live:
         files = reconcile(live)
-        demo = False
+        is_live = True
     else:
         files = reconcile(load_move_files())
+        is_live = False
+    check_calculations(files)
+    return files, is_live
+
+
+@audit_bp.route("/audit")
+@_login_required
+def audit():
+    files, is_live = _load_checked()
     m = compute_metrics(files)
-    return render_template_string(TEMPLATE, m=m, demo=demo)
+    return render_template_string(TEMPLATE, m=m, demo=not is_live)
+
+
+@audit_bp.route("/audit/alerts")
+@_login_required
+def audit_alerts_preview():
+    """Preview the coordinator discrepancy alerts. Creates nothing."""
+    from flask import jsonify
+    import coordinator_alerts as ca
+    files, is_live = _load_checked()
+    return jsonify({
+        "live": is_live,
+        "enabled": ca.alerts_enabled(),
+        "note": ("Preview only — no drafts created. Drafts are created via POST "
+                 "/audit/alerts/draft, and only when AUDIT_ALERTS_ENABLED=1, "
+                 "DRY_RUN!=1, and the data is live."),
+        "cc": ca._cc_list(),
+        "alerts": ca.build_alerts(files),
+    })
+
+
+@audit_bp.route("/audit/alerts/draft", methods=["POST"])
+@_login_required
+def audit_alerts_draft():
+    """Create one review-ready DRAFT per coordinator (gated; never sends)."""
+    from flask import jsonify
+    import coordinator_alerts as ca
+    files, is_live = _load_checked()
+    return jsonify(ca.create_drafts(files, live=is_live))
 
 
 @audit_bp.route("/audit/raw")
@@ -350,6 +494,30 @@ TEMPLATE = r"""<!DOCTYPE html>
       <table style="border:none"><tr><th>Mode</th><th>Files</th><th>Profit</th><th>Margin</th></tr>
       {% for mode,d in m.modes.items() %}<tr><td>{{ mode }}</td><td class="num">{{ d.files }}</td><td class="num">{{ "{:,.0f}".format(d.profit) }}</td><td class="num">{{ d.margin }}%</td></tr>{% endfor %}</table></div>
   </div>
+  <h2>Calculation Accuracy — Revenue &amp; Cost</h2>
+  <div class="grid g4">
+    <div class="tile"><div class="label">Total discrepancy</div><div class="value num {{ 'bad' if m.total_disc else 'good' }}">{{ "{:,.0f}".format(m.total_disc) }}</div><div class="sub">across active files</div></div>
+    <div class="tile"><div class="label">Files with discrepancies</div><div class="value num {{ 'bad' if m.disc_files else 'good' }}">{{ m.disc_files }}</div><div class="sub">revenue/cost not reconciling</div></div>
+    <div class="tile"><div class="label">Coordinators affected</div><div class="value num {{ 'warn' if m.coords_affected else 'good' }}">{{ m.coords_affected }}</div><div class="sub">each alerted by draft</div></div>
+    <div class="tile"><div class="label">Checks applied</div><div class="value num">3</div><div class="sub">recalc · quote↔invoice · quote↔cost</div></div>
+  </div>
+  <div class="row" style="margin-top:12px">
+    <div class="tile" style="flex:1;min-width:320px"><div class="label" style="margin-bottom:8px">Total discrepancy by move coordinator <span style="color:var(--muted)">· amount · # files</span></div>
+      {% if m.by_coordinator_disc %}
+      <div class="bars">{% set mxd = (m.by_coordinator_disc[0].value if m.by_coordinator_disc else 1) or 1 %}
+      {% for c in m.by_coordinator_disc %}<div class="bar"><span style="width:150px">{{ c.coordinator }}</span>
+        <span class="track"><span class="fill" style="width:{{ (c.value/mxd*100)|round(0) }}%"></span></span>
+        <span class="num" style="width:120px;text-align:right">{{ "{:,.0f}".format(c.value) }} <span style="color:var(--muted)">· {{ c.files }}</span></span></div>{% endfor %}</div>
+      {% else %}<div class="sub good">No revenue/cost discrepancies on active files. ✓</div>{% endif %}
+    </div>
+  </div>
+  {% if m.disc_worklist %}
+  <table style="margin-top:12px"><tr><th>Job</th><th>Client</th><th>Coordinator</th><th>Discrepancy type(s)</th><th>Amount</th></tr>
+  {% for r in m.disc_worklist %}<tr>
+    <td class="num">{{ r.job }}</td><td>{{ r.client }}</td><td>{{ r.coordinator }}</td>
+    <td>{{ r.types }}</td><td class="num bad">{{ "{:,.0f}".format(r.value) }}</td></tr>{% endfor %}</table>
+  {% endif %}
+
   <h2>Files Needing Attention</h2>
   <table><tr><th>Job</th><th>Client</th><th>Mode</th><th>Stage</th><th>Margin</th><th>Actual profit</th><th>Open gaps</th><th>Gap value</th></tr>
   {% for r in m.worklist %}<tr>

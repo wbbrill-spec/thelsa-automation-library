@@ -339,7 +339,7 @@ h1{font-size:22px;margin:0 0 2px}
 .card .note{font-size:12px;color:var(--muted);margin:0 0 16px}
 .tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-top:18px}
 .tile{background:var(--surface-1);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
-.tile .label{font-size:12px;color:var--text-secondary);margin:0}
+.tile .label{font-size:12px;color:var(--text-secondary);margin:0}
 .tile .val{font-size:30px;font-weight:650;margin:6px 0 0;letter-spacing:-.01em}
 .tile .sub2{font-size:12px;color:var(--muted);margin-top:4px}
 .bars{display:flex;flex-direction:column;gap:11px}

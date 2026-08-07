@@ -2,22 +2,25 @@
 faim_web.py — FAIM Move-File Quality Audit dashboard for the Thelsa
 Automation Library.
 
-Adds a single login-gated route, /faim, that renders the FAIM 3.4 coordinator
-compliance dashboard INSIDE the library, reusing the library's Google session
-(session["user_email"]). This means NO second sign-in — it matches the in-app
-pattern used by audit_web.py / campaigns.py.
-
-Wiring (app.py):
-    from faim_web import faim_bp
-    app.register_blueprint(faim_bp)
+Login-gated /faim route (reuses the library's Google session — no second
+sign-in), matching audit_web.py / campaigns.py.
 
 DATA SOURCE
 -----------
-SAMPLE_METRICS below is v1 sample data so the dashboard is populated at /faim
-immediately. To go live, replace the body of faim_metrics() with a live Moveware
-pull (GET /jobs + details) evaluated against the FAIM rule logic, returning the
-same JSON shape the dashboard consumes.
+/faim/api/metrics returns LIVE Moveware compliance metrics when credentials are
+present (via mw_live), and falls back to SAMPLE_METRICS otherwise — so the page
+can never break.
+
+This is a FIRST live cut. It evaluates the FAIM criteria that are reliably
+derivable from the fields mw_live already maps, WITHOUT extra per-file API calls:
+  • MS2.6 Invoicing  — invoice within 30 calendar days of delivery
+  • MS5.1 Insurance  — transit-insurance cover recorded on the file (offer proxy)
+The remaining criteria (MS2.1 quote timing, MS2.3 doc transmission, MS2.4/2.5
+delivery evidence, MS1.4 documentation) need the documents/invoices sub-resource
+endpoints still being confirmed with Moveware — see Moveware-Contact-Questions.md.
+Use /faim/raw to inspect the real live structure, then widen the ruleset here.
 """
+import datetime as dt
 import functools
 
 from flask import (
@@ -31,6 +34,13 @@ from flask import (
 
 faim_bp = Blueprint("faim", __name__)
 
+# Reuse the proven Moveware connection from the Cost & Profit Audit.
+try:
+    import mw_live
+    _HAVE_MW = True
+except Exception:
+    _HAVE_MW = False
+
 
 # ── auth shim (reuses the app's session gate; avoids circular import) ────────────
 def _login_required(f):
@@ -43,9 +53,9 @@ def _login_required(f):
     return wrapped
 
 
-# ── Data source (swap this for the live Moveware pull) ──────────────────────────
+# ── Sample fallback (shown when creds/data/live pull are unavailable) ────────────
 SAMPLE_METRICS = {
-    "generatedNote": "SAMPLE data — replace /faim/api/metrics with a live Moveware pull to go live.",
+    "generatedNote": "SAMPLE data — live Moveware pull inactive (no creds or no data returned).",
     "window": "rolling 90 days",
     "passBar": 80,
     "tiles": {
@@ -84,6 +94,119 @@ SAMPLE_METRICS = {
 }
 
 
+# ── Live FAIM evaluation (defensive; reuses mw_live's cached mapped files) ────────
+def _pct(p, a):
+    return round(100 * p / a) if a else 0
+
+
+def _faim_live_metrics():
+    """Build live FAIM metrics, or return None to signal fallback to sample."""
+    if not _HAVE_MW or not mw_live.have_creds():
+        return None
+    try:
+        files = mw_live.load_live_files()  # proven pull, cached, capped
+    except Exception:
+        return None
+    if not files:
+        return None
+
+    today = dt.date.today()
+    coord_pass, coord_app = {}, {}
+    crit_pass, crit_app = {}, {}
+    breaches = []
+    active_files = 0
+    at_risk = 0
+
+    for f in files:
+        coord = (f.get("coordinator") or "").strip() or "Unassigned"
+        client = (f.get("client") or "").strip() or f.get("job", "")
+        delivery = f.get("delivery")
+        invoiced = bool(f.get("invoiced"))
+        ins = f.get("ins")
+        declared = f.get("declared")
+
+        if not invoiced:
+            active_files += 1
+
+        results = {}  # criterion label -> "pass" | "breach" | "atrisk"
+
+        # MS2.6 Invoicing — invoice within 30 CALENDAR days of final delivery.
+        if delivery:
+            if invoiced:
+                results["MS2.6 Invoicing"] = "pass"
+            else:
+                overdue = (today - delivery).days - 30
+                if overdue > 0:
+                    results["MS2.6 Invoicing"] = "breach"
+                    breaches.append({
+                        "file": str(f.get("job", "")), "cust": client,
+                        "rule": "MS2.6 Invoicing", "coord": coord,
+                        "days": f"{overdue} d overdue", "sev": "crit", "_age": overdue + 100,
+                    })
+                elif (today - delivery).days >= 25:
+                    results["MS2.6 Invoicing"] = "atrisk"
+                    at_risk += 1
+                    breaches.append({
+                        "file": str(f.get("job", "")), "cust": client,
+                        "rule": "MS2.6 Invoicing (due soon)", "coord": coord,
+                        "days": f"{30 - (today - delivery).days} d left", "sev": "warn", "_age": 10,
+                    })
+                else:
+                    results["MS2.6 Invoicing"] = "pass"  # within window, not yet due
+
+        # MS5.1 Insurance — transit-insurance cover recorded on the file (offer proxy).
+        has_ins = bool((ins and ins > 0) or (declared and declared > 0))
+        results["MS5.1 Insurance offer"] = "pass" if has_ins else "breach"
+        if not has_ins:
+            breaches.append({
+                "file": str(f.get("job", "")), "cust": client,
+                "rule": "MS5.1 Insurance offer evidence", "coord": coord,
+                "days": "no cover on file", "sev": "warn", "_age": 5,
+            })
+
+        for crit, status in results.items():
+            crit_app[crit] = crit_app.get(crit, 0) + 1
+            coord_app[coord] = coord_app.get(coord, 0) + 1
+            if status == "pass":
+                crit_pass[crit] = crit_pass.get(crit, 0) + 1
+                coord_pass[coord] = coord_pass.get(coord, 0) + 1
+
+    by_criterion = sorted(
+        [{"name": c, "v": _pct(crit_pass.get(c, 0), crit_app[c])} for c in crit_app],
+        key=lambda x: -x["v"],
+    )
+    by_coordinator = sorted(
+        [{"name": c, "v": _pct(coord_pass.get(c, 0), coord_app[c])} for c in coord_app],
+        key=lambda x: -x["v"],
+    )
+    total_app = sum(crit_app.values())
+    total_pass = sum(crit_pass.values())
+
+    breaches.sort(key=lambda b: -b.get("_age", 0))
+    for b in breaches:
+        b.pop("_age", None)
+
+    return {
+        "generatedNote": (
+            f"LIVE Moveware — company 64000 · {len(files)} files · "
+            "criteria evaluated: MS2.6 Invoicing, MS5.1 Insurance "
+            "(more added as sub-resource endpoints are confirmed)."
+        ),
+        "window": "live snapshot",
+        "passBar": 80,
+        "tiles": {
+            "overallCompliance": _pct(total_pass, total_app),
+            "overallTrendPts": 0,
+            "activeFiles": active_files,
+            "openBreaches": len([b for b in breaches if b["sev"] == "crit"]),
+            "atRisk": at_risk,
+        },
+        "byCoordinator": by_coordinator,
+        "byCriterion": by_criterion,
+        "breaches": breaches[:12],
+    }
+
+
 # ── Routes ──────────────────────────────────────────────────────────────────────
 @faim_bp.route("/faim")
 @_login_required
@@ -94,10 +217,26 @@ def faim():
 @faim_bp.route("/faim/api/metrics")
 @_login_required
 def faim_metrics():
-    # v1: sample data. Swap this body for a live Moveware pull (same JSON shape).
-    data = dict(SAMPLE_METRICS)
+    live = None
+    try:
+        live = _faim_live_metrics()
+    except Exception:
+        live = None
+    data = dict(live) if live else dict(SAMPLE_METRICS)
     data["viewer"] = session.get("user_email", "")
     return jsonify(data)
+
+
+@faim_bp.route("/faim/raw")
+@_login_required
+def faim_raw():
+    """Debug: raw Moveware structures, to confirm the live field mapping."""
+    if not _HAVE_MW:
+        return jsonify({"error": "mw_live not importable"})
+    try:
+        return jsonify(mw_live.raw_sample())
+    except Exception as e:
+        return jsonify({"error": str(e)})
 
 
 DASHBOARD_HTML = r"""<!DOCTYPE html>
@@ -173,7 +312,9 @@ td.num{font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
 </div>
 </header>
 <div id="sampleBanner" class="banner" style="display:none"></div>
+
 <div class="tiles" id="tiles"></div>
+
 <div class="cols2">
 <div class="card">
 <h2>Compliance by coordinator</h2>
@@ -191,6 +332,7 @@ td.num{font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
 <span class="k"><span class="sw" style="background:var(--critical)"></span> ⚠ Below pass bar</span>
 <span class="k"><span class="thr-key"></span> 80% FAIM pass bar</span>
 </div>
+
 <div class="card">
 <h2>Open breaches — oldest first</h2>
 <p class="note">Each has a coordinator alert and an auto-drafted follow-up waiting in the coordinator's Gmail drafts.</p>
@@ -228,7 +370,7 @@ bars(document.getElementById('byCoord'),d.byCoordinator||[]);
 bars(document.getElementById('byCrit'),d.byCriterion||[]);
 document.getElementById('breaches').innerHTML=(d.breaches||[]).map(b=>`
 <tr><td class="num">${b.file}</td><td>${b.cust}</td><td>${b.rule}</td><td>${b.coord}</td>
-<td class="num">${b.days}</td><td><span class="pill ${b.sev}">${b.sev==='crit'?'● Breached':'▲ At risk'}</span></td></tr>`).join('');
+<td class="num">${b.days}</td><td><span class="pill ${b.sev}">${b.sev==='crit'<,�● Breached':'▲ At risk'}</span></td></tr>`).join('');
 document.getElementById('foot').textContent='Compliance is computed per file against the FAIM 3.4 move-file ruleset; the 80% line is the FAIM auditor sample pass bar shown for reference.';
 }
 load();

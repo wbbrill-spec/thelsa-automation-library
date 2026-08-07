@@ -22,6 +22,9 @@ Use /faim/raw to inspect the real live structure, then widen the ruleset here.
 """
 import datetime as dt
 import functools
+import json
+import time
+import urllib.request
 
 from flask import (
     Blueprint,
@@ -94,75 +97,140 @@ SAMPLE_METRICS = {
 }
 
 
-# ── Live FAIM evaluation (defensive; reuses mw_live's cached mapped files) ────────
+# ── Live FAIM evaluation ─────────────────────────────────────────────────────────
+# Lean, timeout-safe: one /jobs call + one /quotes call per job (which carries the
+# rich job: coordinator, insurance, dates, status, quote options). A hard wall-clock
+# budget guarantees the request returns before the web-server worker timeout, and a
+# short per-call timeout means a slow Moveware call fails fast instead of hanging.
+_LIVE_CACHE = {"at": 0.0, "data": None}
+_LIVE_TTL = 600            # seconds
+_ENRICH_BUDGET = 15.0      # seconds of per-job enrichment before we stop and return
+_MAX_JOBS = 15
+
+
 def _pct(p, a):
     return round(100 * p / a) if a else 0
+
+
+def _mw_get(path, timeout=6):
+    url = mw_live.BASE_URL + "/" + path.lstrip("/")
+    req = urllib.request.Request(url, headers=mw_live._headers(), method="GET")
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _g(d, *keys, default=""):
+    if not isinstance(d, dict):
+        return default
+    for k in keys:
+        if d.get(k) not in (None, ""):
+            return d[k]
+    return default
+
+
+def _num(v):
+    try:
+        return float(str(v).replace(",", "").replace("$", "").strip() or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _date_only(v):
+    v = str(v or "")[:10]
+    if len(v) == 10 and v[4] == "-":
+        try:
+            return dt.date.fromisoformat(v)
+        except ValueError:
+            return None
+    return None
+
+
+def _wd(d1, d2):
+    if not d1 or not d2 or d2 <= d1:
+        return 0
+    n, cur = 0, d1
+    while cur < d2:
+        cur += dt.timedelta(days=1)
+        if cur.weekday() < 5:
+            n += 1
+    return n
 
 
 def _faim_live_metrics():
     """Build live FAIM metrics, or return None to signal fallback to sample."""
     if not _HAVE_MW or not mw_live.have_creds():
         return None
+    now = time.time()
+    if _LIVE_CACHE["data"] is not None and now - _LIVE_CACHE["at"] < _LIVE_TTL:
+        return _LIVE_CACHE["data"]
     try:
-        files = mw_live.load_live_files()  # proven pull, cached, capped
+        data = _mw_get("/jobs", timeout=8)
     except Exception:
         return None
-    if not files:
+    jobs = data.get("jobs") if isinstance(data, dict) else None
+    if not jobs:
         return None
 
     today = dt.date.today()
+    start = time.time()
     coord_pass, coord_app = {}, {}
     crit_pass, crit_app = {}, {}
     breaches = []
-    active_files = 0
-    at_risk = 0
+    evaluated = 0
+    skipped = 0
 
-    for f in files:
-        coord = (f.get("coordinator") or "").strip() or "Unassigned"
-        client = (f.get("client") or "").strip() or f.get("job", "")
-        delivery = f.get("delivery")
-        invoiced = bool(f.get("invoiced"))
-        ins = f.get("ins")
-        declared = f.get("declared")
+    for j in jobs[:_MAX_JOBS]:
+        if time.time() - start > _ENRICH_BUDGET:
+            skipped += 1
+            continue
+        jid = str(_g(j, "id", "jobId", "jobNumber"))
+        if not jid or str(_g(j, "status")).upper() == "C":  # skip cancelled
+            continue
+        try:
+            qd = _mw_get(f"/jobs/{jid}/quotes", timeout=6)
+        except Exception:
+            continue
+        quotes = qd.get("quotes") if isinstance(qd, dict) else None
+        q0 = quotes[0] if quotes else {}
+        rich = q0.get("job", {}) if isinstance(q0, dict) else {}
+        roles = q0.get("roles", {}) if isinstance(q0, dict) else {}
 
-        if not invoiced:
-            active_files += 1
+        if str(_g(rich.get("jobStatus", {}), "code")).upper() == "C":
+            continue
 
-        results = {}  # criterion label -> "pass" | "breach" | "atrisk"
+        coord = _g(roles.get("manager", {}), "name") or _g(j, "moveManager") or "Unassigned"
+        client = _g(rich, "name") or _g(j, "name") or jid
+        dates = rich.get("dates", {}) if isinstance(rich, dict) else {}
+        survey = _date_only(_g(dates.get("survey", {}), "date"))
+        ins = rich.get("services", {}).get("insurance", {}) if isinstance(rich.get("services"), dict) else {}
+        has_ins = any(
+            str(ins.get(k, "")).strip() not in ("", "0", "0.00")
+            for k in ("type", "value", "premium", "insurerCode")
+        )
+        options = q0.get("options", []) if isinstance(q0, dict) else []
+        quote_priced = any(_num(_g(o, "valueInc", "value")) > 0 for o in options)
 
-        # MS2.6 Invoicing — invoice within 30 CALENDAR days of final delivery.
-        if delivery:
-            if invoiced:
-                results["MS2.6 Invoicing"] = "pass"
-            else:
-                overdue = (today - delivery).days - 30
-                if overdue > 0:
-                    results["MS2.6 Invoicing"] = "breach"
-                    breaches.append({
-                        "file": str(f.get("job", "")), "cust": client,
-                        "rule": "MS2.6 Invoicing", "coord": coord,
-                        "days": f"{overdue} d overdue", "sev": "crit", "_age": overdue + 100,
-                    })
-                elif (today - delivery).days >= 25:
-                    results["MS2.6 Invoicing"] = "atrisk"
-                    at_risk += 1
-                    breaches.append({
-                        "file": str(f.get("job", "")), "cust": client,
-                        "rule": "MS2.6 Invoicing (due soon)", "coord": coord,
-                        "days": f"{30 - (today - delivery).days} d left", "sev": "warn", "_age": 10,
-                    })
-                else:
-                    results["MS2.6 Invoicing"] = "pass"  # within window, not yet due
+        evaluated += 1
+        results = {}
 
         # MS5.1 Insurance — transit-insurance cover recorded on the file (offer proxy).
-        has_ins = bool((ins and ins > 0) or (declared and declared > 0))
         results["MS5.1 Insurance offer"] = "pass" if has_ins else "breach"
         if not has_ins:
-            breaches.append({
-                "file": str(f.get("job", "")), "cust": client,
-                "rule": "MS5.1 Insurance offer evidence", "coord": coord,
-                "days": "no cover on file", "sev": "warn", "_age": 5,
-            })
+            breaches.append({"file": jid, "cust": client, "rule": "MS5.1 Insurance offer evidence",
+                             "coord": coord, "days": "no cover on file", "sev": "warn", "_age": 5})
+
+        # MS2.1 Quotation — a priced quote must exist within 4 working days of survey.
+        if survey:
+            if quote_priced:
+                results["MS2.1 Quote timely"] = "pass"
+            else:
+                elapsed = _wd(survey, today)
+                if elapsed > 4:
+                    results["MS2.1 Quote timely"] = "breach"
+                    breaches.append({"file": jid, "cust": client, "rule": "MS2.1 Quotation not issued",
+                                     "coord": coord, "days": f"{elapsed} WD since survey", "sev": "crit", "_age": elapsed + 50})
+                else:
+                    results["MS2.1 Quote timely"] = "pass"
 
         for crit, status in results.items():
             crit_app[crit] = crit_app.get(crit, 0) + 1
@@ -170,6 +238,9 @@ def _faim_live_metrics():
             if status == "pass":
                 crit_pass[crit] = crit_pass.get(crit, 0) + 1
                 coord_pass[coord] = coord_pass.get(coord, 0) + 1
+
+    if evaluated == 0:
+        return None
 
     by_criterion = sorted(
         [{"name": c, "v": _pct(crit_pass.get(c, 0), crit_app[c])} for c in crit_app],
@@ -186,25 +257,32 @@ def _faim_live_metrics():
     for b in breaches:
         b.pop("_age", None)
 
-    return {
-        "generatedNote": (
-            f"LIVE Moveware — company 64000 · {len(files)} files · "
-            "criteria evaluated: MS2.6 Invoicing, MS5.1 Insurance "
-            "(more added as sub-resource endpoints are confirmed)."
-        ),
+    note = (
+        f"LIVE Moveware — company 64000 · {evaluated} active files evaluated "
+        "· criteria: MS5.1 Insurance, MS2.1 Quotation "
+        "(more added as documents/invoices endpoints are confirmed)."
+    )
+    if skipped:
+        note += f" [{skipped} files deferred this load for speed]"
+
+    result = {
+        "generatedNote": note,
         "window": "live snapshot",
         "passBar": 80,
         "tiles": {
             "overallCompliance": _pct(total_pass, total_app),
             "overallTrendPts": 0,
-            "activeFiles": active_files,
+            "activeFiles": evaluated,
             "openBreaches": len([b for b in breaches if b["sev"] == "crit"]),
-            "atRisk": at_risk,
+            "atRisk": len([b for b in breaches if b["sev"] == "warn"]),
         },
         "byCoordinator": by_coordinator,
         "byCriterion": by_criterion,
         "breaches": breaches[:12],
     }
+    _LIVE_CACHE["data"] = result
+    _LIVE_CACHE["at"] = time.time()
+    return result
 
 
 # ── Routes ──────────────────────────────────────────────────────────────────────
@@ -341,8 +419,10 @@ td.num{font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
 <tbody id="breaches"></tbody>
 </table>
 </div>
+
 <p class="foot" id="foot"></p>
 </div>
+
 <script>
 function toggleTheme(){const r=document.documentElement;r.setAttribute('data-theme',r.getAttribute('data-theme')==='dark'?'light':'dark');}
 const THR=80;
@@ -370,7 +450,7 @@ bars(document.getElementById('byCoord'),d.byCoordinator||[]);
 bars(document.getElementById('byCrit'),d.byCriterion||[]);
 document.getElementById('breaches').innerHTML=(d.breaches||[]).map(b=>`
 <tr><td class="num">${b.file}</td><td>${b.cust}</td><td>${b.rule}</td><td>${b.coord}</td>
-<td class="num">${b.days}</td><td><span class="pill ${b.sev}">${b.sev==='crit'<,�● Breached':'▲ At risk'}</span></td></tr>`).join('');
+<td class="num">${b.days}</td><td><span class="pill ${b.sev}">${b.sev==='crit'?'● Breached':'▲ At risk'}</span></td></tr>`).join('');
 document.getElementById('foot').textContent='Compliance is computed per file against the FAIM 3.4 move-file ruleset; the 80% line is the FAIM auditor sample pass bar shown for reference.';
 }
 load();

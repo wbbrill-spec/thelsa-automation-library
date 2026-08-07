@@ -58,13 +58,21 @@ class GraphMailer:
     def _h(self):
         return {"Authorization": f"Bearer {self._token()}", "Content-Type": "application/json"}
 
-    def create_draft(self, to_email, subject, body_text):
-        """Create a draft in the mailbox. Returns {'id', 'webLink'}."""
+    def create_draft(self, to_email, subject, body_text, cc=None):
+        """Create a draft in the mailbox. Returns {'id', 'webLink'}.
+
+        `cc` may be a single address or a list of addresses; it is added as
+        ccRecipients so, e.g., the audit can copy a supervisor on coordinator
+        alerts. Still a DRAFT only — nothing is sent.
+        """
+        cc_list = [cc] if isinstance(cc, str) else list(cc or [])
         msg = {
             "subject": subject,
             "body": {"contentType": "Text", "content": render_body(body_text)},
             "toRecipients": [{"emailAddress": {"address": to_email}}],
         }
+        if cc_list:
+            msg["ccRecipients"] = [{"emailAddress": {"address": a}} for a in cc_list]
         r = requests.post(f"{GRAPH}/users/{self.mailbox}/messages",
                           headers=self._h(), json=msg, timeout=30)
         if r.status_code >= 300:

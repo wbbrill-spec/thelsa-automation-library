@@ -137,18 +137,27 @@ def _recent_job_items(limit_jobs: int):
     return jobs[-limit_jobs:] if jobs else []
  
  
-def _paginate_all_jobs(page_budget: float = 20.0, max_pages: int = 150):
-    """Page the LIGHT /jobs feed following `_links.next` — NO per-job sub-calls.
+# The company-64000 /jobs feed exposes NO `next`/`last` pagination links (only
+# `self`) — confirmed live via /faim/raw. The default page size is 10, so any
+# counter that reads the default page silently undercounts (that was the original
+# "10 active files" bug). The only lever the feed honours is an explicit `limit`,
+# so we request a page large enough to hold the whole book in one shot and only
+# fall back to link-paging if a future feed/env actually exposes links.
+_COUNT_LIMIT = 5000  # >> current book (~100); bump if a feed ever exceeds this.
 
-    Returns (jobs, pages_fetched, exhausted). `exhausted` is True when we reached
-    the end of the feed (no further `next`) within budget, so the count is exact;
-    False means we ran out of page/time budget and the count is a floor (N+).
-    This is the fast, safe path used purely to COUNT files — it never touches the
-    quotes/invoices/account endpoints.
+
+def _paginate_all_jobs(page_budget: float = 25.0, max_pages: int = 150):
+    """Return (jobs, pages_fetched, exhausted) for the LIGHT /jobs feed — NO
+    per-job sub-calls (never touches quotes/invoices/account).
+
+    Primary path: request `?limit=_COUNT_LIMIT` and take the whole page. The feed
+    is exhausted (exact count) when it returns FEWER rows than the limit and shows
+    no `next` link. If it returns exactly the limit, or exposes a `next` link, we
+    follow links within budget and mark the count a floor (N+) if we can't finish.
     """
     start = time.time()
     try:
-        payload = _get("/jobs?limit=100")
+        payload = _get(f"/jobs?limit={_COUNT_LIMIT}")
     except Exception:
         try:
             payload = _get("/jobs")
@@ -156,11 +165,20 @@ def _paginate_all_jobs(page_budget: float = 20.0, max_pages: int = 150):
             return [], 0, False
     jobs = list(_first(payload, "jobs", default=[]) or []) if isinstance(payload, dict) else []
     pages = 1
+
+    nxt = _link_href(payload.get("_links") if isinstance(payload, dict) else {}, "next")
+    # No next link AND the page wasn't maxed out → we have the entire feed.
+    if not nxt and len(jobs) < _COUNT_LIMIT:
+        return jobs, pages, True
+
+    # Otherwise follow `next` links (budgeted). If none appear, the page came
+    # back full with no way to page further — count is a floor, not exhausted.
     exhausted = False
     while pages < max_pages and time.time() - start < page_budget:
         nxt = _link_href(payload.get("_links") if isinstance(payload, dict) else {}, "next")
         if not nxt:
-            exhausted = True
+            # No pagination available. Exhausted only if the last page was short.
+            exhausted = len(_first(payload, "jobs", default=[]) or []) < _COUNT_LIMIT
             break
         try:
             payload = _get_abs(nxt)
@@ -211,17 +229,23 @@ def live_file_counts():
         return None
     by_status: dict = {}
     active = 0
+    ids = []
     for j in jobs:
         st = _job_status(j) or "(blank)"
         by_status[st] = by_status.get(st, 0) + 1
         if _job_active(j):
             active += 1
+        jid = _first(j, "id", "jobId", "jobNumber", "jobFile")
+        if jid not in (None, ""):
+            ids.append(str(jid))
     data = {
         "total": len(jobs),
         "active": active,
         "pages": pages,
         "exhausted": exhausted,
         "by_status": by_status,
+        "id_min": min(ids) if ids else None,
+        "id_max": max(ids) if ids else None,
     }
     _COUNT_CACHE["data"] = data
     _COUNT_CACHE["at"] = now

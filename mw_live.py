@@ -143,7 +143,26 @@ def _recent_job_items(limit_jobs: int):
 # "10 active files" bug). The only lever the feed honours is an explicit `limit`,
 # so we request a page large enough to hold the whole book in one shot and only
 # fall back to link-paging if a future feed/env actually exposes links.
-_COUNT_LIMIT = 5000  # >> current book (~100); bump if a feed ever exceeds this.
+# Whole-page size for the count. Moveware's /jobs feed does NOT hand back
+# pagination links (only `self`, confirmed via /faim/raw) and its DEFAULT page is
+# just 10 rows — reading the default silently undercounts (the original "10 active
+# files" bug). The only lever is an explicit `limit`, so we request one page big
+# enough to hold the whole book at once. NOTE: the API HANGS on very large limits
+# (limit=5000 blocked the socket read until the gunicorn worker was aborted → 500s
+# across the dashboard). The live book is ~100 files (ids 100001–100100), so 500
+# gives 5× headroom while still returning instantly. Raise cautiously if the book
+# ever approaches this, and re-test — the ceiling is the API's, not ours.
+_COUNT_LIMIT = 500
+_COUNT_TIMEOUT = 20  # per-request cap for the count fetch, well under gunicorn's
+                     # 120s, so a slow feed degrades to "no count" instead of
+                     # killing the worker.
+
+
+def _get_timed(path: str, timeout: int):
+    url = f"{BASE_URL}/{path.lstrip('/')}"
+    req = urllib.request.Request(url, headers=_headers(), method="GET")
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
 
 
 def _paginate_all_jobs(page_budget: float = 25.0, max_pages: int = 150):
@@ -157,10 +176,10 @@ def _paginate_all_jobs(page_budget: float = 25.0, max_pages: int = 150):
     """
     start = time.time()
     try:
-        payload = _get(f"/jobs?limit={_COUNT_LIMIT}")
+        payload = _get_timed(f"/jobs?limit={_COUNT_LIMIT}", _COUNT_TIMEOUT)
     except Exception:
         try:
-            payload = _get("/jobs")
+            payload = _get_timed("/jobs", _COUNT_TIMEOUT)
         except Exception:
             return [], 0, False
     jobs = list(_first(payload, "jobs", default=[]) or []) if isinstance(payload, dict) else []

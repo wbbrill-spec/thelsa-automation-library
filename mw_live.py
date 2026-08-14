@@ -137,6 +137,97 @@ def _recent_job_items(limit_jobs: int):
     return jobs[-limit_jobs:] if jobs else []
  
  
+def _paginate_all_jobs(page_budget: float = 20.0, max_pages: int = 150):
+    """Page the LIGHT /jobs feed following `_links.next` — NO per-job sub-calls.
+
+    Returns (jobs, pages_fetched, exhausted). `exhausted` is True when we reached
+    the end of the feed (no further `next`) within budget, so the count is exact;
+    False means we ran out of page/time budget and the count is a floor (N+).
+    This is the fast, safe path used purely to COUNT files — it never touches the
+    quotes/invoices/account endpoints.
+    """
+    start = time.time()
+    try:
+        payload = _get("/jobs?limit=100")
+    except Exception:
+        try:
+            payload = _get("/jobs")
+        except Exception:
+            return [], 0, False
+    jobs = list(_first(payload, "jobs", default=[]) or []) if isinstance(payload, dict) else []
+    pages = 1
+    exhausted = False
+    while pages < max_pages and time.time() - start < page_budget:
+        nxt = _link_href(payload.get("_links") if isinstance(payload, dict) else {}, "next")
+        if not nxt:
+            exhausted = True
+            break
+        try:
+            payload = _get_abs(nxt)
+        except Exception:
+            break
+        jobs.extend(_first(payload, "jobs", default=[]) or [])
+        pages += 1
+    return jobs, pages, exhausted
+
+
+def _job_status(job) -> str:
+    return str(_first(job, "status", "jobStatus", "state", default="") or "").strip().upper()
+
+
+# Moveware status codes that mean the file is NOT an active/open move. 'C' is the
+# confirmed cancelled code (mirrors faim_web). Others are best-effort closed/dead
+# states; refine here in one line once the live status distribution is confirmed
+# via /audit/counts (the by_status breakdown is exposed there for exactly this).
+_INACTIVE_STATUS = {"C", "X", "D", "Z"}
+
+
+def _job_active(job) -> bool:
+    return _job_status(job) not in _INACTIVE_STATUS
+
+
+_COUNT_CACHE = {"at": 0.0, "data": None}
+_COUNT_TTL = 600  # seconds — the true feed count is cached like the deep sample.
+
+
+def live_file_counts():
+    """Return the TRUE file counts from the light /jobs feed, or None.
+
+    Shape: {total, active, pages, exhausted, by_status}. This pages the whole
+    feed WITHOUT per-file sub-calls (fast + safe), so it gives the real number of
+    files instead of the deep-loaded sample cap. Cached separately (TTL) so page
+    loads don't re-page the feed every time.
+    """
+    if not have_creds():
+        return None
+    now = time.time()
+    if _COUNT_CACHE["data"] is not None and now - _COUNT_CACHE["at"] < _COUNT_TTL:
+        return _COUNT_CACHE["data"]
+    try:
+        jobs, pages, exhausted = _paginate_all_jobs()
+    except Exception:
+        return None
+    if not jobs:
+        return None
+    by_status: dict = {}
+    active = 0
+    for j in jobs:
+        st = _job_status(j) or "(blank)"
+        by_status[st] = by_status.get(st, 0) + 1
+        if _job_active(j):
+            active += 1
+    data = {
+        "total": len(jobs),
+        "active": active,
+        "pages": pages,
+        "exhausted": exhausted,
+        "by_status": by_status,
+    }
+    _COUNT_CACHE["data"] = data
+    _COUNT_CACHE["at"] = now
+    return data
+
+
 def _first(d: dict, *keys, default=None):
     if not isinstance(d, dict):
         return default

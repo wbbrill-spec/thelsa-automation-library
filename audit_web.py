@@ -235,7 +235,7 @@ def _in_month(day, ms, me):
     return bool(day and ms <= day < me)
 
 
-def compute_metrics(files):
+def compute_metrics(files, live_counts=None):
     today = dt.date.today()
     ms = today.replace(day=1)
     me = (ms.replace(year=ms.year + 1, month=1) if ms.month == 12
@@ -324,9 +324,27 @@ def compute_metrics(files):
         key=lambda r: -r["value"],
     )
 
+    # True active-file count comes from paging the light /jobs feed (no per-file
+    # sub-calls). The deep-loaded `files` are only a sample used for the financial
+    # worklist, so `len(active)` here would just be the sample cap (~10). When the
+    # live feed count is available, show the REAL number and mark the sample.
+    sample_n = len(files)
+    if live_counts:
+        true_active = live_counts.get("active", len(active))
+        feed_total = live_counts.get("total", true_active)
+        feed_exhausted = bool(live_counts.get("exhausted"))
+        feed_pages = live_counts.get("pages", 0)
+    else:
+        true_active = len(active)
+        feed_total = len(files)
+        feed_exhausted = True
+        feed_pages = 0
+
     return {
         "as_of": today.isoformat(),
-        "total_active": len(active), "by_stage": by_stage,
+        "total_active": true_active, "by_stage": by_stage,
+        "sample_n": sample_n, "feed_total": feed_total,
+        "feed_exhausted": feed_exhausted, "feed_pages": feed_pages,
         "audited_this_month": len(files),
         "invoiced_m": invoiced_m, "invoiceable_m": invoiceable_m,
         "pct_billed": pct_billed, "overdue": overdue,
@@ -346,11 +364,21 @@ def compute_metrics(files):
 
 # ── Route ───────────────────────────────────────────────────────────────────────
 def _load_checked():
-    """Return (files, is_live). Files are reconciled + calculation-checked."""
+    """Return (files, is_live, counts).
+
+    `files` are the deep-loaded SAMPLE, reconciled + calculation-checked.
+    `counts` is the TRUE file count from the light /jobs feed (dict) or None —
+    it's what drives the "Active files" tile so we don't show the sample cap.
+    """
     live = None
+    counts = None
     try:
         import mw_live
         live = mw_live.load_live_files()
+        try:
+            counts = mw_live.live_file_counts()
+        except Exception:
+            counts = None
     except Exception:
         live = None
     if live:
@@ -359,15 +387,16 @@ def _load_checked():
     else:
         files = reconcile(load_move_files())
         is_live = False
+        counts = None  # demo data: tile falls back to the demo file count
     check_calculations(files)
-    return files, is_live
+    return files, is_live, counts
 
 
 @audit_bp.route("/audit")
 @_login_required
 def audit():
-    files, is_live = _load_checked()
-    m = compute_metrics(files)
+    files, is_live, counts = _load_checked()
+    m = compute_metrics(files, live_counts=counts)
     return render_template_string(TEMPLATE, m=m, demo=not is_live)
 
 
@@ -377,7 +406,7 @@ def audit_alerts_preview():
     """Preview the coordinator discrepancy alerts. Creates nothing."""
     from flask import jsonify
     import coordinator_alerts as ca
-    files, is_live = _load_checked()
+    files, is_live, _counts = _load_checked()
     return jsonify({
         "live": is_live,
         "enabled": ca.alerts_enabled(),
@@ -395,7 +424,7 @@ def audit_alerts_draft():
     """Create one review-ready DRAFT per coordinator (gated; never sends)."""
     from flask import jsonify
     import coordinator_alerts as ca
-    files, is_live = _load_checked()
+    files, is_live, _counts = _load_checked()
     return jsonify(ca.create_drafts(files, live=is_live))
 
 
@@ -406,6 +435,19 @@ def audit_raw():
     try:
         import mw_live
         return jsonify(mw_live.raw_sample())
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
+
+@audit_bp.route("/audit/counts")
+@_login_required
+def audit_counts():
+    """Debug: the TRUE file counts from paging the light /jobs feed, incl. the
+    per-status breakdown used to refine which statuses count as 'active'."""
+    from flask import jsonify
+    try:
+        import mw_live
+        return jsonify(mw_live.live_file_counts() or {"note": "no live counts (no creds or no data)"})
     except Exception as e:
         return jsonify({"error": str(e)})
 
@@ -457,6 +499,9 @@ TEMPLATE = r"""<!DOCTYPE html>
     Data source: MoveWare{% if demo %}<span class="demo">DEMO DATA</span>{% endif %} · as of {{ m.as_of }}</div>
 </header>
 <main>
+  {% if not demo %}<div style="background:var(--tint);border:1px solid var(--line);border-radius:12px;padding:11px 15px;margin-bottom:6px;font-size:12.5px;color:var(--muted)">
+    <b style="color:var(--ink)">{{ "{:,}".format(m.total_active) }}{% if not m.feed_exhausted %}+{% endif %} active files</b> counted live across the whole MoveWare feed{% if m.feed_pages %} ({{ m.feed_total }} files scanned over {{ m.feed_pages }} page{{ 's' if m.feed_pages != 1 else '' }}){% endif %}. The financial figures and worklists below are computed from a deep-checked sample of <b style="color:var(--ink)">{{ m.sample_n }}</b> files this load (each requires several MoveWare calls), and expand as the sample grows.
+  </div>{% endif %}
   <h2>Profitability</h2>
   <div class="grid g4">
     <div class="tile"><div class="label">Total revenue</div><div class="value num">{{ "{:,.0f}".format(m.tot_rev) }}</div><div class="sub">cost {{ "{:,.0f}".format(m.tot_cost) }}</div></div>
@@ -466,7 +511,7 @@ TEMPLATE = r"""<!DOCTYPE html>
   </div>
   <h2>Workload &amp; Pipeline</h2>
   <div class="row">
-    <div class="tile" style="flex:1;min-width:220px"><div class="label">Active files</div><div class="value num">{{ m.total_active }}</div><div class="sub">{{ m.audited_this_month }} audited this month</div></div>
+    <div class="tile" style="flex:1;min-width:220px"><div class="label">Active files</div><div class="value num">{{ m.total_active }}{% if not m.feed_exhausted %}+{% endif %}</div><div class="sub">{% if not demo %}{{ "{:,}".format(m.feed_total) }} files in feed · {{ m.sample_n }} deep-checked below{% else %}{{ m.audited_this_month }} audited this month{% endif %}</div></div>
     <div class="tile" style="flex:2;min-width:280px"><div class="label">Files by audit stage</div>
       {% for s,n in m.by_stage.items() %}<div class="stage-line"><span>{{ s.replace('_',' ') }}</span><span class="num">{{ n }}</span></div>{% endfor %}</div>
   </div>

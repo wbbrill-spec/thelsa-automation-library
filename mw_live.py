@@ -143,19 +143,20 @@ def _recent_job_items(limit_jobs: int):
 # "10 active files" bug). The only lever the feed honours is an explicit `limit`,
 # so we request a page large enough to hold the whole book in one shot and only
 # fall back to link-paging if a future feed/env actually exposes links.
-# Whole-page size for the count. Moveware's /jobs feed does NOT hand back
-# pagination links (only `self`, confirmed via /faim/raw) and its DEFAULT page is
-# just 10 rows — reading the default silently undercounts (the original "10 active
-# files" bug). The only lever is an explicit `limit`, so we request one page big
-# enough to hold the whole book at once. NOTE: the API HANGS on very large limits
-# (limit=5000 blocked the socket read until the gunicorn worker was aborted → 500s
-# across the dashboard). The live book is ~100 files (ids 100001–100100), so 500
-# gives 5× headroom while still returning instantly. Raise cautiously if the book
-# ever approaches this, and re-test — the ceiling is the API's, not ours.
-_COUNT_LIMIT = 500
-_COUNT_TIMEOUT = 20  # per-request cap for the count fetch, well under gunicorn's
-                     # 120s, so a slow feed degrades to "no count" instead of
-                     # killing the worker.
+# Counting the /jobs feed. Hard-won facts about this Moveware instance:
+#   • The feed hands back NO pagination links (only `self`) — confirmed /faim/raw.
+#   • It returns exactly `limit` rows (default 10). Reading the default is the
+#     original "10 active files" bug; requesting `limit=100` silently returns just
+#     the OLDEST 100 (ids 100001–100100) — also a cap, not the book.
+#   • It HANGS on very large limits: `limit=5000` blocked the socket read until
+#     the gunicorn worker was aborted (→ 500s across the dashboard).
+# So we page the feed in SMALL, fast chunks using `?limit&offset`, accumulating
+# until a short page ends the feed. Every request is capped well under gunicorn's
+# 120s so a slow feed degrades to a floor count instead of killing the worker.
+_PAGE_SIZE = 500          # rows per chunk — proven fast; well below the hang zone.
+_MAX_COUNT_PAGES = 40     # 40 × 500 = 20,000-file ceiling (backstop, not a target)
+_COUNT_BUDGET = 70.0      # total seconds spent counting (leaves headroom vs 120s)
+_COUNT_TIMEOUT = 20       # per-request cap; a stuck request aborts here → floor.
 
 
 def _get_timed(path: str, timeout: int):
@@ -165,46 +166,47 @@ def _get_timed(path: str, timeout: int):
         return json.loads(resp.read().decode("utf-8"))
 
 
-def _paginate_all_jobs(page_budget: float = 25.0, max_pages: int = 150):
+def _page_jobs(payload):
+    return list(_first(payload, "jobs", default=[]) or []) if isinstance(payload, dict) else []
+
+
+def _paginate_all_jobs(page_budget: float = _COUNT_BUDGET, max_pages: int = _MAX_COUNT_PAGES):
     """Return (jobs, pages_fetched, exhausted) for the LIGHT /jobs feed — NO
     per-job sub-calls (never touches quotes/invoices/account).
 
-    Primary path: request `?limit=_COUNT_LIMIT` and take the whole page. The feed
-    is exhausted (exact count) when it returns FEWER rows than the limit and shows
-    no `next` link. If it returns exactly the limit, or exposes a `next` link, we
-    follow links within budget and mark the count a floor (N+) if we can't finish.
+    Pages `?limit=_PAGE_SIZE&offset=N` in chunks. `exhausted` is True only when a
+    chunk comes back SHORT (fewer than _PAGE_SIZE rows) — that's the real end of
+    the feed, so the count is exact. If we stop for any other reason (budget, page
+    cap, an error, or the server ignoring `offset` and repeating a chunk) the
+    count is a floor (rendered as "N+") rather than a silent cap.
     """
     start = time.time()
-    try:
-        payload = _get_timed(f"/jobs?limit={_COUNT_LIMIT}", _COUNT_TIMEOUT)
-    except Exception:
-        try:
-            payload = _get_timed("/jobs", _COUNT_TIMEOUT)
-        except Exception:
-            return [], 0, False
-    jobs = list(_first(payload, "jobs", default=[]) or []) if isinstance(payload, dict) else []
-    pages = 1
-
-    nxt = _link_href(payload.get("_links") if isinstance(payload, dict) else {}, "next")
-    # No next link AND the page wasn't maxed out → we have the entire feed.
-    if not nxt and len(jobs) < _COUNT_LIMIT:
-        return jobs, pages, True
-
-    # Otherwise follow `next` links (budgeted). If none appear, the page came
-    # back full with no way to page further — count is a floor, not exhausted.
+    jobs = []
+    seen_first = set()
+    offset = 0
+    pages = 0
     exhausted = False
     while pages < max_pages and time.time() - start < page_budget:
-        nxt = _link_href(payload.get("_links") if isinstance(payload, dict) else {}, "next")
-        if not nxt:
-            # No pagination available. Exhausted only if the last page was short.
-            exhausted = len(_first(payload, "jobs", default=[]) or []) < _COUNT_LIMIT
-            break
         try:
-            payload = _get_abs(nxt)
+            payload = _get_timed(f"/jobs?limit={_PAGE_SIZE}&offset={offset}", _COUNT_TIMEOUT)
         except Exception:
             break
-        jobs.extend(_first(payload, "jobs", default=[]) or [])
+        page = _page_jobs(payload)
+        if not page:
+            exhausted = True  # empty chunk → past the end of the feed
+            break
+        # Guard against a server that ignores `offset` and re-serves chunk 1:
+        # if this chunk leads with an id we've already seen, we can't page on.
+        first_id = str(_first(page[0], "id", "jobId", "jobNumber", "jobFile", default="") or "")
+        if first_id and first_id in seen_first:
+            break  # offset not honoured — stop; count is a floor
+        seen_first.add(first_id)
+        jobs.extend(page)
         pages += 1
+        if len(page) < _PAGE_SIZE:
+            exhausted = True  # short chunk → exact end of the feed
+            break
+        offset += _PAGE_SIZE
     return jobs, pages, exhausted
 
 

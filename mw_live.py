@@ -55,6 +55,84 @@ def _get(path: str):
     req = urllib.request.Request(url, headers=_headers(), method="GET")
     with urllib.request.urlopen(req, timeout=30) as resp:
         return json.loads(resp.read().decode("utf-8"))
+
+
+def _get_abs(url: str):
+    """GET a full URL (e.g. a Moveware _links href)."""
+    req = urllib.request.Request(url, headers=_headers(), method="GET")
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _link_href(links, rel):
+    """Return the href for a pagination rel ('next','prev','last') from a
+    Moveware `_links` block, checking both the top level and a nested `pages`."""
+    if not isinstance(links, dict):
+        return None
+    for container in (links, links.get("pages") if isinstance(links.get("pages"), dict) else None):
+        if not isinstance(container, dict):
+            continue
+        c = container.get(rel)
+        if isinstance(c, dict) and c.get("href"):
+            return c["href"]
+        if isinstance(c, str) and c.startswith("http"):
+            return c
+    return None
+
+
+def _recent_job_items(limit_jobs: int):
+    """Return the MOST RECENT `limit_jobs` job list-items.
+
+    The Moveware `/jobs` feed is ordered oldest-first (it leads with the 2016
+    test record 100001 "Prueba/Carlos"), so reading from the top returns legacy
+    files. We reach the current files by jumping to the last page via
+    `_links.last` (walking `prev` for enough rows); if the feed exposes no
+    `last` link we page forward through `next` within a budget and keep the tail.
+    """
+    try:
+        first = _get("/jobs?limit=100")
+    except Exception:
+        first = _get("/jobs")
+    if not isinstance(first, dict):
+        return []
+    links = first.get("_links") or {}
+
+    # Preferred: jump to the last page and collect backwards until we have enough.
+    last_href = _link_href(links, "last")
+    if last_href:
+        acc = []
+        href = last_href
+        for _ in range(6):
+            try:
+                page = _get_abs(href)
+            except Exception:
+                break
+            acc = list(_first(page, "jobs", default=[]) or []) + acc
+            if len(acc) >= limit_jobs:
+                break
+            prev = _link_href(page.get("_links") if isinstance(page, dict) else {}, "prev")
+            if not prev:
+                break
+            href = prev
+        if acc:
+            return acc[-limit_jobs:]
+
+    # Fallback: page forward following `next`, keep the tail (most recent).
+    jobs = list(_first(first, "jobs", default=[]) or [])
+    payload = first
+    pages = 1
+    start = time.time()
+    while pages < 60 and time.time() - start < 15:
+        nxt = _link_href(payload.get("_links") if isinstance(payload, dict) else {}, "next")
+        if not nxt:
+            break
+        try:
+            payload = _get_abs(nxt)
+        except Exception:
+            break
+        jobs.extend(_first(payload, "jobs", default=[]) or [])
+        pages += 1
+    return jobs[-limit_jobs:] if jobs else []
  
  
 def _first(d: dict, *keys, default=None):
@@ -277,12 +355,13 @@ def load_live_files():
     if _CACHE["data"] is not None and now - _CACHE["at"] < _CACHE_TTL:
         return _CACHE["data"]
     try:
-        data = _get("/jobs")
-        jobs = _first(data, "jobs", default=[]) or []
-        if not isinstance(jobs, list):
+        # Pull the MOST RECENT jobs (feed is oldest-first) so we surface current
+        # operational files, not the legacy 2016 test records at the top.
+        jobs = _recent_job_items(_MAX_JOBS)
+        if not jobs:
             return None
         mapped = []
-        for job in jobs[:_MAX_JOBS]:
+        for job in jobs:
             # _map_job pulls the rich job object from the quotes response,
             # so the light list item is enough to start from.
             try:

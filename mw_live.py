@@ -27,7 +27,9 @@ import urllib.request
  
 _CACHE = {"at": 0.0, "data": None}
 _CACHE_TTL = 600  # seconds
-_MAX_JOBS = 25    # cap the first live pull for speed
+_MAX_JOBS = 10    # cap the first live pull — each job makes 3 sub-calls
+                  # (quotes/invoices/account), so keep this low to stay well
+                  # inside the gunicorn worker timeout; result is cached (TTL).
  
 # Env-driven base URL; defaults to PRODUCTION. Override with MOVEWARE_URL to
 # point at UAT (https://rest.moveconnect.com/movewareUAT/v1) for testing.
@@ -122,7 +124,7 @@ def _recent_job_items(limit_jobs: int):
     payload = first
     pages = 1
     start = time.time()
-    while pages < 60 and time.time() - start < 15:
+    while pages < 25 and time.time() - start < 6:
         nxt = _link_href(payload.get("_links") if isinstance(payload, dict) else {}, "next")
         if not nxt:
             break

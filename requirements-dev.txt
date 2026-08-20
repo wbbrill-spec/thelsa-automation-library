@@ -1,0 +1,3 @@
+# Test-only dependencies (not installed on the Render runtime).
+-r requirements.txt
+pytest>=8.0

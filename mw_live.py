@@ -27,9 +27,10 @@ import urllib.request
  
 _CACHE = {"at": 0.0, "data": None}
 _CACHE_TTL = 600  # seconds
-_MAX_JOBS = 10    # cap the first live pull — each job makes 3 sub-calls
+_MAX_JOBS = 6     # cap the deep-load sample — each job makes 3 sub-calls
                   # (quotes/invoices/account), so keep this low to stay well
-                  # inside the gunicorn worker timeout; result is cached (TTL).
+                  # inside the gunicorn worker timeout; result is cached (TTL)
+                  # and further bounded by _LOAD_BUDGET.
  
 # Env-driven base URL; defaults to PRODUCTION. Override with MOVEWARE_URL to
 # point at UAT (https://rest.moveconnect.com/movewareUAT/v1) for testing.
@@ -52,17 +53,25 @@ def _headers() -> dict:
     }
  
  
+# Per-request timeout for every Moveware call. Kept SHORT on purpose: the /audit
+# page makes many sequential calls (deep-load = several jobs × 3 sub-calls each,
+# plus the feed count), and if any one call is allowed to hang the cumulative time
+# blows past gunicorn's worker timeout and the whole page 500s. A stalled call now
+# fails fast and is caught, so the page still renders from whatever loaded.
+_REQ_TIMEOUT = 10
+
+
 def _get(path: str):
     url = f"{BASE_URL}/{path.lstrip('/')}"
     req = urllib.request.Request(url, headers=_headers(), method="GET")
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    with urllib.request.urlopen(req, timeout=_REQ_TIMEOUT) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
 def _get_abs(url: str):
     """GET a full URL (e.g. a Moveware _links href)."""
     req = urllib.request.Request(url, headers=_headers(), method="GET")
-    with urllib.request.urlopen(req, timeout=20) as resp:
+    with urllib.request.urlopen(req, timeout=_REQ_TIMEOUT) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
@@ -155,8 +164,8 @@ def _recent_job_items(limit_jobs: int):
 # 120s so a slow feed degrades to a floor count instead of killing the worker.
 _PAGE_SIZE = 500          # rows per chunk — proven fast; well below the hang zone.
 _MAX_COUNT_PAGES = 40     # 40 × 500 = 20,000-file ceiling (backstop, not a target)
-_COUNT_BUDGET = 70.0      # total seconds spent counting (leaves headroom vs 120s)
-_COUNT_TIMEOUT = 20       # per-request cap; a stuck request aborts here → floor.
+_COUNT_BUDGET = 35.0      # total seconds spent counting (leaves headroom vs 120s)
+_COUNT_TIMEOUT = 10       # per-request cap; a stuck request aborts here → floor.
 
 
 def _get_timed(path: str, timeout: int):
@@ -485,8 +494,26 @@ def _map_job(job: dict) -> dict | None:
     }
  
  
+# Wall-clock budget for the deep-load. Each sampled job costs 3 Moveware
+# sub-calls (quotes/invoices/account); left unbounded, a slow Moveware makes the
+# loop run past gunicorn's worker timeout and 500 the page. We stop mapping new
+# jobs once this budget is spent and render whatever loaded — a smaller sample,
+# never a crash.
+_LOAD_BUDGET = 35.0
+# Last successful deep-load, kept with NO expiry. If a fresh load is slow, errors,
+# or comes back empty, we serve this rather than dropping to the demo dataset, so
+# the dashboard keeps showing real data through a Moveware hiccup.
+_LAST_GOOD = {"data": None}
+
+
 def load_live_files():
-    """Return mapped live files, or None to signal fallback to demo."""
+    """Return mapped live files (deep sample), or None to fall back to demo.
+
+    Bounded on purpose: at most _MAX_JOBS jobs, and the mapping loop stops early
+    once _LOAD_BUDGET seconds have elapsed so a slow Moveware can never run the
+    request past the gunicorn worker timeout. On any failure or empty result we
+    serve the last good sample instead of None so the page stays on live data.
+    """
     if not have_creds():
         return None
     now = time.time()
@@ -497,9 +524,12 @@ def load_live_files():
         # operational files, not the legacy 2016 test records at the top.
         jobs = _recent_job_items(_MAX_JOBS)
         if not jobs:
-            return None
+            return _LAST_GOOD["data"]
         mapped = []
+        start = time.time()
         for job in jobs:
+            if time.time() - start > _LOAD_BUDGET:
+                break  # budget spent — render with the sample gathered so far
             # _map_job pulls the rich job object from the quotes response,
             # so the light list item is enough to start from.
             try:
@@ -509,14 +539,15 @@ def load_live_files():
             if m:
                 mapped.append(m)
         if not mapped:
-            return None
+            return _LAST_GOOD["data"]
         _CACHE["data"] = mapped
         _CACHE["at"] = now
+        _LAST_GOOD["data"] = mapped
         return mapped
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError):
-        return None
+        return _LAST_GOOD["data"]
     except Exception:
-        return None
+        return _LAST_GOOD["data"]
  
  
 def raw_sample(job_id: str | None = None) -> dict:

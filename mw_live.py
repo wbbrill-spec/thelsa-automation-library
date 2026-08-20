@@ -179,21 +179,24 @@ def _recent_job_items(limit_jobs: int):
 # until a short page ends the feed. Every request is capped well under gunicorn's
 # 120s so a slow feed degrades to a floor count instead of killing the worker.
 _PAGE_SIZE = 500          # rows per status-scan page.
-_MAX_COUNT_PAGES = 12     # status scan is a BOUNDED sample (see below), not a
-                          # whole-feed read — the exact total comes from
-                          # _feed_total() via binary search instead.
-_COUNT_BUDGET = 12.0      # seconds for the status sample — kept short so the whole
-                          # /audit/counts request stays fast and never trips the
-                          # proxy/worker timeout.
+_MAX_COUNT_PAGES = 4      # status scan is a small BOUNDED sample, not a full read.
+_COUNT_BUDGET = 8.0       # seconds for the status sample — short so the whole call
+                          # stays under the proxy/worker timeout.
 _COUNT_TIMEOUT = 10       # hard per-request cap (see _fetch).
+
+# Moveware calls have ~2s round-trip latency, and the whole /audit/counts request
+# must finish inside the proxy timeout (~30-45s), so we can afford ~15 calls.
+_TOTAL_MAX = 32768        # assumed upper bound on job count (company has ~7k)
+_TOTAL_MAX_PROBES = 12    # binary-search probes → resolution ~_TOTAL_MAX/2^12 ≈ 8.
 
 
 def _feed_total():
-    """EXACT file count, cheaply. The feed has no count endpoint, but `offset` is
-    a 1-indexed page number, so with limit=1 page N exists iff there are ≥ N jobs.
-    Exponential-probe an upper bound, then binary-search the largest existing page
-    — ~log2(N) tiny (1-row) requests, so ~25 for a 7k feed, a few seconds total.
-    Returns the exact number of jobs, or 0 if unavailable.
+    """APPROXIMATE-but-tight file count, cheaply. The feed has no count endpoint,
+    but `offset` is a 1-indexed page number, so with limit=1 page N exists iff
+    there are ≥ N jobs. Binary-search the largest existing page over [1,_TOTAL_MAX]
+    with a hard probe cap (each probe is one ~2s request, so we cap to stay under
+    the proxy timeout). ~12 probes → within ~8 of the true count. Returns 0 if
+    unavailable.
     """
     def exists(off: int) -> bool:
         try:
@@ -203,16 +206,15 @@ def _feed_total():
 
     if not exists(1):
         return 0
-    hi = 1
-    while hi < 1_048_576 and exists(hi * 2):
-        hi *= 2
-    lo, high = hi, min(hi * 2, 1_048_576)
-    while lo + 1 < high:
-        mid = (lo + high) // 2
+    lo, hi = 1, _TOTAL_MAX
+    probes = 0
+    while lo + 1 < hi and probes < _TOTAL_MAX_PROBES:
+        mid = (lo + hi) // 2
         if exists(mid):
             lo = mid
         else:
-            high = mid
+            hi = mid
+        probes += 1
     return lo
 
 
@@ -332,7 +334,8 @@ def live_file_counts():
         estimated = True
 
     data = {
-        "total": total,                  # EXACT
+        "total": total,                  # tight approximation (±~8)
+        "total_approx": True,
         "active": active,
         "active_estimated": estimated,
         "sample_scanned": seen,

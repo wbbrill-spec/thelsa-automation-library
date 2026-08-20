@@ -25,6 +25,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
  
 _CACHE = {"at": 0.0, "data": None}
 _CACHE_TTL = 600  # seconds
@@ -690,16 +691,30 @@ _AUDIT = {
     "last_cycle_at": None,
     "wrapped": False,     # True once we've reached the far edge of the window
     "window_complete": False,  # True once the last 12 months are fully covered
+    "last_full_at": None, # unix time the last COMPLETE scan finished (persisted)
+    "saved_at": None,     # unix time the snapshot was last written to disk
+    "refetch": False,     # True during a scheduled refresh (re-fetch cached files)
 }
 _AUDIT_LOCK = threading.Lock()
 _AUDIT_THREAD = None
-_AUDIT_SLEEP = 10         # seconds between cycles (throttle the API)
-# Page size == the per-cycle work unit: each cycle fetches one page and deep-
-# checks EVERY new file on it (each file = 2 API calls). Kept small so the walk
-# processes files in a strict newest→oldest run (needed for the window edge test)
-# without bursting the API. ~_AUDIT_PAGE files/cycle × 2 calls / _AUDIT_SLEEP s.
-_AUDIT_PAGE = 8
+_AUDIT_SLEEP = 2          # seconds between cycles while actively scanning
+_AUDIT_IDLE_SLEEP = 60    # seconds between checks while idle (snapshot complete)
+# Each cycle fetches one light page of ids and deep-checks EVERY new file on it
+# (each file = 2 API calls at ~2s). The per-file fetches run CONCURRENTLY across
+# a small thread pool, so a page completes in roughly (page/workers)*2*2 seconds
+# instead of page*4. With 40/cycle at ~12s/cycle the full ~12-month window
+# (a few hundred files) is covered in ~2-3 minutes rather than ~15. Files are
+# still processed in a strict newest→oldest run so the window-edge stop is exact.
+_AUDIT_PAGE = 40          # ids fetched + classified per cycle
+_AUDIT_WORKERS = 12       # concurrent per-file fetches (I/O-bound; GIL released)
 _AUDIT_BATCH = _AUDIT_PAGE  # back-compat alias (per-cycle deep-check count)
+
+
+def _safe_map(job):
+    try:
+        return _map_job(job)
+    except Exception:
+        return None
 
 # ── Rolling audit window ──────────────────────────────────────────────────
 # The audit only covers recent files: in the moving industry, over-charges on
@@ -733,6 +748,97 @@ def _is_out_of_window(m: dict) -> bool:
 
 def _auditor_last_page(total: int) -> int:
     return max(1, (total + _AUDIT_PAGE - 1) // _AUDIT_PAGE)
+
+
+# ── Persistence + refresh cadence ───────────────────────────────────────────
+# The audit is a COMPREHENSIVE snapshot of the last 12 months that is persisted
+# to disk and refreshed on a schedule — NOT a live crawl that rebuilds from zero
+# on every restart. On boot we load the last snapshot (instant, complete view);
+# a full re-scan then runs every _REFRESH_SECONDS to pick up new bookings /
+# invoices / deliveries. A full scan is cheap (~2-3 min), so 6h (4x/day) keeps
+# data <=6h stale — fresh enough to flag an unbilled delivered move same-day —
+# with negligible redundant work.
+_REFRESH_SECONDS = int(os.environ.get("AUDIT_REFRESH_SECONDS", 6 * 3600))
+# Where the snapshot is stored. If a persistent disk is mounted (Render mounts
+# them at /var/data), the snapshot auto-persists there and survives DEPLOYS with
+# no extra config. Otherwise it falls back next to the app, which survives
+# process restarts but not redeploys. Override explicitly with AUDIT_CACHE_PATH.
+def _default_cache_path() -> str:
+    for base in ("/var/data", "/data"):
+        try:
+            if os.path.isdir(base) and os.access(base, os.W_OK):
+                return os.path.join(base, "audit_cache.json")
+        except Exception:
+            pass
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "audit_cache.json")
+
+
+_CACHE_PATH = os.environ.get("AUDIT_CACHE_PATH") or _default_cache_path()
+
+
+def _json_default(o):
+    if isinstance(o, dt.date):
+        return {"__date__": o.isoformat()}
+    raise TypeError(f"not serializable: {type(o)}")
+
+
+def _json_obj_hook(d):
+    if "__date__" in d:
+        try:
+            return dt.date.fromisoformat(d["__date__"])
+        except Exception:
+            return None
+    return d
+
+
+def _persist_snapshot():
+    """Write the current audited window to disk so a restart/deploy can resume
+    instantly instead of re-crawling the API. Best-effort; never raises."""
+    with _AUDIT_LOCK:
+        snap = {
+            "files": _AUDIT["files"],
+            "old_ids": list(_AUDIT["old_ids"]),
+            "total": _AUDIT["total"],
+            "window_complete": _AUDIT["window_complete"],
+            "window_days": _WINDOW_DAYS,
+            "last_full_at": _AUDIT["last_full_at"],
+            "saved_at": time.time(),
+        }
+    try:
+        tmp = _CACHE_PATH + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(snap, f, default=_json_default)
+        os.replace(tmp, _CACHE_PATH)  # atomic
+        with _AUDIT_LOCK:
+            _AUDIT["saved_at"] = snap["saved_at"]
+    except Exception:
+        pass  # e.g. read-only FS — degrade to in-memory only
+
+
+def _load_snapshot() -> bool:
+    """Load a persisted snapshot into _AUDIT on boot. Returns True if a usable
+    snapshot was loaded. Ignores snapshots built for a different window length."""
+    try:
+        with open(_CACHE_PATH) as f:
+            snap = json.load(f, object_hook=_json_obj_hook)
+    except FileNotFoundError:
+        return False
+    except Exception:
+        return False
+    if snap.get("window_days") != _WINDOW_DAYS:
+        return False
+    files = snap.get("files") or {}
+    if not isinstance(files, dict):
+        return False
+    with _AUDIT_LOCK:
+        _AUDIT["files"] = files
+        _AUDIT["old_ids"] = set(snap.get("old_ids") or [])
+        _AUDIT["total"] = snap.get("total")
+        _AUDIT["window_complete"] = bool(snap.get("window_complete"))
+        _AUDIT["last_full_at"] = snap.get("last_full_at")
+        _AUDIT["saved_at"] = snap.get("saved_at")
+        _AUDIT["page"] = _auditor_last_page(_AUDIT["total"] or 1)
+    return True
 
 
 _TOTAL_REFRESH_CYCLES = 30   # while idle, re-probe the feed total this often
@@ -776,25 +882,42 @@ def _auditor_cycle():
         with _AUDIT_LOCK:
             _AUDIT["errors"] += 1
         return
-    hit_window_edge = False
-    for j in reversed(jobs):  # newest within the page first
+    # Build the newest→oldest list of candidates on this page that still need
+    # classifying (skip inactive + already-seen), then fetch them all CONCURRENTLY.
+    with _AUDIT_LOCK:
+        refetch = _AUDIT["refetch"]
+    candidates = []  # (jid, job) in newest-first order
+    for j in reversed(jobs):
         jid = str(_first(j, "id", "jobId", "jobNumber", "jobFile", default="") or "")
         if not jid or _job_status(j) in _INACTIVE_STATUS:
             continue
         with _AUDIT_LOCK:
-            if jid in _AUDIT["files"] or jid in _AUDIT["old_ids"]:
-                continue  # already classified (in-window cached, or known-old)
-        # Learning a file's date needs the per-file fetch, so classification is
-        # itself an API cost — bounded by the small page size (== _AUDIT_BATCH).
-        try:
-            m = _map_job(j)
-        except Exception:
-            m = None
+            if jid in _AUDIT["old_ids"]:
+                continue
+            # During a scheduled refresh we re-fetch cached files too (to pick up
+            # new invoices / date changes); otherwise skip ones already audited.
+            if jid in _AUDIT["files"] and not refetch:
+                continue
+        candidates.append((jid, j))
+
+    mapped = {}
+    if candidates:
+        with ThreadPoolExecutor(max_workers=_AUDIT_WORKERS) as ex:
+            futs = {ex.submit(_safe_map, j): jid for jid, j in candidates}
+            for fut in futs:
+                mapped[futs[fut]] = fut.result()
+
+    # Classify in strict newest→oldest order so the consecutive-out-of-window
+    # count (and the window-edge stop) stays exact even though fetches ran async.
+    hit_window_edge = False
+    for jid, _j in candidates:
+        m = mapped.get(jid)
         if not m:
             continue
         if _is_out_of_window(m):
             with _AUDIT_LOCK:
                 _AUDIT["old_ids"].add(jid)
+                _AUDIT["files"].pop(jid, None)  # prune files that rolled off the window
                 _AUDIT["consec_old"] += 1
                 if _AUDIT["consec_old"] >= _WINDOW_STOP:
                     _AUDIT["window_complete"] = True
@@ -833,9 +956,41 @@ def _auditor_cycle():
 def _auditor_loop():
     with _AUDIT_LOCK:
         _AUDIT["started_at"] = time.time()
+    # Resume from the last persisted snapshot: instant comprehensive view after a
+    # restart/deploy instead of re-crawling the whole window from zero.
+    _load_snapshot()
     while True:
         try:
+            with _AUDIT_LOCK:
+                complete = _AUDIT["window_complete"]
+                last_full = _AUDIT["last_full_at"] or 0
+            # When the snapshot is complete and the next refresh isn't due, idle
+            # cheaply (no API calls) instead of re-scanning every couple seconds.
+            if complete and (time.time() - last_full) < _REFRESH_SECONDS:
+                time.sleep(_AUDIT_IDLE_SLEEP)
+                continue
+            # Refresh is due: re-scan the whole window to pick up new bookings /
+            # invoices / deliveries. The existing snapshot stays visible and is
+            # updated file-by-file as the re-scan progresses.
+            if complete:
+                with _AUDIT_LOCK:
+                    _AUDIT["refetch"] = True
+                    _AUDIT["window_complete"] = False
+                    _AUDIT["wrapped"] = False
+                    _AUDIT["consec_old"] = 0
+                    _AUDIT["old_ids"] = set()
+                    _AUDIT["page"] = _auditor_last_page(_AUDIT["total"] or 1)
+            with _AUDIT_LOCK:
+                was_complete = _AUDIT["window_complete"]
             _auditor_cycle()
+            with _AUDIT_LOCK:
+                now_complete = _AUDIT["window_complete"]
+            if now_complete and not was_complete:
+                # A full scan just finished — stamp it and persist the snapshot.
+                with _AUDIT_LOCK:
+                    _AUDIT["refetch"] = False
+                    _AUDIT["last_full_at"] = time.time()
+                _persist_snapshot()
         except Exception:
             with _AUDIT_LOCK:
                 _AUDIT["errors"] += 1
@@ -874,6 +1029,11 @@ def audit_progress():
             "window_days": _WINDOW_DAYS,
             "excluded_old": len(_AUDIT["old_ids"]),
             "running": bool(_AUDIT_THREAD is not None and _AUDIT_THREAD.is_alive()),
+            "last_full_at": _AUDIT["last_full_at"],
+            "saved_at": _AUDIT["saved_at"],
+            "refreshing": _AUDIT["refetch"],
+            "refresh_seconds": _REFRESH_SECONDS,
+            "persisted": bool(_AUDIT["saved_at"]),
         }
 
 

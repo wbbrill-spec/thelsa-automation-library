@@ -185,6 +185,7 @@ def fake_feed(monkeypatch):
         "files": {}, "old_ids": set(), "total": None, "page": None, "cycles": 0,
         "errors": 0, "consec_old": 0, "started_at": None, "last_cycle_at": None,
         "wrapped": False, "window_complete": False,
+        "last_full_at": None, "saved_at": None, "refetch": False,
     })
     return state
 
@@ -235,6 +236,69 @@ def test_feed_smaller_than_window_completes(fake_feed):
     assert len(mw._AUDIT["files"]) == 400
 
 
+# ── persistence (survives restart) ──────────────────────────────────────────
+def test_snapshot_round_trip_preserves_files_and_dates(tmp_path, monkeypatch):
+    monkeypatch.setattr(mw, "_CACHE_PATH", str(tmp_path / "cache.json"))
+    d = TODAY - dt.timedelta(days=12)
+    mw._AUDIT.update({
+        "files": {"110995": {"job": "110995", "sell": 196166.22, "delivery": d, "pack": None,
+                             "q_lines": [{"desc": "Removal", "value": 186240.68}], "invoiced": True}},
+        "old_ids": {"100001", "100002"}, "total": 11008, "window_complete": True,
+        "last_full_at": 1234.0, "saved_at": None, "refetch": False,
+    })
+    mw._persist_snapshot()
+
+    # wipe in-memory state, then reload from disk
+    mw._AUDIT.update({"files": {}, "old_ids": set(), "total": None,
+                      "window_complete": False, "last_full_at": None})
+    assert mw._load_snapshot() is True
+    assert set(mw._AUDIT["files"]) == {"110995"}
+    f = mw._AUDIT["files"]["110995"]
+    assert f["delivery"] == d and isinstance(f["delivery"], dt.date)   # date survived
+    assert f["q_lines"][0]["value"] == 186240.68
+    assert mw._AUDIT["old_ids"] == {"100001", "100002"}
+    assert mw._AUDIT["window_complete"] is True
+    assert mw._AUDIT["last_full_at"] == 1234.0
+
+
+def test_snapshot_ignored_if_window_length_changed(tmp_path, monkeypatch):
+    monkeypatch.setattr(mw, "_CACHE_PATH", str(tmp_path / "cache.json"))
+    mw._AUDIT.update({"files": {"1": {"job": "1"}}, "old_ids": set(), "total": 10,
+                      "window_complete": True, "last_full_at": 1.0})
+    mw._persist_snapshot()
+    monkeypatch.setattr(mw, "_WINDOW_DAYS", 730)   # window redefined
+    mw._AUDIT.update({"files": {}, "window_complete": False})
+    assert mw._load_snapshot() is False            # stale snapshot rejected
+
+
+def test_missing_snapshot_returns_false(tmp_path, monkeypatch):
+    monkeypatch.setattr(mw, "_CACHE_PATH", str(tmp_path / "nope.json"))
+    assert mw._load_snapshot() is False
+
+
+# ── scheduled refresh re-fetches cached files ───────────────────────────────
+def test_refresh_repicks_up_new_invoice_on_cached_file(fake_feed, monkeypatch):
+    _run_until_complete()
+    assert "400" in mw._AUDIT["files"]
+    # Simulate a new invoice landing on an already-cached file: change what the
+    # feed's mapper returns for id 400, then run a refresh cycle set.
+    base_map = mw._map_job
+    def new_map(j):
+        m = base_map(j)
+        if m and j["id"] == "400":
+            m["inv_amt"] = 99999
+        return m
+    monkeypatch.setattr(mw, "_map_job", new_map)
+    # enter refresh mode (what the loop does when _REFRESH_SECONDS elapses)
+    mw._AUDIT.update({"refetch": True, "window_complete": False, "consec_old": 0,
+                      "old_ids": set(), "page": mw._auditor_last_page(mw._AUDIT["total"])})
+    for _ in range(2000):
+        mw._auditor_cycle()
+        if mw._AUDIT["window_complete"]:
+            break
+    assert mw._AUDIT["files"]["400"]["inv_amt"] == 99999   # refreshed in place
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # 3. compute_metrics guards + rollups + template rendering
 # ════════════════════════════════════════════════════════════════════════════
@@ -283,13 +347,18 @@ def test_template_renders_all_live_states():
     tmpl = Template(aw.TEMPLATE)
     m0 = aw.compute_metrics([], live_counts=LIVE_COUNTS, cost_available=False)
     assert "12-month" in tmpl.render(m=m0, demo=False)
-    counts = dict(LIVE_COUNTS, window_complete=True, excluded_old=4237)
+    counts = dict(LIVE_COUNTS, window_complete=True, excluded_old=4237,
+                  last_full_at=dt.datetime.now().timestamp() - 2 * 3600,
+                  refresh_seconds=6 * 3600)
     f = _mkfile(job=1, inv_amt=1000, sell=1000,
                 q_lines=[{"desc": "A", "value": 1000}], i_lines=[{"desc": "A", "value": 1000}],
                 delivery=TODAY - dt.timedelta(days=5))
     aw.check_calculations([f])
-    html = tmpl.render(m=aw.compute_metrics([f], live_counts=counts, cost_available=False), demo=False)
-    assert "Rolling 12-month audit" in html and "window fully covered" in html
+    m = aw.compute_metrics([f], live_counts=counts, cost_available=False)
+    assert m["last_updated"] == "2 hours ago" and m["refresh_hours"] == 6
+    html = tmpl.render(m=m, demo=False)
+    assert "Rolling 12-month audit" in html
+    assert "updated 2 hours ago" in html and "auto-refreshes every 6h" in html
 
 
 def test_demo_dataset_renders():

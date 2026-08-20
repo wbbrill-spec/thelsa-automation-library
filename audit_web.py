@@ -773,12 +773,12 @@ TEMPLATE = r"""<!DOCTYPE html>
       {% for mode,d in m.modes.items() %}<tr><td>{{ mode }}</td><td class="num">{{ d.files }}</td><td class="num">{{ "{:,.0f}".format(d.profit) }}</td><td class="num">{{ d.margin }}%</td></tr>{% endfor %}</table></div>
   </div>
   {% endif %}
-  <h2>Calculation Accuracy — Revenue &amp; Cost</h2>
+  <h2>{% if m.cost_available %}Calculation Accuracy — Revenue &amp; Cost{% else %}Revenue Accuracy — Quote vs Invoice{% endif %}</h2>
   <div class="grid g4">
-    <div class="tile"><div class="label">Total discrepancy</div><div class="value num {{ 'bad' if m.total_disc else 'good' }}">{{ "{:,.0f}".format(m.total_disc) }}</div><div class="sub">across active files</div></div>
-    <div class="tile"><div class="label">Files with discrepancies</div><div class="value num {{ 'bad' if m.disc_files else 'good' }}">{{ m.disc_files }}</div><div class="sub">revenue/cost not reconciling</div></div>
-    <div class="tile"><div class="label">Coordinators affected</div><div class="value num {{ 'warn' if m.coords_affected else 'good' }}">{{ m.coords_affected }}</div><div class="sub">each alerted by draft</div></div>
-    <div class="tile"><div class="label">Checks applied</div><div class="value num">3</div><div class="sub">recalc · quote↔invoice · quote↔cost</div></div>
+    <div class="tile"><div class="label">Total discrepancy</div><div class="value num {{ 'bad' if m.total_disc else 'good' }}">{{ "{:,.0f}".format(m.total_disc) }}</div><div class="sub">across {{ "{:,}".format(m.sample_n) if not m.cost_available else 'active' }} checked files</div></div>
+    <div class="tile"><div class="label">Files with discrepancies</div><div class="value num {{ 'bad' if m.disc_files else 'good' }}">{{ m.disc_files }}</div><div class="sub">{% if m.cost_available %}revenue/cost not reconciling{% else %}invoiced ≠ quoted revenue{% endif %}</div></div>
+    <div class="tile"><div class="label">Coordinators affected</div><div class="value num {{ 'warn' if m.coords_affected else 'good' }}">{{ m.coords_affected }}</div><div class="sub">move coordinator of each file</div></div>
+    <div class="tile"><div class="label">Checks applied</div><div class="value num">{% if m.cost_available %}3{% else %}2{% endif %}</div><div class="sub">{% if m.cost_available %}recalc · quote↔invoice · quote↔cost{% else %}revenue recalc · quote↔invoice{% endif %}</div></div>
   </div>
   <div class="row" style="margin-top:12px">
     <div class="tile" style="flex:1;min-width:320px"><div class="label" style="margin-bottom:8px">Total discrepancy by move coordinator <span style="color:var(--muted)">· amount · # files</span></div>

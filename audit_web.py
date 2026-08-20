@@ -452,6 +452,44 @@ def audit_counts():
         return jsonify({"error": str(e)})
 
 
+@audit_bp.route("/audit/rawjobs")
+@_login_required
+def audit_rawjobs():
+    """Debug: light list of REAL jobs at a given feed offset (default: the most
+    recent 15). Lets us pick live job ids that actually carry money to inspect."""
+    from flask import jsonify, request
+    try:
+        import mw_live
+        off = int(request.args.get("offset", "485"))
+        lim = int(request.args.get("limit", "15"))
+        payload = mw_live._get_timed(f"/jobs?limit={lim}&offset={off}", 10)
+        jobs = mw_live._page_jobs(payload)
+        keys = ("id", "name", "status", "jobType", "method", "origin", "destination")
+        out = [{k: j.get(k) for k in keys} for j in jobs if isinstance(j, dict)]
+        return jsonify({"offset": off, "limit": lim, "count": len(jobs), "jobs": out})
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
+
+@audit_bp.route("/audit/rawjob")
+@_login_required
+def audit_rawjob():
+    """Debug: full quotes / invoices / account payloads for one job id, so we can
+    see exactly where sell, estimated cost, and actual (supplier) cost live."""
+    from flask import jsonify, request
+    import mw_live
+    jid = request.args.get("id", "").strip()
+    out = {"id": jid}
+    if not jid:
+        return jsonify({"error": "pass ?id=JOBID"})
+    for res in ("quotes", "invoices", "account"):
+        try:
+            out[res] = mw_live._get_timed(f"/jobs/{jid}/{res}", 10)
+        except Exception as e:
+            out[res + "_error"] = str(e)
+    return jsonify(out)
+
+
 TEMPLATE = r"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">

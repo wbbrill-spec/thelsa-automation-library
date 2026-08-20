@@ -469,6 +469,53 @@ def audit_counts():
         return jsonify({"error": str(e)})
 
 
+@audit_bp.route("/audit/probe")
+@_login_required
+def audit_probe():
+    """Debug: try candidate cost/creditor sub-resources for a job id and report
+    which exist and what they contain, so we can find where supplier cost lives."""
+    from flask import jsonify, request
+    import mw_live
+    jid = request.args.get("id", "").strip()
+    if not jid:
+        return jsonify({"error": "pass ?id=JOBID"})
+    candidates = [
+        f"/jobs/{jid}/account",
+        f"/jobs/{jid}/account?type=creditor",
+        f"/jobs/{jid}/account?entity=creditor",
+        f"/jobs/{jid}/creditors",
+        f"/jobs/{jid}/creditor",
+        f"/jobs/{jid}/costs",
+        f"/jobs/{jid}/cost",
+        f"/jobs/{jid}/expenses",
+        f"/jobs/{jid}/payables",
+        f"/jobs/{jid}/payable",
+        f"/jobs/{jid}/purchaseorders",
+        f"/jobs/{jid}/suppliers",
+        f"/jobs/{jid}/disbursements",
+        f"/jobs/{jid}/financials",
+        f"/jobs/{jid}/charges",
+        f"/jobs/{jid}/estimate",
+        f"/jobs/{jid}/costing",
+        f"/creditors?jobId={jid}",
+        f"/creditorinvoices?jobId={jid}",
+    ]
+    out = {"id": jid, "results": {}}
+    for path in candidates:
+        try:
+            r = mw_live._get_timed(path, 8)
+            if isinstance(r, dict):
+                keys = list(r.keys())
+                arrs = {k: len(v) for k, v in r.items() if isinstance(v, list)}
+                out["results"][path] = {"ok": True, "keys": keys, "arrays": arrs}
+            else:
+                out["results"][path] = {"ok": True, "type": str(type(r))}
+        except Exception as e:
+            msg = str(e)
+            out["results"][path] = {"ok": False, "err": msg[:120]}
+    return jsonify(out)
+
+
 @audit_bp.route("/audit/rawjobs")
 @_login_required
 def audit_rawjobs():

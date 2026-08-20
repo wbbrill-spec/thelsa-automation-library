@@ -708,7 +708,9 @@ _AUDIT = {
     "started_at": None,
     "last_cycle_at": None,
     "wrapped": False,     # True once we've reached the far edge of the window
-    "window_complete": False,  # True once the last 12 months are fully covered
+    "window_complete": False,  # full-coverage: True once EVERY file is audited (100%)
+    "window_ready": False,     # True once the recent 12-month window is fully covered
+                               # (fast; the recoverable view is usable from here)
     "last_full_at": None, # unix time the last COMPLETE scan finished (persisted)
     "saved_at": None,     # unix time the snapshot was last written to disk
     "refetch": False,     # True during a scheduled refresh (re-fetch cached files)
@@ -746,6 +748,25 @@ def _safe_map(job):
 # stops advancing (idles, re-scanning the newest pages for new/updated files).
 _WINDOW_DAYS = 365
 _WINDOW_STOP = 60         # consecutive out-of-window files => window fully covered
+
+# Full coverage: audit EVERY active file in the book (100% coverage), not just the
+# last 12 months. In-window files keep the full record (line items etc.) for the
+# recoverable-window analysis; out-of-window ("historical") files are audited too
+# but kept as a LIGHT record (no charge lines) — enough for coverage/revenue, not
+# for the discrepancy view (which stays window-scoped). The dashboard filters to
+# the 12-month window for its metrics and reports total coverage separately.
+_FULL_COVERAGE = os.environ.get("AUDIT_FULL_COVERAGE", "1") == "1"
+_REFRESH_SCAN_PAGES = 40   # newest pages scanned for brand-new files on refresh
+_BACKFILL_PERSIST_EVERY = 20  # persist the growing snapshot every N backfill cycles
+
+
+def _trim_historical(m: dict) -> dict:
+    """Light record for an out-of-window file: drop the heavy per-charge line
+    lists (only the in-window discrepancy view needs those)."""
+    m2 = dict(m)
+    for k in ("q_lines", "i_lines", "rev_lines", "rev_reported", "n_rev_lines"):
+        m2.pop(k, None)
+    return m2
 
 
 def _window_cutoff() -> "dt.date":
@@ -821,6 +842,8 @@ def _persist_snapshot():
             "old_ids": list(_AUDIT["old_ids"]),
             "total": _AUDIT["total"],
             "window_complete": _AUDIT["window_complete"],
+            "window_ready": _AUDIT["window_ready"],
+            "full_coverage": _FULL_COVERAGE,
             "window_days": _WINDOW_DAYS,
             "last_full_at": _AUDIT["last_full_at"],
             "saved_at": time.time(),
@@ -851,14 +874,29 @@ def _load_snapshot() -> bool:
     files = snap.get("files") or {}
     if not isinstance(files, dict):
         return False
+    total = snap.get("total")
+    snap_wc = bool(snap.get("window_complete"))
+    snap_full = bool(snap.get("full_coverage"))
+    if _FULL_COVERAGE:
+        # In full-coverage mode window_complete means "whole book audited". A
+        # snapshot from window-only mode (or a partial backfill) has far fewer
+        # files than the feed — treat the book as NOT complete so the historical
+        # backfill runs, but the recoverable window is already covered (ready).
+        fully = bool(total) and len(files) >= int(total * 0.95)
+        wc = fully
+        wr = bool(snap.get("window_ready")) or snap_wc or fully
+    else:
+        wc = snap_wc
+        wr = bool(snap.get("window_ready")) or snap_wc
     with _AUDIT_LOCK:
         _AUDIT["files"] = files
         _AUDIT["old_ids"] = set(snap.get("old_ids") or [])
-        _AUDIT["total"] = snap.get("total")
-        _AUDIT["window_complete"] = bool(snap.get("window_complete"))
-        _AUDIT["last_full_at"] = snap.get("last_full_at")
+        _AUDIT["total"] = total
+        _AUDIT["window_complete"] = wc
+        _AUDIT["window_ready"] = wr
+        _AUDIT["last_full_at"] = snap.get("last_full_at") if wc else None
         _AUDIT["saved_at"] = snap.get("saved_at")
-        _AUDIT["page"] = _auditor_last_page(_AUDIT["total"] or 1)
+        _AUDIT["page"] = _auditor_last_page(total or 1)
     return True
 
 
@@ -935,6 +973,20 @@ def _auditor_cycle():
         m = mapped.get(jid)
         if not m:
             continue
+        if _FULL_COVERAGE:
+            # Audit EVERYTHING. In-window files keep the full record; out-of-window
+            # ("historical") files get a light record. Never trigger the window-edge
+            # stop — the walk runs to page 1, so coverage reaches 100%.
+            out = _is_out_of_window(m)
+            with _AUDIT_LOCK:
+                _AUDIT["files"][jid] = _trim_historical(m) if out else m
+                if out and not _AUDIT["window_ready"]:
+                    # Walking newest→oldest, the first out-of-window file means every
+                    # recent (in-window) file above it is already cached: the
+                    # recoverable 12-month view is ready even though the historical
+                    # backfill continues.
+                    _AUDIT["window_ready"] = True
+            continue
         anchor = _file_anchor_date(m)
         if anchor is None:
             # Undated file (open quote / not yet scheduled). Keep it as current
@@ -985,25 +1037,108 @@ def _auditor_cycle():
         _AUDIT["last_cycle_at"] = time.time()
 
 
+def _refresh_recent():
+    """Scheduled refresh (full-coverage mode). Old files are immutable, so only
+    RE-audit the in-window files (new invoices/dates) and pick up brand-new files
+    from the newest pages. Historical records are left untouched."""
+    # Re-probe the feed total so newly-created files (higher ids, on pages past the
+    # old last page) are in range of the newest-pages scan below.
+    total = _feed_total() or 0
+    with _AUDIT_LOCK:
+        if total:
+            _AUDIT["total"] = total
+        else:
+            total = _AUDIT["total"] or 0
+    if not total:
+        return
+    last_page = _auditor_last_page(total)
+    with _AUDIT_LOCK:
+        in_window_ids = [jid for jid, m in _AUDIT["files"].items() if not _is_out_of_window(m)]
+    # Detect brand-new files on the newest pages (ids not yet audited).
+    new_jobs = {}
+    for p in range(last_page, max(0, last_page - _REFRESH_SCAN_PAGES), -1):
+        try:
+            jobs = _page_jobs(_get_timed(f"/jobs?limit={_AUDIT_PAGE}&offset={p}", _REQ_TIMEOUT))
+        except Exception:
+            continue
+        for j in jobs:
+            jid = str(_first(j, "id", "jobId", "jobNumber", "jobFile", default="") or "")
+            if not jid or _job_status(j) in _INACTIVE_STATUS:
+                continue
+            with _AUDIT_LOCK:
+                known = jid in _AUDIT["files"]
+            if not known:
+                new_jobs[jid] = j
+    targets = [(jid, {"id": jid}) for jid in in_window_ids] + list(new_jobs.items())
+    for i in range(0, len(targets), _AUDIT_PAGE):
+        batch = targets[i:i + _AUDIT_PAGE]
+        results = {}
+        with ThreadPoolExecutor(max_workers=_AUDIT_WORKERS) as ex:
+            futs = {ex.submit(_safe_map, j): jid for jid, j in batch}
+            for fut in futs:
+                results[futs[fut]] = fut.result()
+        with _AUDIT_LOCK:
+            for jid, m in results.items():
+                if not m:
+                    continue
+                _AUDIT["files"][jid] = _trim_historical(m) if _is_out_of_window(m) else m
+            _AUDIT["cycles"] += 1
+
+
 def _auditor_loop():
     with _AUDIT_LOCK:
         _AUDIT["started_at"] = time.time()
     # Resume from the last persisted snapshot: instant comprehensive view after a
-    # restart/deploy instead of re-crawling the whole window from zero.
+    # restart/deploy instead of re-crawling from zero.
     _load_snapshot()
+
+    if _FULL_COVERAGE:
+        while True:
+            try:
+                with _AUDIT_LOCK:
+                    complete = _AUDIT["window_complete"]   # full backfill done?
+                    ready = _AUDIT["window_ready"]
+                    last_full = _AUDIT["last_full_at"] or 0
+                if not complete:
+                    # Backfill phase: walk the whole book, auditing every file.
+                    with _AUDIT_LOCK:
+                        was_ready = _AUDIT["window_ready"]
+                    _auditor_cycle()
+                    with _AUDIT_LOCK:
+                        now_complete = _AUDIT["window_complete"]
+                        now_ready = _AUDIT["window_ready"]
+                        cyc = _AUDIT["cycles"]
+                    # Persist as soon as the recoverable window is covered, on full
+                    # completion, and periodically through the long historical crawl.
+                    if now_complete:
+                        with _AUDIT_LOCK:
+                            _AUDIT["last_full_at"] = time.time()
+                        _persist_snapshot()
+                    elif (now_ready and not was_ready) or (cyc % _BACKFILL_PERSIST_EVERY == 0):
+                        _persist_snapshot()
+                    time.sleep(_AUDIT_SLEEP)
+                elif (time.time() - last_full) >= _REFRESH_SECONDS:
+                    _refresh_recent()
+                    with _AUDIT_LOCK:
+                        _AUDIT["last_full_at"] = time.time()
+                    _persist_snapshot()
+                else:
+                    time.sleep(_AUDIT_IDLE_SLEEP)
+            except Exception:
+                with _AUDIT_LOCK:
+                    _AUDIT["errors"] += 1
+                time.sleep(_AUDIT_SLEEP)
+        return
+
+    # ── Window-only mode (legacy / _FULL_COVERAGE off) ──
     while True:
         try:
             with _AUDIT_LOCK:
                 complete = _AUDIT["window_complete"]
                 last_full = _AUDIT["last_full_at"] or 0
-            # When the snapshot is complete and the next refresh isn't due, idle
-            # cheaply (no API calls) instead of re-scanning every couple seconds.
             if complete and (time.time() - last_full) < _REFRESH_SECONDS:
                 time.sleep(_AUDIT_IDLE_SLEEP)
                 continue
-            # Refresh is due: re-scan the whole window to pick up new bookings /
-            # invoices / deliveries. The existing snapshot stays visible and is
-            # updated file-by-file as the re-scan progresses.
             if complete:
                 with _AUDIT_LOCK:
                     _AUDIT["refetch"] = True
@@ -1018,7 +1153,6 @@ def _auditor_loop():
             with _AUDIT_LOCK:
                 now_complete = _AUDIT["window_complete"]
             if now_complete and not was_complete:
-                # A full scan just finished — stamp it and persist the snapshot.
                 with _AUDIT_LOCK:
                     _AUDIT["refetch"] = False
                     _AUDIT["last_full_at"] = time.time()
@@ -1043,21 +1177,37 @@ def ensure_auditor():
 
 
 def audited_files():
-    """Snapshot list of the revenue-audited files gathered so far (may be empty
-    right after boot while the auditor warms up)."""
+    """All revenue-audited files gathered so far — in-window AND historical."""
     with _AUDIT_LOCK:
         return list(_AUDIT["files"].values())
 
 
+def audited_in_window():
+    """Just the in-window (last-12-months) audited files — what the recoverable
+    dashboard metrics run over. Historical files are excluded here."""
+    with _AUDIT_LOCK:
+        return [m for m in _AUDIT["files"].values() if not _is_out_of_window(m)]
+
+
 def audit_progress():
     with _AUDIT_LOCK:
+        files = _AUDIT["files"]
+        audited_total = len(files)
+        in_window = sum(1 for m in files.values() if not _is_out_of_window(m))
+        # In full-coverage mode the recoverable window is "complete" once
+        # window_ready; window_complete means the whole book has been audited.
+        window_done = _AUDIT["window_ready"] or _AUDIT["window_complete"]
         return {
-            "audited": len(_AUDIT["files"]),
+            "audited": in_window,          # in-window files (drives the window view)
+            "audited_total": audited_total,  # ALL audited files (coverage numerator)
+            "in_window": in_window,
             "total": _AUDIT["total"],
             "cycles": _AUDIT["cycles"],
             "errors": _AUDIT["errors"],
             "wrapped": _AUDIT["wrapped"],
-            "window_complete": _AUDIT["window_complete"],
+            "window_complete": window_done,          # recoverable window ready?
+            "full_coverage": _FULL_COVERAGE,
+            "backfill_complete": _AUDIT["window_complete"],  # 100% of the book done?
             "window_days": _WINDOW_DAYS,
             "excluded_old": len(_AUDIT["old_ids"]),
             "running": bool(_AUDIT_THREAD is not None and _AUDIT_THREAD.is_alive()),

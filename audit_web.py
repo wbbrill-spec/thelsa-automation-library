@@ -433,6 +433,9 @@ def compute_metrics(files, live_counts=None, cost_available=True):
         last_full_at = live_counts.get("last_full_at")
         refreshing = bool(live_counts.get("refreshing"))
         refresh_seconds = live_counts.get("refresh_seconds") or 0
+        audited_total = live_counts.get("audited_total") or 0
+        full_coverage = bool(live_counts.get("full_coverage"))
+        backfill_complete = bool(live_counts.get("backfill_complete"))
     else:
         true_active = len(active)
         active_available = True
@@ -449,7 +452,11 @@ def compute_metrics(files, live_counts=None, cost_available=True):
         last_full_at = None
         refreshing = False
         refresh_seconds = 0
+        audited_total = 0
+        full_coverage = False
+        backfill_complete = False
     window_months = int(round(window_days / 30.0))
+    cov_pct = round(audited_total / feed_total * 100) if (full_coverage and feed_total) else 0
     refresh_hours = int(round(refresh_seconds / 3600.0)) if refresh_seconds else 0
     # Human "last updated" label from the last completed full scan.
     last_updated = None
@@ -484,6 +491,8 @@ def compute_metrics(files, live_counts=None, cost_available=True):
         "window_months": window_months, "excluded_old": excluded_old,
         "last_updated": last_updated, "refreshing": refreshing,
         "refresh_hours": refresh_hours,
+        "audited_total": audited_total, "full_coverage": full_coverage,
+        "backfill_complete": backfill_complete, "cov_pct": cov_pct,
         "sample_n": sample_n, "feed_total": feed_total,
         "feed_exhausted": feed_exhausted, "feed_pages": feed_pages,
         "audited_this_month": len(files),
@@ -517,7 +526,9 @@ def _load_checked():
         import mw_live
         if mw_live.have_creds():
             mw_live.ensure_auditor()
-            audited = mw_live.audited_files()
+            # Metrics run over the IN-WINDOW (last-12-months) files only; total
+            # coverage across the whole book is reported separately.
+            audited = mw_live.audited_in_window()
             prog = mw_live.audit_progress()
             counts = {
                 "total": prog.get("total"),
@@ -535,6 +546,9 @@ def _load_checked():
                 "refreshing": prog.get("refreshing"),
                 "refresh_seconds": prog.get("refresh_seconds"),
                 "persisted": prog.get("persisted"),
+                "audited_total": prog.get("audited_total"),
+                "full_coverage": prog.get("full_coverage"),
+                "backfill_complete": prog.get("backfill_complete"),
             }
             files = reconcile(audited, cost_available=False) if audited else []
             check_calculations(files)
@@ -803,7 +817,8 @@ TEMPLATE = r"""<!DOCTYPE html>
   </div>
   {% else %}
   <div style="background:var(--tint);border:1px solid var(--line);border-radius:12px;padding:11px 15px;margin-bottom:6px;font-size:12.5px;color:var(--muted)">
-    <b style="color:var(--ink)">Rolling {{ m.window_months }}-month audit</b> · <b style="color:var(--ink)">{{ "{:,}".format(m.sample_n) }}</b> files{% if m.window_complete %}{% if m.last_updated %} · updated {{ m.last_updated }}{% endif %}{% if m.refresh_hours %} · auto-refreshes every {{ m.refresh_hours }}h{% endif %}{% if m.refreshing %} · refreshing now{% endif %}{% elif m.audit_running %} · building, and counting{% endif %}{% if m.excluded_old %} · {{ "{:,}".format(m.excluded_old) }} older files excluded{% endif %}. Every file with move activity in the last {{ m.window_months }} months is audited — older jobs (of ~{{ "{:,}".format(m.feed_total) }} total in MoveWare) are out of scope because charges that old aren't practically recoverable. Cost, profit and margin are not shown — Thelsa's current MoveWare API exposes revenue (quotes &amp; invoices) but not supplier cost.
+    <b style="color:var(--ink)">Rolling {{ m.window_months }}-month audit</b> · <b style="color:var(--ink)">{{ "{:,}".format(m.sample_n) }}</b> files{% if m.window_complete %}{% if m.last_updated %} · updated {{ m.last_updated }}{% endif %}{% if m.refresh_hours %} · auto-refreshes every {{ m.refresh_hours }}h{% endif %}{% if m.refreshing %} · refreshing now{% endif %}{% elif m.audit_running %} · building, and counting{% endif %}. This is the recoverable view — every file with move activity in the last {{ m.window_months }} months. Cost, profit and margin are not shown — Thelsa's current MoveWare API exposes revenue (quotes &amp; invoices) but not supplier cost.
+    {% if m.full_coverage %}<div style="margin-top:6px;padding-top:6px;border-top:1px solid var(--line)"><b style="color:var(--ink)">Full-history coverage:</b> {% if m.backfill_complete %}all <b style="color:var(--ink)">{{ "{:,}".format(m.audited_total) }}</b> files in MoveWare audited ✓{% else %}<b style="color:var(--ink)">{{ "{:,}".format(m.audited_total) }}</b> of ~{{ "{:,}".format(m.feed_total) }} files audited ({{ m.cov_pct }}%) — backfilling older files in the background.{% endif %}</div>{% endif %}
   </div>
   {% endif %}
   {% endif %}
@@ -823,7 +838,7 @@ TEMPLATE = r"""<!DOCTYPE html>
   {% endif %}
   <h2>Workload &amp; Pipeline</h2>
   <div class="row">
-    <div class="tile" style="flex:1;min-width:220px"><div class="label">{% if demo %}Active files{% else %}Files in last {{ m.window_months }} months{% endif %}</div><div class="value num">{% if demo %}{{ m.total_active }}{% else %}{{ "{:,}".format(m.sample_n) }}{% endif %}</div><div class="sub">{% if not demo %}revenue-checked{% if not m.window_complete and m.audit_running %} · and counting{% endif %} · of ~{{ "{:,}".format(m.feed_total) }} total in MoveWare{% else %}{{ m.audited_this_month }} audited this month{% endif %}</div></div>
+    <div class="tile" style="flex:1;min-width:220px"><div class="label">{% if demo %}Active files{% else %}Files in last {{ m.window_months }} months{% endif %}</div><div class="value num">{% if demo %}{{ m.total_active }}{% else %}{{ "{:,}".format(m.sample_n) }}{% endif %}</div><div class="sub">{% if not demo %}revenue-checked{% if not m.window_complete and m.audit_running %} · and counting{% endif %}{% if m.full_coverage %} · {{ "{:,}".format(m.audited_total) }} of ~{{ "{:,}".format(m.feed_total) }} total audited{% if not m.backfill_complete %} ({{ m.cov_pct }}%){% endif %}{% else %} · of ~{{ "{:,}".format(m.feed_total) }} total in MoveWare{% endif %}{% else %}{{ m.audited_this_month }} audited this month{% endif %}</div></div>
     <div class="tile" style="flex:2;min-width:280px"><div class="label">Files by audit stage</div>
       {% for s,n in m.by_stage.items() %}<div class="stage-line"><span>{{ s.replace('_',' ') }}</span><span class="num">{{ n }}</span></div>{% endfor %}</div>
   </div>

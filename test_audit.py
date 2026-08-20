@@ -181,10 +181,12 @@ def fake_feed(monkeypatch):
     monkeypatch.setattr(mw, "_page_jobs", lambda p: p["jobs"])
     monkeypatch.setattr(mw, "_job_status", lambda j: "W")
     monkeypatch.setattr(mw, "_map_job", map_job)
+    # These fixture tests validate the WINDOW-ONLY walk; force that mode.
+    monkeypatch.setattr(mw, "_FULL_COVERAGE", False)
     mw._AUDIT.update({
         "files": {}, "old_ids": set(), "total": None, "page": None, "cycles": 0,
         "errors": 0, "consec_old": 0, "started_at": None, "last_cycle_at": None,
-        "wrapped": False, "window_complete": False,
+        "wrapped": False, "window_complete": False, "window_ready": False,
         "last_full_at": None, "saved_at": None, "refetch": False,
     })
     return state
@@ -234,6 +236,69 @@ def test_feed_smaller_than_window_completes(fake_feed):
     _run_until_complete()
     assert mw._AUDIT["window_complete"] is True
     assert len(mw._AUDIT["files"]) == 400
+
+
+# ── full-coverage mode (audit the whole book, keep window as the view) ───────
+@pytest.fixture
+def full_feed(monkeypatch):
+    state = {"total": 400, "recent_from": 300}
+
+    def get_timed(url, to):
+        off = int(re.search(r"offset=(\d+)", url).group(1))
+        lim = int(re.search(r"limit=(\d+)", url).group(1))
+        start = (off - 1) * lim + 1
+        ids = [i for i in range(start, min(start + lim, state["total"] + 1))]
+        return {"jobs": [{"id": str(i)} for i in ids]}
+
+    def map_job(j):
+        i = int(j["id"])
+        d = (TODAY - dt.timedelta(days=20)) if i >= state["recent_from"] else (TODAY - dt.timedelta(days=500))
+        return {"job": j["id"], "delivery": d, "pack": None, "anchor": d,
+                "q_lines": [{"desc": "x", "value": 1}], "i_lines": []}
+
+    monkeypatch.setattr(mw, "_feed_total", lambda: state["total"])
+    monkeypatch.setattr(mw, "_get_timed", get_timed)
+    monkeypatch.setattr(mw, "_page_jobs", lambda p: p["jobs"])
+    monkeypatch.setattr(mw, "_job_status", lambda j: "W")
+    monkeypatch.setattr(mw, "_map_job", map_job)
+    monkeypatch.setattr(mw, "_FULL_COVERAGE", True)
+    mw._AUDIT.update({
+        "files": {}, "old_ids": set(), "total": None, "page": None, "cycles": 0,
+        "errors": 0, "consec_old": 0, "started_at": None, "last_cycle_at": None,
+        "wrapped": False, "window_complete": False, "window_ready": False,
+        "last_full_at": None, "saved_at": None, "refetch": False,
+    })
+    return state
+
+
+def test_full_coverage_audits_every_file(full_feed):
+    _run_until_complete()  # window_complete == backfill complete in full mode
+    assert len(mw._AUDIT["files"]) == 400          # 100% of the book
+    assert mw._AUDIT["window_ready"] is True
+    # in-window vs historical split is correct
+    assert len(mw.audited_in_window()) == 101       # ids 300..400
+    # historical files are stored as LIGHT records (no charge lines)
+    hist = mw._AUDIT["files"]["100"]
+    assert "q_lines" not in hist
+
+
+def test_full_coverage_window_ready_before_backfill_done(full_feed):
+    # Run just enough cycles to pass the recent region but not the whole feed.
+    for _ in range(6):
+        mw._auditor_cycle()
+    assert mw._AUDIT["window_ready"] is True         # recoverable view usable early
+    assert mw._AUDIT["window_complete"] is False     # backfill still going
+    assert len(mw.audited_in_window()) == 101
+
+
+def test_audit_progress_reports_coverage(full_feed):
+    _run_until_complete()
+    p = mw.audit_progress()
+    assert p["full_coverage"] is True
+    assert p["backfill_complete"] is True
+    assert p["audited_total"] == 400
+    assert p["in_window"] == 101
+    assert p["window_complete"] is True   # window_ready => window view complete
 
 
 def test_anchor_drives_window_with_created_fallback():
@@ -296,10 +361,11 @@ def test_undated_leads_do_not_prevent_termination(monkeypatch):
     monkeypatch.setattr(mw, "_page_jobs", lambda p: p["jobs"])
     monkeypatch.setattr(mw, "_job_status", lambda j: "W")
     monkeypatch.setattr(mw, "_map_job", map_job)
+    monkeypatch.setattr(mw, "_FULL_COVERAGE", False)   # window-only termination test
     mw._AUDIT.update({
         "files": {}, "old_ids": set(), "total": None, "page": None, "cycles": 0,
         "errors": 0, "consec_old": 0, "started_at": None, "last_cycle_at": None,
-        "wrapped": False, "window_complete": False,
+        "wrapped": False, "window_complete": False, "window_ready": False,
         "last_full_at": None, "saved_at": None, "refetch": False,
     })
     c = 0
@@ -316,6 +382,7 @@ def test_undated_leads_do_not_prevent_termination(monkeypatch):
 # ── persistence (survives restart) ──────────────────────────────────────────
 def test_snapshot_round_trip_preserves_files_and_dates(tmp_path, monkeypatch):
     monkeypatch.setattr(mw, "_CACHE_PATH", str(tmp_path / "cache.json"))
+    monkeypatch.setattr(mw, "_FULL_COVERAGE", False)  # basic persistence semantics
     d = TODAY - dt.timedelta(days=12)
     mw._AUDIT.update({
         "files": {"110995": {"job": "110995", "sell": 196166.22, "delivery": d, "pack": None,
@@ -351,6 +418,26 @@ def test_snapshot_ignored_if_window_length_changed(tmp_path, monkeypatch):
 def test_missing_snapshot_returns_false(tmp_path, monkeypatch):
     monkeypatch.setattr(mw, "_CACHE_PATH", str(tmp_path / "nope.json"))
     assert mw._load_snapshot() is False
+
+
+def test_full_coverage_resumes_backfill_from_window_only_snapshot(tmp_path, monkeypatch):
+    """An old window-only snapshot (window_complete=True, only ~632 of 11k files)
+    must NOT be treated as full-coverage-done — the historical backfill resumes,
+    but the recoverable window is immediately ready."""
+    import json as _json
+    monkeypatch.setattr(mw, "_FULL_COVERAGE", True)
+    monkeypatch.setattr(mw, "_CACHE_PATH", str(tmp_path / "c.json"))
+    snap = {
+        "files": {str(i): {"job": str(i), "anchor": {"__date__": TODAY.isoformat()}} for i in range(5)},
+        "old_ids": [], "total": 400, "window_complete": True, "window_days": 365,
+        "last_full_at": 123.0, "saved_at": 9.0,
+    }
+    (tmp_path / "c.json").write_text(_json.dumps(snap))
+    mw._AUDIT.update({"files": {}, "window_complete": False, "window_ready": False, "last_full_at": None})
+    assert mw._load_snapshot() is True
+    assert mw._AUDIT["window_ready"] is True        # recoverable view ready
+    assert mw._AUDIT["window_complete"] is False    # 5 of 400 => backfill resumes
+    assert mw._AUDIT["last_full_at"] is None         # so refresh doesn't fire before backfill
 
 
 # ── scheduled refresh re-fetches cached files ───────────────────────────────

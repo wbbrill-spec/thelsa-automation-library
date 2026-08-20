@@ -183,29 +183,31 @@ def _paginate_all_jobs(page_budget: float = _COUNT_BUDGET, max_pages: int = _MAX
     """Return (jobs, pages_fetched, exhausted) for the LIGHT /jobs feed — NO
     per-job sub-calls (never touches quotes/invoices/account).
 
-    Pages `?limit=_PAGE_SIZE&offset=N` in chunks. `exhausted` is True only when a
-    chunk comes back SHORT (fewer than _PAGE_SIZE rows) — that's the real end of
-    the feed, so the count is exact. If we stop for any other reason (budget, page
-    cap, an error, or the server ignoring `offset` and repeating a chunk) the
-    count is a floor (rendered as "N+") rather than a silent cap.
+    Pages `?limit=_PAGE_SIZE&offset=PAGE`. CRITICAL: Moveware's `offset` is a
+    PAGE INDEX (page number), not a row offset — confirmed live (offset=485,
+    limit=15 returns job ids ~107261, i.e. row ~7275 = 485×15). So we step the
+    page index by 1 each request, not by _PAGE_SIZE. `exhausted` is True only when
+    a page comes back SHORT (fewer than _PAGE_SIZE rows) — the real end of the feed
+    — so the count is exact. If we stop for any other reason (budget, page cap, an
+    error, or the server repeating a page) the count is a floor (rendered "N+").
     """
     start = time.time()
     jobs = []
     seen_first = set()
-    offset = 0
+    page_idx = 0
     pages = 0
     exhausted = False
     while pages < max_pages and time.time() - start < page_budget:
         try:
-            payload = _get_timed(f"/jobs?limit={_PAGE_SIZE}&offset={offset}", _COUNT_TIMEOUT)
+            payload = _get_timed(f"/jobs?limit={_PAGE_SIZE}&offset={page_idx}", _COUNT_TIMEOUT)
         except Exception:
             break
         page = _page_jobs(payload)
         if not page:
-            exhausted = True  # empty chunk → past the end of the feed
+            exhausted = True  # empty page → past the end of the feed
             break
-        # Guard against a server that ignores `offset` and re-serves chunk 1:
-        # if this chunk leads with an id we've already seen, we can't page on.
+        # Guard against a server that ignores `offset` and re-serves page 0:
+        # if this page leads with an id we've already seen, we can't page on.
         first_id = str(_first(page[0], "id", "jobId", "jobNumber", "jobFile", default="") or "")
         if first_id and first_id in seen_first:
             break  # offset not honoured — stop; count is a floor
@@ -213,9 +215,9 @@ def _paginate_all_jobs(page_budget: float = _COUNT_BUDGET, max_pages: int = _MAX
         jobs.extend(page)
         pages += 1
         if len(page) < _PAGE_SIZE:
-            exhausted = True  # short chunk → exact end of the feed
+            exhausted = True  # short page → exact end of the feed
             break
-        offset += _PAGE_SIZE
+        page_idx += 1
     return jobs, pages, exhausted
 
 
@@ -448,18 +450,14 @@ def _map_job(job: dict) -> dict | None:
     except Exception:
         pass
  
-    # Actual cost from the account (creditor/AP) endpoint when present.
+    # Actual (supplier/creditor) cost is NOT available in Moveware RestV1: the
+    # /jobs/{id}/account endpoint returns DEBTOR (receivable) lines — what the
+    # CLIENT owes — which equal revenue, not what Thelsa pays its agents/carriers.
+    # Summing it produced cost == revenue → profit 0 (the bogus figures). So we do
+    # NOT call /account and we leave actual cost UNKNOWN (0). Profit/margin are
+    # suppressed downstream (cost_available=False) until a real cost source exists
+    # (RestV2 / a creditor endpoint). This also drops a sub-call per job.
     actual_cost = 0.0
-    try:
-        acc = _get(f"/jobs/{job_id}/account")
-        for a in (_first(acc, "account", default=[]) or []):
-            actual_cost += _num(_first(a, "value", "amount", "total", "cost"))
-    except Exception:
-        pass
-    # If no creditor lines yet, fall back to estimated cost (flagged downstream
-    # as a gap rather than invented profit).
-    if actual_cost == 0:
-        actual_cost = est_cost
  
     mode = _mode(src if src else job)
  

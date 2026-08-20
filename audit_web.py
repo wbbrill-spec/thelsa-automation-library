@@ -235,7 +235,7 @@ def _in_month(day, ms, me):
     return bool(day and ms <= day < me)
 
 
-def compute_metrics(files, live_counts=None):
+def compute_metrics(files, live_counts=None, cost_available=True):
     today = dt.date.today()
     ms = today.replace(day=1)
     me = (ms.replace(year=ms.year + 1, month=1) if ms.month == 12
@@ -340,8 +340,15 @@ def compute_metrics(files, live_counts=None):
         feed_exhausted = True
         feed_pages = 0
 
+    # Revenue is real (posted invoices / quoted sell). Cost is only meaningful
+    # when we actually have supplier cost — false on live RestV1 data, so the
+    # template hides profit / margin / leakage rather than showing 0s.
+    tot_revenue = round(tot_rev)
+
     return {
         "as_of": today.isoformat(),
+        "cost_available": cost_available,
+        "tot_revenue": tot_revenue,
         "total_active": true_active, "by_stage": by_stage,
         "sample_n": sample_n, "feed_total": feed_total,
         "feed_exhausted": feed_exhausted, "feed_pages": feed_pages,
@@ -396,7 +403,9 @@ def _load_checked():
 @_login_required
 def audit():
     files, is_live, counts = _load_checked()
-    m = compute_metrics(files, live_counts=counts)
+    # Live RestV1 data has NO supplier cost (see mw_live._map_job), so profit and
+    # margin can't be computed from it — hide them rather than show fabricated 0s.
+    m = compute_metrics(files, live_counts=counts, cost_available=not is_live)
     return render_template_string(TEMPLATE, m=m, demo=not is_live)
 
 
@@ -540,13 +549,20 @@ TEMPLATE = r"""<!DOCTYPE html>
   {% if not demo %}<div style="background:var(--tint);border:1px solid var(--line);border-radius:12px;padding:11px 15px;margin-bottom:6px;font-size:12.5px;color:var(--muted)">
     <b style="color:var(--ink)">{{ "{:,}".format(m.total_active) }}{% if not m.feed_exhausted %}+{% endif %} active files</b> counted live across the whole MoveWare feed{% if m.feed_pages %} ({{ m.feed_total }} files scanned over {{ m.feed_pages }} page{{ 's' if m.feed_pages != 1 else '' }}){% endif %}. The financial figures and worklists below are computed from a deep-checked sample of <b style="color:var(--ink)">{{ m.sample_n }}</b> files this load (each requires several MoveWare calls), and expand as the sample grows.
   </div>{% endif %}
-  <h2>Profitability</h2>
+  <h2>{% if m.cost_available %}Profitability{% else %}Revenue{% endif %}</h2>
+  {% if m.cost_available %}
   <div class="grid g4">
     <div class="tile"><div class="label">Total revenue</div><div class="value num">{{ "{:,.0f}".format(m.tot_rev) }}</div><div class="sub">cost {{ "{:,.0f}".format(m.tot_cost) }}</div></div>
     <div class="tile"><div class="label">Total profit</div><div class="value num {{ 'good' if m.tot_profit>=0 else 'bad' }}">{{ "{:,.0f}".format(m.tot_profit) }}</div><div class="sub">gross margin {{ m.gross_margin }}%</div></div>
     <div class="tile"><div class="label">Profit leakage (est − act)</div><div class="value num {{ 'bad' if m.leakage>0 else 'good' }}">{{ "{:,.0f}".format(m.leakage) }}</div><div class="sub">estimated vs actual profit</div></div>
     <div class="tile"><div class="label">Negative-margin files</div><div class="value num {{ 'bad' if m.neg else 'good' }}">{{ m.neg }}</div><div class="sub">avg profit/file {{ "{:,.0f}".format(m.avg_prof) }}</div></div>
   </div>
+  {% else %}
+  <div class="row">
+    <div class="tile" style="flex:1;min-width:240px"><div class="label">Revenue (sampled files)</div><div class="value num">{{ "{:,.0f}".format(m.tot_revenue) }}</div><div class="sub">from posted invoices · {{ m.sample_n }}-file sample</div></div>
+    <div class="tile" style="flex:2;min-width:320px;background:var(--tint)"><div class="label" style="color:var(--rust-dark)">Cost &amp; profit — not available yet</div><div class="sub" style="margin-top:6px;line-height:1.5">Moveware RestV1 does not expose supplier/creditor cost (the account endpoint returns client receivables, not what Thelsa pays agents/carriers). Profit and margin are hidden rather than shown as fabricated zeros. Restoring them needs a real cost source — RestV2 or a confirmed creditor endpoint.</div></div>
+  </div>
+  {% endif %}
   <h2>Workload &amp; Pipeline</h2>
   <div class="row">
     <div class="tile" style="flex:1;min-width:220px"><div class="label">Active files</div><div class="value num">{{ m.total_active }}{% if not m.feed_exhausted %}+{% endif %}</div><div class="sub">{% if not demo %}{{ "{:,}".format(m.feed_total) }} files in feed · {{ m.sample_n }} deep-checked below{% else %}{{ m.audited_this_month }} audited this month{% endif %}</div></div>
@@ -560,6 +576,7 @@ TEMPLATE = r"""<!DOCTYPE html>
     <div class="tile"><div class="label">Percent billed</div><div class="value num {{ 'good' if m.pct_billed>=80 else 'warn' }}">{{ m.pct_billed }}%</div></div>
     <div class="tile"><div class="label">Overdue to invoice</div><div class="value num {{ 'bad' if m.overdue else 'good' }}">{{ m.overdue }}</div><div class="sub">date passed, not billed</div></div>
   </div>
+  {% if m.cost_available %}
   <h2>Gaps &amp; Recovery</h2>
   <div class="grid g4">
     <div class="tile"><div class="label">Avg gaps / file</div><div class="value num">{{ m.avg_gaps }}</div><div class="sub">avg value {{ "{:,.0f}".format(m.avg_gap_val) }}</div></div>
@@ -577,6 +594,7 @@ TEMPLATE = r"""<!DOCTYPE html>
       <table style="border:none"><tr><th>Mode</th><th>Files</th><th>Profit</th><th>Margin</th></tr>
       {% for mode,d in m.modes.items() %}<tr><td>{{ mode }}</td><td class="num">{{ d.files }}</td><td class="num">{{ "{:,.0f}".format(d.profit) }}</td><td class="num">{{ d.margin }}%</td></tr>{% endfor %}</table></div>
   </div>
+  {% endif %}
   <h2>Calculation Accuracy — Revenue &amp; Cost</h2>
   <div class="grid g4">
     <div class="tile"><div class="label">Total discrepancy</div><div class="value num {{ 'bad' if m.total_disc else 'good' }}">{{ "{:,.0f}".format(m.total_disc) }}</div><div class="sub">across active files</div></div>
@@ -601,13 +619,21 @@ TEMPLATE = r"""<!DOCTYPE html>
     <td>{{ r.types }}</td><td class="num bad">{{ "{:,.0f}".format(r.value) }}</td></tr>{% endfor %}</table>
   {% endif %}
 
-  <h2>Files Needing Attention</h2>
+  <h2>{% if m.cost_available %}Files Needing Attention{% else %}Sampled Files{% endif %}</h2>
+  {% if m.cost_available %}
   <table><tr><th>Job</th><th>Client</th><th>Mode</th><th>Stage</th><th>Margin</th><th>Actual profit</th><th>Open gaps</th><th>Gap value</th></tr>
   {% for r in m.worklist %}<tr>
     <td class="num">{{ r.job }}</td><td>{{ r.client }}</td><td>{{ r.mode }}</td>
     <td>{% if r.stage=='gap_flagged' %}<span class="pill gap">gap flagged</span>{% elif r.stage in ('resolved','closed') %}<span class="pill ok">{{ r.stage }}</span>{% else %}<span class="pill rev">{{ r.stage.replace('_',' ') }}</span>{% endif %}</td>
     <td class="num {{ 'bad' if r.margin<0 else '' }}">{{ r.margin }}%</td><td class="num">{{ "{:,.0f}".format(r.profit) }}</td>
     <td class="num">{{ r.open_gaps }}</td><td class="num">{{ "{:,.0f}".format(r.gap_value) }}</td></tr>{% endfor %}</table>
+  {% else %}
+  <table><tr><th>Job</th><th>Client</th><th>Mode</th><th>Stage</th></tr>
+  {% for r in m.worklist %}<tr>
+    <td class="num">{{ r.job }}</td><td>{{ r.client }}</td><td>{{ r.mode }}</td>
+    <td>{% if r.stage=='gap_flagged' %}<span class="pill gap">gap flagged</span>{% elif r.stage in ('resolved','closed') %}<span class="pill ok">{{ r.stage }}</span>{% else %}<span class="pill rev">{{ r.stage.replace('_',' ') }}</span>{% endif %}</td></tr>{% endfor %}</table>
+  <p class="sub" style="color:var(--muted);margin-top:8px">Sample of {{ m.sample_n }} files deep-checked this load (of {{ m.total_active }} active). Cost/margin columns hidden — supplier cost not available from Moveware RestV1.</p>
+  {% endif %}
   <footer>Thelsa Automation Library · the audit runs on imperfect data and flags it — figures in file currency (mixed).</footer>
 </main></body></html>
 """

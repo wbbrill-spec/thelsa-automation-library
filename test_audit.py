@@ -236,6 +236,50 @@ def test_feed_smaller_than_window_completes(fake_feed):
     assert len(mw._AUDIT["files"]) == 400
 
 
+def test_undated_leads_do_not_prevent_termination(monkeypatch):
+    """Regression: pending leads with NO move date must not reset the window-edge
+    counter, or the walk crawls the entire history and never completes."""
+    TOTAL = 600
+    calls = {"n": 0}
+
+    def get_timed(url, to):
+        off = int(re.search(r"offset=(\d+)", url).group(1))
+        lim = int(re.search(r"limit=(\d+)", url).group(1))
+        start = (off - 1) * lim + 1
+        ids = [i for i in range(start, min(start + lim, TOTAL + 1))]
+        return {"jobs": [{"id": str(i)} for i in ids]}
+
+    def map_job(j):
+        calls["n"] += 1
+        i = int(j["id"])
+        if i >= 500:                       # recent, dated -> in window
+            return {"job": j["id"], "delivery": TODAY - dt.timedelta(days=20), "pack": None}
+        if i % 3 == 0:                     # ancient never-dated leads sprinkled throughout
+            return {"job": j["id"], "delivery": None, "pack": None}
+        return {"job": j["id"], "delivery": TODAY - dt.timedelta(days=500), "pack": None}
+
+    monkeypatch.setattr(mw, "_feed_total", lambda: TOTAL)
+    monkeypatch.setattr(mw, "_get_timed", get_timed)
+    monkeypatch.setattr(mw, "_page_jobs", lambda p: p["jobs"])
+    monkeypatch.setattr(mw, "_job_status", lambda j: "W")
+    monkeypatch.setattr(mw, "_map_job", map_job)
+    mw._AUDIT.update({
+        "files": {}, "old_ids": set(), "total": None, "page": None, "cycles": 0,
+        "errors": 0, "consec_old": 0, "started_at": None, "last_cycle_at": None,
+        "wrapped": False, "window_complete": False,
+        "last_full_at": None, "saved_at": None, "refetch": False,
+    })
+    c = 0
+    while not mw._AUDIT["window_complete"] and c < 5000:
+        mw._auditor_cycle()
+        c += 1
+    assert mw._AUDIT["window_complete"] is True
+    # Must have stopped near the window edge, NOT crawled the whole 600-file feed.
+    assert calls["n"] < TOTAL
+    # Recent dated files are all captured.
+    assert {str(i) for i in range(500, 601)}.issubset(set(mw._AUDIT["files"]))
+
+
 # ── persistence (survives restart) ──────────────────────────────────────────
 def test_snapshot_round_trip_preserves_files_and_dates(tmp_path, monkeypatch):
     monkeypatch.setattr(mw, "_CACHE_PATH", str(tmp_path / "cache.json"))

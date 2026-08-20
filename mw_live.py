@@ -914,7 +914,18 @@ def _auditor_cycle():
         m = mapped.get(jid)
         if not m:
             continue
-        if _is_out_of_window(m):
+        anchor = _file_anchor_date(m)
+        if anchor is None:
+            # Undated file (open quote / not yet scheduled). Keep it as current
+            # pipeline, but DO NOT reset the out-of-window run. Because we walk
+            # newest→oldest by (chronological) id, undated files reached before
+            # the window edge are recent; ones below the edge are never reached
+            # (we stop first). Resetting the run here would let a single ancient
+            # never-dated lead keep the walk from ever terminating (it would
+            # crawl the entire ~11k-file history — the bug this fixes).
+            with _AUDIT_LOCK:
+                _AUDIT["files"][jid] = m
+        elif _is_out_of_window(m):
             with _AUDIT_LOCK:
                 _AUDIT["old_ids"].add(jid)
                 _AUDIT["files"].pop(jid, None)  # prune files that rolled off the window
@@ -928,7 +939,7 @@ def _auditor_cycle():
         else:
             with _AUDIT_LOCK:
                 _AUDIT["files"][jid] = m
-                _AUDIT["consec_old"] = 0  # window still open; reset the run
+                _AUDIT["consec_old"] = 0  # dated & recent — window still open
     # Cursor management.
     with _AUDIT_LOCK:
         if hit_window_edge:

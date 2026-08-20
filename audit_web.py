@@ -427,6 +427,9 @@ def compute_metrics(files, live_counts=None, cost_available=True):
         feed_pages = live_counts.get("pages", 0)
         audit_running = bool(live_counts.get("audit_running"))
         audit_wrapped = bool(live_counts.get("audit_wrapped"))
+        window_complete = bool(live_counts.get("window_complete"))
+        window_days = live_counts.get("window_days") or 365
+        excluded_old = live_counts.get("excluded_old") or 0
     else:
         true_active = len(active)
         active_available = True
@@ -437,6 +440,10 @@ def compute_metrics(files, live_counts=None, cost_available=True):
         feed_pages = 0
         audit_running = False
         audit_wrapped = False
+        window_complete = False
+        window_days = 365
+        excluded_old = 0
+    window_months = int(round(window_days / 30.0))
 
     # Revenue is real (posted invoices / quoted sell). Cost is only meaningful
     # when we actually have supplier cost — false on live RestV1 data, so the
@@ -451,6 +458,8 @@ def compute_metrics(files, live_counts=None, cost_available=True):
         "active_estimated": active_estimated, "feed_total_approx": feed_total_approx,
         "active_available": active_available,
         "audit_running": audit_running, "audit_wrapped": audit_wrapped,
+        "window_complete": window_complete, "window_days": window_days,
+        "window_months": window_months, "excluded_old": excluded_old,
         "sample_n": sample_n, "feed_total": feed_total,
         "feed_exhausted": feed_exhausted, "feed_pages": feed_pages,
         "audited_this_month": len(files),
@@ -495,6 +504,9 @@ def _load_checked():
                 "pages": 0,
                 "audit_running": prog.get("running"),
                 "audit_wrapped": prog.get("wrapped"),
+                "window_complete": prog.get("window_complete"),
+                "window_days": prog.get("window_days"),
+                "excluded_old": prog.get("excluded_old"),
             }
             files = reconcile(audited, cost_available=False) if audited else []
             check_calculations(files)
@@ -759,11 +771,11 @@ TEMPLATE = r"""<!DOCTYPE html>
   {% if not demo %}
   {% if m.sample_n == 0 %}
   <div style="background:color-mix(in srgb,var(--amber) 12%,transparent);border:1px solid #f0dcb8;border-radius:12px;padding:11px 15px;margin-bottom:6px;font-size:12.5px;color:var(--amber)">
-    <b>Audit warming up.</b> A background job is scanning your {% if m.feed_total %}~{{ "{:,}".format(m.feed_total) }}{% endif %} MoveWare files and revenue-checking them one batch at a time. Revenue and invoicing figures will start appearing within a minute — refresh shortly.
+    <b>Audit warming up.</b> A background job is scanning your most recent MoveWare files — a rolling <b>{{ m.window_months }}-month</b> window — and revenue-checking them one batch at a time. Older files are excluded (over-charges beyond ~a year are effectively unrecoverable). Revenue and invoicing figures will start appearing within a minute — refresh shortly.
   </div>
   {% else %}
   <div style="background:var(--tint);border:1px solid var(--line);border-radius:12px;padding:11px 15px;margin-bottom:6px;font-size:12.5px;color:var(--muted)">
-    <b style="color:var(--ink)">{% if m.feed_total_approx %}~{% endif %}{{ "{:,}".format(m.feed_total) }} files in MoveWare</b> · <b style="color:var(--ink)">{{ "{:,}".format(m.sample_n) }}</b> revenue-checked so far{% if m.audit_wrapped %} (full pass complete){% elif m.audit_running %} and counting{% endif %}. The revenue &amp; invoicing figures below cover the files checked to date and grow as the background audit expands coverage. Cost, profit and margin are not shown — Thelsa's current MoveWare API exposes revenue (quotes &amp; invoices) but not supplier cost.
+    <b style="color:var(--ink)">Rolling {{ m.window_months }}-month audit</b> · <b style="color:var(--ink)">{{ "{:,}".format(m.sample_n) }}</b> recent files revenue-checked{% if m.window_complete %} (window fully covered){% elif m.audit_running %} and counting{% endif %}{% if m.excluded_old %} · {{ "{:,}".format(m.excluded_old) }} older files excluded{% endif %}. Only files with move activity in the last {{ m.window_months }} months are audited — older jobs (of ~{{ "{:,}".format(m.feed_total) }} total in MoveWare) are out of scope because charges that old aren't practically recoverable. The figures below cover the in-window files and grow as coverage expands. Cost, profit and margin are not shown — Thelsa's current MoveWare API exposes revenue (quotes &amp; invoices) but not supplier cost.
   </div>
   {% endif %}
   {% endif %}
@@ -783,7 +795,7 @@ TEMPLATE = r"""<!DOCTYPE html>
   {% endif %}
   <h2>Workload &amp; Pipeline</h2>
   <div class="row">
-    <div class="tile" style="flex:1;min-width:220px"><div class="label">{% if demo %}Active files{% else %}Files in MoveWare{% endif %}</div><div class="value num">{% if demo %}{{ m.total_active }}{% else %}{% if m.feed_total_approx %}~{% endif %}{{ "{:,}".format(m.feed_total) }}{% endif %}</div><div class="sub">{% if not demo %}{{ "{:,}".format(m.sample_n) }} revenue-checked so far{% else %}{{ m.audited_this_month }} audited this month{% endif %}</div></div>
+    <div class="tile" style="flex:1;min-width:220px"><div class="label">{% if demo %}Active files{% else %}Files in last {{ m.window_months }} months{% endif %}</div><div class="value num">{% if demo %}{{ m.total_active }}{% else %}{{ "{:,}".format(m.sample_n) }}{% endif %}</div><div class="sub">{% if not demo %}revenue-checked{% if not m.window_complete and m.audit_running %} · and counting{% endif %} · of ~{{ "{:,}".format(m.feed_total) }} total in MoveWare{% else %}{{ m.audited_this_month }} audited this month{% endif %}</div></div>
     <div class="tile" style="flex:2;min-width:280px"><div class="label">Files by audit stage</div>
       {% for s,n in m.by_stage.items() %}<div class="stage-line"><span>{{ s.replace('_',' ') }}</span><span class="num">{{ n }}</span></div>{% endfor %}</div>
   </div>

@@ -679,30 +679,72 @@ def load_live_files():
 # the result by job id. The /audit page renders instantly from this cache, and
 # coverage grows toward the whole book over time. Cancelled files are skipped.
 _AUDIT = {
-    "files": {},          # job id -> mapped revenue dict
+    "files": {},          # job id -> mapped revenue dict (in-window only)
+    "old_ids": set(),     # job ids classified as older than the window (skip on re-scan)
     "total": None,        # feed total (from _feed_total, computed once)
     "page": None,         # current 1-indexed page cursor (walking backwards)
     "cycles": 0,
     "errors": 0,
+    "consec_old": 0,      # run of consecutive out-of-window files seen while walking
     "started_at": None,
     "last_cycle_at": None,
-    "wrapped": False,     # True once we've walked the whole feed at least once
+    "wrapped": False,     # True once we've reached the far edge of the window
+    "window_complete": False,  # True once the last 12 months are fully covered
 }
 _AUDIT_LOCK = threading.Lock()
 _AUDIT_THREAD = None
-_AUDIT_BATCH = 6          # files deep-checked per cycle (each = 2 API calls)
 _AUDIT_SLEEP = 10         # seconds between cycles (throttle the API)
-_AUDIT_PAGE = 40          # light page size while walking the feed
+# Page size == the per-cycle work unit: each cycle fetches one page and deep-
+# checks EVERY new file on it (each file = 2 API calls). Kept small so the walk
+# processes files in a strict newest→oldest run (needed for the window edge test)
+# without bursting the API. ~_AUDIT_PAGE files/cycle × 2 calls / _AUDIT_SLEEP s.
+_AUDIT_PAGE = 8
+_AUDIT_BATCH = _AUDIT_PAGE  # back-compat alias (per-cycle deep-check count)
+
+# ── Rolling audit window ──────────────────────────────────────────────────
+# The audit only covers recent files: in the moving industry, over-charges on
+# jobs older than ~a year are effectively unrecoverable, so auditing the whole
+# 11k-file history is both pointless and slow. We keep a file when its move
+# (delivery, else pack) date is within _WINDOW_DAYS, OR when it has no move date
+# yet (an open quote / not-yet-scheduled job — current pipeline, always shown).
+# Files with a move date older than the window are excluded. Because job ids are
+# chronological and we walk newest→oldest, once we hit a solid run of out-of-
+# window files (_WINDOW_STOP in a row) the whole window is covered and the walk
+# stops advancing (idles, re-scanning the newest pages for new/updated files).
+_WINDOW_DAYS = 365
+_WINDOW_STOP = 60         # consecutive out-of-window files => window fully covered
+
+
+def _window_cutoff() -> "dt.date":
+    return dt.date.today() - dt.timedelta(days=_WINDOW_DAYS)
+
+
+def _file_anchor_date(m: dict):
+    """Date a file is judged 'recent' by: delivery, else pack/uplift."""
+    return m.get("delivery") or m.get("pack")
+
+
+def _is_out_of_window(m: dict) -> bool:
+    """True only for files with a move date OLDER than the window. Undated
+    (open/quoting) files are never out-of-window — they're current work."""
+    anchor = _file_anchor_date(m)
+    return bool(anchor and anchor < _window_cutoff())
 
 
 def _auditor_last_page(total: int) -> int:
     return max(1, (total + _AUDIT_PAGE - 1) // _AUDIT_PAGE)
 
 
+_TOTAL_REFRESH_CYCLES = 30   # while idle, re-probe the feed total this often
+                             # (~every 5 min) so files created after boot are seen
+
+
 def _auditor_cycle():
     with _AUDIT_LOCK:
         total = _AUDIT["total"]
         page = _AUDIT["page"]
+        complete = _AUDIT["window_complete"]
+        cycles = _AUDIT["cycles"]
     if not total:
         total = _feed_total() or 0
         if not total:
@@ -711,38 +753,79 @@ def _auditor_cycle():
         with _AUDIT_LOCK:
             _AUDIT["total"] = total
             _AUDIT["page"] = page
-    # Light page of job list-items at the current cursor.
+    # Once the window is fully covered we idle at the newest page. Periodically
+    # re-probe the feed total so newly-created files (higher ids, on pages beyond
+    # the old last page) come into view and get audited — keeps it a live,
+    # rolling window rather than a one-shot snapshot.
+    elif complete and cycles % _TOTAL_REFRESH_CYCLES == 0:
+        fresh = _feed_total() or total
+        if fresh > total:
+            total = fresh
+            with _AUDIT_LOCK:
+                _AUDIT["total"] = total
+                _AUDIT["page"] = _auditor_last_page(total)
+                page = _AUDIT["page"]
+    # Fetch exactly one batch-sized page at the cursor and process ALL of it, so
+    # files are seen in a strict newest→oldest run (page size == batch). This is
+    # what makes the "consecutive out-of-window" count reliable: within a page
+    # ids ascend, so reversed() is newest-first, and page decreases each cycle.
+    last_page = _auditor_last_page(total)
     try:
         jobs = _page_jobs(_get_timed(f"/jobs?limit={_AUDIT_PAGE}&offset={page}", _REQ_TIMEOUT))
     except Exception:
         with _AUDIT_LOCK:
             _AUDIT["errors"] += 1
         return
-    checked = 0
+    hit_window_edge = False
     for j in reversed(jobs):  # newest within the page first
-        if checked >= _AUDIT_BATCH:
-            break
         jid = str(_first(j, "id", "jobId", "jobNumber", "jobFile", default="") or "")
         if not jid or _job_status(j) in _INACTIVE_STATUS:
             continue
         with _AUDIT_LOCK:
-            if jid in _AUDIT["files"]:
-                continue  # already audited this pass
+            if jid in _AUDIT["files"] or jid in _AUDIT["old_ids"]:
+                continue  # already classified (in-window cached, or known-old)
+        # Learning a file's date needs the per-file fetch, so classification is
+        # itself an API cost — bounded by the small page size (== _AUDIT_BATCH).
         try:
             m = _map_job(j)
         except Exception:
             m = None
-        if m:
+        if not m:
+            continue
+        if _is_out_of_window(m):
+            with _AUDIT_LOCK:
+                _AUDIT["old_ids"].add(jid)
+                _AUDIT["consec_old"] += 1
+                if _AUDIT["consec_old"] >= _WINDOW_STOP:
+                    _AUDIT["window_complete"] = True
+                    _AUDIT["wrapped"] = True
+                    hit_window_edge = True
+            if hit_window_edge:
+                break
+        else:
             with _AUDIT_LOCK:
                 _AUDIT["files"][jid] = m
-            checked += 1
-    # Advance the cursor backward; wrap to the newest page when we reach the top.
+                _AUDIT["consec_old"] = 0  # window still open; reset the run
+    # Cursor management.
     with _AUDIT_LOCK:
-        if page > 1:
-            _AUDIT["page"] = page - 1
-        else:
-            _AUDIT["page"] = _auditor_last_page(_AUDIT["total"] or 1)
+        if hit_window_edge:
+            # Far edge of the window confirmed — coverage of the last N months is
+            # complete. Park at the newest page and keep re-scanning it so newly
+            # created files get picked up; stop walking into old history.
+            _AUDIT["page"] = last_page
+            _AUDIT["consec_old"] = 0
+        elif complete:
+            # Already complete: idle by re-scanning the newest page for new files.
+            _AUDIT["page"] = last_page
+        elif page <= 1:
+            # Reached the very oldest file without ever hitting the window edge —
+            # the whole feed fits inside the window. Mark complete and idle at top.
+            _AUDIT["window_complete"] = True
             _AUDIT["wrapped"] = True
+            _AUDIT["consec_old"] = 0
+            _AUDIT["page"] = last_page
+        else:
+            _AUDIT["page"] = page - 1
         _AUDIT["cycles"] += 1
         _AUDIT["last_cycle_at"] = time.time()
 
@@ -787,6 +870,9 @@ def audit_progress():
             "cycles": _AUDIT["cycles"],
             "errors": _AUDIT["errors"],
             "wrapped": _AUDIT["wrapped"],
+            "window_complete": _AUDIT["window_complete"],
+            "window_days": _WINDOW_DAYS,
+            "excluded_old": len(_AUDIT["old_ids"]),
             "running": bool(_AUDIT_THREAD is not None and _AUDIT_THREAD.is_alive()),
         }
 

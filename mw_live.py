@@ -526,10 +526,16 @@ def _map_job(job: dict) -> dict | None:
  
     mode = _mode(src if src else job)
  
+    # Job status code (W=Won, L=Lead, P=Pending, C=Cancelled). Prefer the rich
+    # jobStatus.code from the quotes response; fall back to the light list item.
+    _jstat = _first(_first(src, "jobStatus", default={}) or {}, "code") or _first(job, "status") or ""
+    status = str(_jstat).strip().upper()
+
     return {
         "job": job_id,
         "client": client or "",
         "mode": mode,
+        "status": status,
         "est": round(est_cost, 2),
         "act": round(actual_cost, 2),
         "sell": round(sell, 2),
@@ -613,6 +619,126 @@ def load_live_files():
         return _LAST_GOOD["data"]
  
  
+# ── Background revenue auditor ───────────────────────────────────────────────────
+# The dashboard must never call the Moveware API synchronously on a page load
+# (each call is ~2s and a page needs many → proxy/worker timeouts → 500s). Instead
+# a daemon thread continuously walks the feed newest→oldest, deep-checks each
+# file's REVENUE side (quotes + invoices, via _map_job — no cost call), and caches
+# the result by job id. The /audit page renders instantly from this cache, and
+# coverage grows toward the whole book over time. Cancelled files are skipped.
+_AUDIT = {
+    "files": {},          # job id -> mapped revenue dict
+    "total": None,        # feed total (from _feed_total, computed once)
+    "page": None,         # current 1-indexed page cursor (walking backwards)
+    "cycles": 0,
+    "errors": 0,
+    "started_at": None,
+    "last_cycle_at": None,
+    "wrapped": False,     # True once we've walked the whole feed at least once
+}
+_AUDIT_LOCK = threading.Lock()
+_AUDIT_THREAD = None
+_AUDIT_BATCH = 6          # files deep-checked per cycle (each = 2 API calls)
+_AUDIT_SLEEP = 10         # seconds between cycles (throttle the API)
+_AUDIT_PAGE = 40          # light page size while walking the feed
+
+
+def _auditor_last_page(total: int) -> int:
+    return max(1, (total + _AUDIT_PAGE - 1) // _AUDIT_PAGE)
+
+
+def _auditor_cycle():
+    with _AUDIT_LOCK:
+        total = _AUDIT["total"]
+        page = _AUDIT["page"]
+    if not total:
+        total = _feed_total() or 0
+        if not total:
+            return
+        page = _auditor_last_page(total)
+        with _AUDIT_LOCK:
+            _AUDIT["total"] = total
+            _AUDIT["page"] = page
+    # Light page of job list-items at the current cursor.
+    try:
+        jobs = _page_jobs(_get_timed(f"/jobs?limit={_AUDIT_PAGE}&offset={page}", _REQ_TIMEOUT))
+    except Exception:
+        with _AUDIT_LOCK:
+            _AUDIT["errors"] += 1
+        return
+    checked = 0
+    for j in reversed(jobs):  # newest within the page first
+        if checked >= _AUDIT_BATCH:
+            break
+        jid = str(_first(j, "id", "jobId", "jobNumber", "jobFile", default="") or "")
+        if not jid or _job_status(j) in _INACTIVE_STATUS:
+            continue
+        with _AUDIT_LOCK:
+            if jid in _AUDIT["files"]:
+                continue  # already audited this pass
+        try:
+            m = _map_job(j)
+        except Exception:
+            m = None
+        if m:
+            with _AUDIT_LOCK:
+                _AUDIT["files"][jid] = m
+            checked += 1
+    # Advance the cursor backward; wrap to the newest page when we reach the top.
+    with _AUDIT_LOCK:
+        if page > 1:
+            _AUDIT["page"] = page - 1
+        else:
+            _AUDIT["page"] = _auditor_last_page(_AUDIT["total"] or 1)
+            _AUDIT["wrapped"] = True
+        _AUDIT["cycles"] += 1
+        _AUDIT["last_cycle_at"] = time.time()
+
+
+def _auditor_loop():
+    with _AUDIT_LOCK:
+        _AUDIT["started_at"] = time.time()
+    while True:
+        try:
+            _auditor_cycle()
+        except Exception:
+            with _AUDIT_LOCK:
+                _AUDIT["errors"] += 1
+        time.sleep(_AUDIT_SLEEP)
+
+
+def ensure_auditor():
+    """Start the background auditor thread if creds exist and it isn't running.
+    Idempotent and safe to call on every request."""
+    global _AUDIT_THREAD
+    if not have_creds():
+        return
+    with _AUDIT_LOCK:
+        if _AUDIT_THREAD is not None and _AUDIT_THREAD.is_alive():
+            return
+        _AUDIT_THREAD = threading.Thread(target=_auditor_loop, daemon=True, name="mw-auditor")
+        _AUDIT_THREAD.start()
+
+
+def audited_files():
+    """Snapshot list of the revenue-audited files gathered so far (may be empty
+    right after boot while the auditor warms up)."""
+    with _AUDIT_LOCK:
+        return list(_AUDIT["files"].values())
+
+
+def audit_progress():
+    with _AUDIT_LOCK:
+        return {
+            "audited": len(_AUDIT["files"]),
+            "total": _AUDIT["total"],
+            "cycles": _AUDIT["cycles"],
+            "errors": _AUDIT["errors"],
+            "wrapped": _AUDIT["wrapped"],
+            "running": bool(_AUDIT_THREAD is not None and _AUDIT_THREAD.is_alive()),
+        }
+
+
 def raw_sample(job_id: str | None = None) -> dict:
     """Debug helper: return raw MoveWare structures to confirm the mapping."""
     out = {"base_url": BASE_URL, "have_creds": have_creds()}

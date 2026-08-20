@@ -120,8 +120,48 @@ def _margin(f):
     return (_actual_profit(f) / base) if base else 0.0
 
 
-def reconcile(files):
-    """Attach gaps + stage to each file. Gap = {reason, value, recoverable}."""
+def _reconcile_revenue(files):
+    """Revenue/invoicing reconciliation for live Thelsa data (no cost available).
+
+    Stages follow the INVOICING pipeline, and gaps are revenue-only:
+      • invoiced_vs_quoted — invoiced total differs from the quoted sell price
+      • delivered_not_invoiced — delivery date passed but nothing invoiced yet
+    """
+    today = dt.date.today()
+    for f in files:
+        gaps = []
+        sell = f.get("sell", 0) or 0
+        inv = f.get("inv_amt", 0) or 0
+        invoiced = bool(f.get("invoiced"))
+        delivery = f.get("delivery")
+
+        if invoiced and sell and abs(inv - sell) >= CALC_EPS:
+            gaps.append(("invoiced_vs_quoted", inv - sell, True))
+        if (not invoiced) and delivery and delivery < today and sell:
+            gaps.append(("delivered_not_invoiced", sell, True))
+
+        f["gaps"] = gaps
+        f["open_gaps"] = len(gaps)
+        f["gap_value"] = sum(abs(g[1]) for g in gaps)
+        if invoiced:
+            f["stage"] = "closed"
+        elif delivery and delivery < today:
+            f["stage"] = "gap_flagged"        # delivered but not yet invoiced
+        elif sell:
+            f["stage"] = "in_review"          # quoted / in progress
+        else:
+            f["stage"] = "not_started"
+    return files
+
+
+def reconcile(files, cost_available=True):
+    """Attach gaps + stage to each file. Gap = {reason, value, recoverable}.
+
+    When cost isn't available (live Thelsa RestV1) we use the revenue/invoicing
+    reconciliation instead of the cost-based one.
+    """
+    if not cost_available:
+        return _reconcile_revenue(files)
     for f in files:
         gaps = []
         # completeness
@@ -188,7 +228,10 @@ def check_calculations(files):
     """
     for f in files:
         flags = []
-        if _disc_active(f):
+        # Revenue checks run on EVERY file (including invoiced/closed) — the
+        # quote-vs-invoice mismatch is exactly what we want to catch on invoiced
+        # files. The cost check below simply won't fire when cost is unavailable.
+        if True:
             # 1a) Revenue internal recalculation: the reported revenue header must
             #     equal the sum of its charge line items. Skipped when no line
             #     items are available (n_rev_lines == 0) so we never invent a flag
@@ -271,8 +314,9 @@ def compute_metrics(files, live_counts=None, cost_available=True):
     top_reasons = sorted(reason_val.items(), key=lambda kv: kv[1], reverse=True)[:5]
 
     money = [f for f in files if (f["sell"] or f["inv_amt"])] or files
-    avg_rev = round(sum(_revenue(f) for f in money) / len(money), 0)
-    avg_prof = round(sum(_actual_profit(f) for f in money) / len(money), 0)
+    _lm = len(money) or 1
+    avg_rev = round(sum(_revenue(f) for f in money) / _lm, 0)
+    avg_prof = round(sum(_actual_profit(f) for f in money) / _lm, 0)
     tot_rev = sum(_revenue(f) for f in files)
     tot_cost = sum(f["act"] for f in files)
     tot_profit = tot_rev - tot_cost
@@ -298,10 +342,14 @@ def compute_metrics(files, live_counts=None, cost_available=True):
         key=lambda r: (-r["open_gaps"], r["margin"]),
     )
 
-    # ── Calculation-accuracy discrepancies by move coordinator (active files) ──
+    # ── Calculation-accuracy discrepancies by move coordinator ──
+    # For the revenue audit (no cost), invoiced/closed files are exactly the ones
+    # whose invoiced-vs-quoted mismatch matters, so scope to ALL files. In the
+    # cost/demo view, keep the original "active files" scope.
+    disc_scope = files if not cost_available else active
     disc_by_coord = {}
     disc_files = 0
-    for f in active:
+    for f in disc_scope:
         dv = f.get("disc_value", 0) or 0
         c = f.get("coordinator") or "Unassigned"
         entry = disc_by_coord.setdefault(c, {"coordinator": c, "value": 0.0, "files": 0})
@@ -320,7 +368,7 @@ def compute_metrics(files, live_counts=None, cost_available=True):
           "coordinator": f.get("coordinator") or "Unassigned",
           "value": f.get("disc_value", 0),
           "types": ", ".join(sorted({g["label"] for g in f.get("disc_flags", [])}))}
-         for f in active if f.get("disc_value", 0) > 0],
+         for f in disc_scope if f.get("disc_value", 0) > 0],
         key=lambda r: -r["value"],
     )
 
@@ -337,6 +385,8 @@ def compute_metrics(files, live_counts=None, cost_available=True):
         active_estimated = bool(live_counts.get("active_estimated"))
         feed_exhausted = bool(live_counts.get("exhausted"))
         feed_pages = live_counts.get("pages", 0)
+        audit_running = bool(live_counts.get("audit_running"))
+        audit_wrapped = bool(live_counts.get("audit_wrapped"))
     else:
         true_active = len(active)
         active_available = True
@@ -345,6 +395,8 @@ def compute_metrics(files, live_counts=None, cost_available=True):
         active_estimated = False
         feed_exhausted = True
         feed_pages = 0
+        audit_running = False
+        audit_wrapped = False
 
     # Revenue is real (posted invoices / quoted sell). Cost is only meaningful
     # when we actually have supplier cost — false on live RestV1 data, so the
@@ -358,6 +410,7 @@ def compute_metrics(files, live_counts=None, cost_available=True):
         "total_active": true_active, "by_stage": by_stage,
         "active_estimated": active_estimated, "feed_total_approx": feed_total_approx,
         "active_available": active_available,
+        "audit_running": audit_running, "audit_wrapped": audit_wrapped,
         "sample_n": sample_n, "feed_total": feed_total,
         "feed_exhausted": feed_exhausted, "feed_pages": feed_pages,
         "audited_this_month": len(files),
@@ -381,30 +434,37 @@ def compute_metrics(files, live_counts=None, cost_available=True):
 def _load_checked():
     """Return (files, is_live, counts).
 
-    `files` are the deep-loaded SAMPLE, reconciled + calculation-checked.
-    `counts` is the TRUE file count from the light /jobs feed (dict) or None —
-    it's what drives the "Active files" tile so we don't show the sample cap.
+    LIVE: render from the background auditor's growing cache — never call the
+    Moveware API synchronously on the page load (that caused the timeouts/500s).
+    `files` is whatever the auditor has revenue-checked so far (may be empty while
+    it warms up). `counts` carries the feed total + audit progress for the tiles.
+    DEMO (no creds): the built-in demo dataset with cost, as before.
     """
-    live = None
-    counts = None
     try:
         import mw_live
-        live = mw_live.load_live_files()
-        try:
-            counts = mw_live.live_file_counts()
-        except Exception:
-            counts = None
+        if mw_live.have_creds():
+            mw_live.ensure_auditor()
+            audited = mw_live.audited_files()
+            prog = mw_live.audit_progress()
+            counts = {
+                "total": prog.get("total"),
+                "total_approx": True,
+                "active": None,           # per-status active needs RestV2
+                "active_estimated": True,
+                "exhausted": False,
+                "pages": 0,
+                "audit_running": prog.get("running"),
+                "audit_wrapped": prog.get("wrapped"),
+            }
+            files = reconcile(audited, cost_available=False) if audited else []
+            check_calculations(files)
+            return files, True, counts
     except Exception:
-        live = None
-    if live:
-        files = reconcile(live)
-        is_live = True
-    else:
-        files = reconcile(load_move_files())
-        is_live = False
-        counts = None  # demo data: tile falls back to the demo file count
+        pass
+    # DEMO fallback (no credentials)
+    files = reconcile(load_move_files())
     check_calculations(files)
-    return files, is_live, counts
+    return files, False, None
 
 
 @audit_bp.route("/audit")
@@ -656,9 +716,17 @@ TEMPLATE = r"""<!DOCTYPE html>
     Data source: MoveWare{% if demo %}<span class="demo">DEMO DATA</span>{% endif %} · as of {{ m.as_of }}</div>
 </header>
 <main>
-  {% if not demo %}<div style="background:var(--tint);border:1px solid var(--line);border-radius:12px;padding:11px 15px;margin-bottom:6px;font-size:12.5px;color:var(--muted)">
-    <b style="color:var(--ink)">{% if m.feed_total_approx %}~{% endif %}{{ "{:,}".format(m.feed_total) }} files in MoveWare</b>{% if m.active_available %} · {% if m.active_estimated %}~{% endif %}{{ "{:,}".format(m.total_active) }} active{% endif %}. The financial figures and worklists below are computed from a deep-checked sample of <b style="color:var(--ink)">{{ m.sample_n }}</b> recent files this load (each is several MoveWare calls). Per-status active counts and profit/margin need Moveware RestV2 (RestV1 has no count endpoint and no supplier-cost data).
-  </div>{% endif %}
+  {% if not demo %}
+  {% if m.sample_n == 0 %}
+  <div style="background:color-mix(in srgb,var(--amber) 12%,transparent);border:1px solid #f0dcb8;border-radius:12px;padding:11px 15px;margin-bottom:6px;font-size:12.5px;color:var(--amber)">
+    <b>Audit warming up.</b> A background job is scanning your {% if m.feed_total %}~{{ "{:,}".format(m.feed_total) }}{% endif %} MoveWare files and revenue-checking them one batch at a time. Revenue and invoicing figures will start appearing within a minute — refresh shortly.
+  </div>
+  {% else %}
+  <div style="background:var(--tint);border:1px solid var(--line);border-radius:12px;padding:11px 15px;margin-bottom:6px;font-size:12.5px;color:var(--muted)">
+    <b style="color:var(--ink)">{% if m.feed_total_approx %}~{% endif %}{{ "{:,}".format(m.feed_total) }} files in MoveWare</b> · <b style="color:var(--ink)">{{ "{:,}".format(m.sample_n) }}</b> revenue-checked so far{% if m.audit_wrapped %} (full pass complete){% elif m.audit_running %} and counting{% endif %}. The revenue &amp; invoicing figures below cover the files checked to date and grow as the background audit expands coverage. Cost, profit and margin are not shown — Thelsa's current MoveWare API exposes revenue (quotes &amp; invoices) but not supplier cost.
+  </div>
+  {% endif %}
+  {% endif %}
   <h2>{% if m.cost_available %}Profitability{% else %}Revenue{% endif %}</h2>
   {% if m.cost_available %}
   <div class="grid g4">
@@ -669,13 +737,13 @@ TEMPLATE = r"""<!DOCTYPE html>
   </div>
   {% else %}
   <div class="row">
-    <div class="tile" style="flex:1;min-width:240px"><div class="label">Revenue (sampled files)</div><div class="value num">{{ "{:,.0f}".format(m.tot_revenue) }}</div><div class="sub">from posted invoices · {{ m.sample_n }}-file sample</div></div>
+    <div class="tile" style="flex:1;min-width:240px"><div class="label">Revenue (checked so far)</div><div class="value num">{{ "{:,.0f}".format(m.tot_revenue) }}</div><div class="sub">invoiced where billed, else quoted · {{ "{:,}".format(m.sample_n) }} files</div></div>
     <div class="tile" style="flex:2;min-width:320px;background:var(--tint)"><div class="label" style="color:var(--rust-dark)">Cost &amp; profit — not available yet</div><div class="sub" style="margin-top:6px;line-height:1.5">Moveware RestV1 does not expose supplier/creditor cost (the account endpoint returns client receivables, not what Thelsa pays agents/carriers). Profit and margin are hidden rather than shown as fabricated zeros. Restoring them needs a real cost source — RestV2 or a confirmed creditor endpoint.</div></div>
   </div>
   {% endif %}
   <h2>Workload &amp; Pipeline</h2>
   <div class="row">
-    <div class="tile" style="flex:1;min-width:220px"><div class="label">{% if demo %}Active files{% else %}Files in MoveWare{% endif %}</div><div class="value num">{% if demo %}{{ m.total_active }}{% else %}{% if m.feed_total_approx %}~{% endif %}{{ "{:,}".format(m.feed_total) }}{% endif %}</div><div class="sub">{% if not demo %}{% if m.active_available %}{% if m.active_estimated %}~{% endif %}{{ "{:,}".format(m.total_active) }} active · {% endif %}{{ m.sample_n }} deep-checked below{% else %}{{ m.audited_this_month }} audited this month{% endif %}</div></div>
+    <div class="tile" style="flex:1;min-width:220px"><div class="label">{% if demo %}Active files{% else %}Files in MoveWare{% endif %}</div><div class="value num">{% if demo %}{{ m.total_active }}{% else %}{% if m.feed_total_approx %}~{% endif %}{{ "{:,}".format(m.feed_total) }}{% endif %}</div><div class="sub">{% if not demo %}{{ "{:,}".format(m.sample_n) }} revenue-checked so far{% else %}{{ m.audited_this_month }} audited this month{% endif %}</div></div>
     <div class="tile" style="flex:2;min-width:280px"><div class="label">Files by audit stage</div>
       {% for s,n in m.by_stage.items() %}<div class="stage-line"><span>{{ s.replace('_',' ') }}</span><span class="num">{{ n }}</span></div>{% endfor %}</div>
   </div>

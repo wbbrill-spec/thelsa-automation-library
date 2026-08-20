@@ -236,6 +236,39 @@ def test_feed_smaller_than_window_completes(fake_feed):
     assert len(mw._AUDIT["files"]) == 400
 
 
+def test_anchor_drives_window_with_created_fallback():
+    assert mw._is_out_of_window({"anchor": TODAY - dt.timedelta(days=30)}) is False
+    assert mw._is_out_of_window({"anchor": TODAY - dt.timedelta(days=400)}) is True
+    # older cached snapshots without 'anchor' fall back to created/delivery/pack
+    assert mw._file_anchor_date({"created": TODAY - dt.timedelta(days=5)}) == TODAY - dt.timedelta(days=5)
+
+
+def test_map_job_reads_packing_and_created_when_delivery_blank(monkeypatch):
+    """Real MoveWare shape: delivery/uplift blank, but packing/survey/created set.
+    The file must anchor on the populated dates, not be treated as undated."""
+    quotes = {"quotes": [{
+        "job": {
+            "dates": {
+                "packing": {"date": "2026-07-30", "time": ""},
+                "delivery": {"date": "", "time": ""},
+                "uplift": {"date": "", "time": ""},
+                "survey": {"date": "2026-07-23", "time": ""},
+            },
+            "created": "2026-07-16", "estimatedMove": "",
+            "jobStatus": {"code": "W"},
+        },
+        "options": [], "roles": {},
+    }]}
+    monkeypatch.setattr(mw, "_get", lambda path: quotes if "quotes" in path else {"invoices": []})
+    m = mw._map_job({"id": "110995", "status": "W"})
+    assert m is not None
+    assert m["created"] == dt.date(2026, 7, 16)
+    assert m["pack"] == dt.date(2026, 7, 30)      # packing used when uplift blank
+    assert m["delivery"] is None                  # genuinely blank
+    assert m["anchor"] == dt.date(2026, 7, 30)    # latest milestone => window anchor
+    assert mw._file_anchor_date(m) == dt.date(2026, 7, 30)
+
+
 def test_undated_leads_do_not_prevent_termination(monkeypatch):
     """Regression: pending leads with NO move date must not reset the window-edge
     counter, or the walk crawls the entire history and never completes."""

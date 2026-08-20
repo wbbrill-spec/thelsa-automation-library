@@ -523,12 +523,28 @@ def _map_job(job: dict) -> dict | None:
  
     src = rich or job
  
-    # Dates live under job.dates.{uplift,delivery}.date (fallback to list item).
+    # Dates live under job.dates.{uplift,packing,delivery,cartonDelivery,survey,
+    # unpacking}.date — but MANY of these are blank on any given file (e.g. a job
+    # may carry only `packing` + `survey`, with uplift/delivery empty). Read a
+    # milestone from whichever field is populated. `created` is present on every
+    # job and is the reliable fallback anchor for the audit window.
     dates = _first(src, "dates", default={}) or {}
-    pack = _date(_first(_first(dates, "uplift", default={}) or {}, "date")) or \
+
+    def _dt_field(name):
+        return _date(_first(_first(dates, name, default={}) or {}, "date"))
+
+    # Uplift/packing = the move-out milestone; delivery = the move-in milestone.
+    pack = _dt_field("uplift") or _dt_field("packing") or \
         _date(_first(job, "uplift", "pack", "estimatedMove"))
-    delivery = _date(_first(_first(dates, "delivery", default={}) or {}, "date")) or \
+    delivery = _dt_field("delivery") or _dt_field("cartonDelivery") or _dt_field("unpacking") or \
         _date(_first(job, "delivery", "deliveryStart", "estimatedDelivery"))
+    created = _date(_first(src, "created")) or _date(_first(job, "created"))
+    survey = _dt_field("survey")
+    est_move = _date(_first(src, "estimatedMove"))
+    # Window anchor = the file's most recent activity date across ALL signals,
+    # falling back to `created` so no file is ever treated as truly "undated"
+    # (which previously let old files slip into the window and inflated the count).
+    anchor = max([d for d in (delivery, pack, survey, est_move, created) if d], default=None)
  
     # Insurance / declared value from job.services.insurance.
     services = _first(src, "services", default={}) or {}
@@ -592,6 +608,8 @@ def _map_job(job: dict) -> dict | None:
         "agent": None,
         "pack": pack,
         "delivery": delivery,
+        "created": created,
+        "anchor": anchor,   # most-recent activity date; window filter uses this
         # Line-level reconciliation: every quoted charge line vs every invoiced
         # charge line, plus the quote's estimated size vs the actual. audit_web
         # matches these so scope changes are explained, not flagged as errors.
@@ -735,8 +753,11 @@ def _window_cutoff() -> "dt.date":
 
 
 def _file_anchor_date(m: dict):
-    """Date a file is judged 'recent' by: delivery, else pack/uplift."""
-    return m.get("delivery") or m.get("pack")
+    """Date a file is judged 'recent' by: the precomputed `anchor` (most-recent
+    activity across delivery/pack/survey/estimatedMove/created), falling back to
+    the individual fields for older cached snapshots. `created` is always present
+    on a MoveWare job, so in practice this is never None for live data."""
+    return m.get("anchor") or m.get("delivery") or m.get("pack") or m.get("created")
 
 
 def _is_out_of_window(m: dict) -> bool:

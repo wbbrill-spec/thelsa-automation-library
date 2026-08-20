@@ -178,11 +178,12 @@ def _recent_job_items(limit_jobs: int):
 # So we page the feed in SMALL, fast chunks using `?limit&offset`, accumulating
 # until a short page ends the feed. Every request is capped well under gunicorn's
 # 120s so a slow feed degrades to a floor count instead of killing the worker.
-_PAGE_SIZE = 250          # rows per page — smaller = faster per request, less
-                          # exposure to slow-trickling large responses.
-_MAX_COUNT_PAGES = 80     # 80 × 250 = 20,000-file ceiling (backstop, not a target)
-_COUNT_BUDGET = 30.0      # total seconds spent counting (well under gunicorn 180s)
-_COUNT_TIMEOUT = 8        # hard per-request cap; a stuck page aborts here → floor.
+_PAGE_SIZE = 500          # rows per page — 500-row pages return in ~1-2s, so the
+                          # whole ~7k-file book is ~15 pages; the hard per-request
+                          # deadline (_fetch) makes a slow page safe.
+_MAX_COUNT_PAGES = 60     # 60 × 500 = 30,000-file ceiling (backstop, not a target)
+_COUNT_BUDGET = 50.0      # total seconds spent counting (well under gunicorn 180s)
+_COUNT_TIMEOUT = 10       # hard per-request cap; a stuck page aborts here → floor.
 
 
 def _get_timed(path: str, timeout: int):

@@ -21,6 +21,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -54,25 +55,52 @@ def _headers() -> dict:
  
  
 # Per-request timeout for every Moveware call. Kept SHORT on purpose: the /audit
-# page makes many sequential calls (deep-load = several jobs × 3 sub-calls each,
+# page makes many sequential calls (deep-load = several jobs × sub-calls each,
 # plus the feed count), and if any one call is allowed to hang the cumulative time
-# blows past gunicorn's worker timeout and the whole page 500s. A stalled call now
-# fails fast and is caught, so the page still renders from whatever loaded.
+# blows past gunicorn's worker timeout and the whole page 500s.
 _REQ_TIMEOUT = 10
 
 
-def _get(path: str):
-    url = f"{BASE_URL}/{path.lstrip('/')}"
+def _raw_json(url: str, timeout: int):
     req = urllib.request.Request(url, headers=_headers(), method="GET")
-    with urllib.request.urlopen(req, timeout=_REQ_TIMEOUT) as resp:
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
+
+
+def _fetch(url: str, timeout: int):
+    """GET+parse `url` with a HARD TOTAL deadline.
+
+    urllib's `timeout` is a per-socket-operation (inactivity) timeout: a response
+    that trickles in slowly resets it on every chunk and can run for minutes,
+    which is exactly what got the gunicorn worker aborted (→ 500s). We run the
+    fetch on a daemon thread and abandon it past a hard wall (`timeout` + slack),
+    so a stuck call raises TimeoutError and the worker always gets control back.
+    """
+    box: dict = {}
+
+    def run():
+        try:
+            box["v"] = _raw_json(url, timeout)
+        except Exception as e:  # noqa: BLE001 — surfaced below
+            box["e"] = e
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    t.join(timeout + 3)
+    if t.is_alive():
+        raise TimeoutError(f"hard deadline exceeded for {url}")
+    if "e" in box:
+        raise box["e"]
+    return box.get("v")
+
+
+def _get(path: str):
+    return _fetch(f"{BASE_URL}/{path.lstrip('/')}", _REQ_TIMEOUT)
 
 
 def _get_abs(url: str):
     """GET a full URL (e.g. a Moveware _links href)."""
-    req = urllib.request.Request(url, headers=_headers(), method="GET")
-    with urllib.request.urlopen(req, timeout=_REQ_TIMEOUT) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    return _fetch(url, _REQ_TIMEOUT)
 
 
 def _link_href(links, rel):
@@ -150,17 +178,15 @@ def _recent_job_items(limit_jobs: int):
 # So we page the feed in SMALL, fast chunks using `?limit&offset`, accumulating
 # until a short page ends the feed. Every request is capped well under gunicorn's
 # 120s so a slow feed degrades to a floor count instead of killing the worker.
-_PAGE_SIZE = 500          # rows per chunk — proven fast; well below the hang zone.
-_MAX_COUNT_PAGES = 40     # 40 × 500 = 20,000-file ceiling (backstop, not a target)
-_COUNT_BUDGET = 35.0      # total seconds spent counting (leaves headroom vs 120s)
-_COUNT_TIMEOUT = 10       # per-request cap; a stuck request aborts here → floor.
+_PAGE_SIZE = 250          # rows per page — smaller = faster per request, less
+                          # exposure to slow-trickling large responses.
+_MAX_COUNT_PAGES = 80     # 80 × 250 = 20,000-file ceiling (backstop, not a target)
+_COUNT_BUDGET = 30.0      # total seconds spent counting (well under gunicorn 180s)
+_COUNT_TIMEOUT = 8        # hard per-request cap; a stuck page aborts here → floor.
 
 
 def _get_timed(path: str, timeout: int):
-    url = f"{BASE_URL}/{path.lstrip('/')}"
-    req = urllib.request.Request(url, headers=_headers(), method="GET")
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    return _fetch(f"{BASE_URL}/{path.lstrip('/')}", timeout)
 
 
 def _page_jobs(payload):

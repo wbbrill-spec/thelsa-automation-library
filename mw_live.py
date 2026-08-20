@@ -28,10 +28,10 @@ import urllib.request
  
 _CACHE = {"at": 0.0, "data": None}
 _CACHE_TTL = 600  # seconds
-_MAX_JOBS = 6     # cap the deep-load sample — each job makes 3 sub-calls
-                  # (quotes/invoices/account), so keep this low to stay well
-                  # inside the gunicorn worker timeout; result is cached (TTL)
-                  # and further bounded by _LOAD_BUDGET.
+_MAX_JOBS = 3     # cap the deep-load sample — each job makes sub-calls
+                  # (quotes/invoices) at ~2-3s each, so keep this low to stay well
+                  # inside the proxy/worker timeout; result is cached (TTL) and
+                  # further bounded by _LOAD_BUDGET.
  
 # Env-driven base URL; defaults to PRODUCTION. Override with MOVEWARE_URL to
 # point at UAT (https://rest.moveconnect.com/movewareUAT/v1) for testing.
@@ -179,15 +179,16 @@ def _recent_job_items(limit_jobs: int):
 # until a short page ends the feed. Every request is capped well under gunicorn's
 # 120s so a slow feed degrades to a floor count instead of killing the worker.
 _PAGE_SIZE = 500          # rows per status-scan page.
-_MAX_COUNT_PAGES = 4      # status scan is a small BOUNDED sample, not a full read.
-_COUNT_BUDGET = 8.0       # seconds for the status sample — short so the whole call
-                          # stays under the proxy/worker timeout.
+_MAX_COUNT_PAGES = 0      # status scan DISABLED — each 500-row page is a slow ~2s
+                          # call and we can't afford them within the proxy budget.
+                          # We report the exact-ish TOTAL only; active is omitted.
+_COUNT_BUDGET = 8.0
 _COUNT_TIMEOUT = 10       # hard per-request cap (see _fetch).
 
-# Moveware calls have ~2s round-trip latency, and the whole /audit/counts request
-# must finish inside the proxy timeout (~30-45s), so we can afford ~15 calls.
+# Moveware calls have ~2s round-trip latency and the whole request must finish
+# inside the proxy timeout (~30-45s), so the synchronous budget is ~12-15 calls.
 _TOTAL_MAX = 32768        # assumed upper bound on job count (company has ~7k)
-_TOTAL_MAX_PROBES = 12    # binary-search probes → resolution ~_TOTAL_MAX/2^12 ≈ 8.
+_TOTAL_MAX_PROBES = 9     # binary-search probes → resolution ~_TOTAL_MAX/2^9 ≈ 64.
 
 
 def _feed_total():

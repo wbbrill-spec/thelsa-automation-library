@@ -516,6 +516,61 @@ def audit_probe():
     return jsonify(out)
 
 
+@audit_bp.route("/audit/scancost")
+@_login_required
+def audit_scancost():
+    """Debug: scan N jobs' /account ledger and report, across all entries, which
+    entity types appear (debtor vs creditor vs other) — i.e. whether V1's account
+    endpoint EVER exposes creditor/supplier COST, not just debtor/revenue. Also
+    dumps a few sample creditor entries if any are found."""
+    from flask import jsonify, request
+    import mw_live
+    off = int(request.args.get("offset", "1"))
+    n = min(int(request.args.get("n", "12")), 20)
+    try:
+        payload = mw_live._get_timed(f"/jobs?limit={n}&offset={off}", 10)
+        jobs = mw_live._page_jobs(payload)
+    except Exception as e:
+        return jsonify({"error": f"job list: {e}"})
+    entity_key_counts: dict = {}
+    field_counts: dict = {}
+    jobs_with_creditor = []
+    creditor_samples = []
+    scanned = 0
+    for j in jobs:
+        jid = str(j.get("id") or "")
+        if not jid:
+            continue
+        try:
+            acc = mw_live._get_timed(f"/jobs/{jid}/account", 8)
+        except Exception:
+            continue
+        scanned += 1
+        entries = acc.get("account", []) if isinstance(acc, dict) else []
+        has_cred = False
+        for e in entries:
+            ent = e.get("entity", {}) if isinstance(e, dict) else {}
+            for k in (ent.keys() if isinstance(ent, dict) else []):
+                entity_key_counts[k] = entity_key_counts.get(k, 0) + 1
+            for k in (e.keys() if isinstance(e, dict) else []):
+                field_counts[k] = field_counts.get(k, 0) + 1
+            # look for any cost/creditor signal anywhere in the entry
+            blob = str(e).lower()
+            if "creditor" in blob or "supplier" in blob:
+                has_cred = True
+                if len(creditor_samples) < 3:
+                    creditor_samples.append(e)
+        if has_cred:
+            jobs_with_creditor.append(jid)
+    return jsonify({
+        "offset": off, "requested": n, "jobs_scanned": scanned,
+        "entity_key_counts": entity_key_counts,
+        "entry_field_counts": field_counts,
+        "jobs_with_creditor_signal": jobs_with_creditor,
+        "creditor_samples": creditor_samples,
+    })
+
+
 @audit_bp.route("/audit/rawjobs")
 @_login_required
 def audit_rawjobs():

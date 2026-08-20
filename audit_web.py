@@ -330,13 +330,17 @@ def compute_metrics(files, live_counts=None, cost_available=True):
     # live feed count is available, show the REAL number and mark the sample.
     sample_n = len(files)
     if live_counts:
-        true_active = live_counts.get("active", len(active))
-        feed_total = live_counts.get("total", true_active)
+        feed_total = live_counts.get("total") or 0
+        true_active = live_counts.get("active")
+        if true_active is None:
+            true_active = feed_total
+        active_estimated = bool(live_counts.get("active_estimated"))
         feed_exhausted = bool(live_counts.get("exhausted"))
         feed_pages = live_counts.get("pages", 0)
     else:
         true_active = len(active)
         feed_total = len(files)
+        active_estimated = False
         feed_exhausted = True
         feed_pages = 0
 
@@ -350,6 +354,7 @@ def compute_metrics(files, live_counts=None, cost_available=True):
         "cost_available": cost_available,
         "tot_revenue": tot_revenue,
         "total_active": true_active, "by_stage": by_stage,
+        "active_estimated": active_estimated,
         "sample_n": sample_n, "feed_total": feed_total,
         "feed_exhausted": feed_exhausted, "feed_pages": feed_pages,
         "audited_this_month": len(files),
@@ -547,7 +552,7 @@ TEMPLATE = r"""<!DOCTYPE html>
 </header>
 <main>
   {% if not demo %}<div style="background:var(--tint);border:1px solid var(--line);border-radius:12px;padding:11px 15px;margin-bottom:6px;font-size:12.5px;color:var(--muted)">
-    <b style="color:var(--ink)">{{ "{:,}".format(m.total_active) }}{% if not m.feed_exhausted %}+{% endif %} active files</b> counted live across the whole MoveWare feed{% if m.feed_pages %} ({{ m.feed_total }} files scanned over {{ m.feed_pages }} page{{ 's' if m.feed_pages != 1 else '' }}){% endif %}. The financial figures and worklists below are computed from a deep-checked sample of <b style="color:var(--ink)">{{ m.sample_n }}</b> files this load (each requires several MoveWare calls), and expand as the sample grows.
+    <b style="color:var(--ink)">{{ "{:,}".format(m.feed_total) }} files in MoveWare</b> (exact){% if m.total_active is not none %} · {% if m.active_estimated %}~{% endif %}{{ "{:,}".format(m.total_active) }} active{% if m.active_estimated %} (estimated from a status sample){% endif %}{% endif %}. The financial figures and worklists below are computed from a deep-checked sample of <b style="color:var(--ink)">{{ m.sample_n }}</b> recent files this load (each requires several MoveWare calls).
   </div>{% endif %}
   <h2>{% if m.cost_available %}Profitability{% else %}Revenue{% endif %}</h2>
   {% if m.cost_available %}
@@ -565,7 +570,7 @@ TEMPLATE = r"""<!DOCTYPE html>
   {% endif %}
   <h2>Workload &amp; Pipeline</h2>
   <div class="row">
-    <div class="tile" style="flex:1;min-width:220px"><div class="label">Active files</div><div class="value num">{{ m.total_active }}{% if not m.feed_exhausted %}+{% endif %}</div><div class="sub">{% if not demo %}{{ "{:,}".format(m.feed_total) }} files in feed · {{ m.sample_n }} deep-checked below{% else %}{{ m.audited_this_month }} audited this month{% endif %}</div></div>
+    <div class="tile" style="flex:1;min-width:220px"><div class="label">{% if demo %}Active files{% else %}Files in MoveWare{% endif %}</div><div class="value num">{% if demo %}{{ m.total_active }}{% else %}{{ "{:,}".format(m.feed_total) }}{% endif %}</div><div class="sub">{% if not demo %}{% if m.total_active is not none %}{% if m.active_estimated %}~{% endif %}{{ "{:,}".format(m.total_active) }} active · {% endif %}{{ m.sample_n }} deep-checked below{% else %}{{ m.audited_this_month }} audited this month{% endif %}</div></div>
     <div class="tile" style="flex:2;min-width:280px"><div class="label">Files by audit stage</div>
       {% for s,n in m.by_stage.items() %}<div class="stage-line"><span>{{ s.replace('_',' ') }}</span><span class="num">{{ n }}</span></div>{% endfor %}</div>
   </div>

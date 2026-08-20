@@ -178,12 +178,42 @@ def _recent_job_items(limit_jobs: int):
 # So we page the feed in SMALL, fast chunks using `?limit&offset`, accumulating
 # until a short page ends the feed. Every request is capped well under gunicorn's
 # 120s so a slow feed degrades to a floor count instead of killing the worker.
-_PAGE_SIZE = 500          # rows per page — 500-row pages return in ~1-2s, so the
-                          # whole ~7k-file book is ~15 pages; the hard per-request
-                          # deadline (_fetch) makes a slow page safe.
-_MAX_COUNT_PAGES = 60     # 60 × 500 = 30,000-file ceiling (backstop, not a target)
-_COUNT_BUDGET = 50.0      # total seconds spent counting (well under gunicorn 180s)
-_COUNT_TIMEOUT = 10       # hard per-request cap; a stuck page aborts here → floor.
+_PAGE_SIZE = 500          # rows per status-scan page.
+_MAX_COUNT_PAGES = 12     # status scan is a BOUNDED sample (see below), not a
+                          # whole-feed read — the exact total comes from
+                          # _feed_total() via binary search instead.
+_COUNT_BUDGET = 12.0      # seconds for the status sample — kept short so the whole
+                          # /audit/counts request stays fast and never trips the
+                          # proxy/worker timeout.
+_COUNT_TIMEOUT = 10       # hard per-request cap (see _fetch).
+
+
+def _feed_total():
+    """EXACT file count, cheaply. The feed has no count endpoint, but `offset` is
+    a 1-indexed page number, so with limit=1 page N exists iff there are ≥ N jobs.
+    Exponential-probe an upper bound, then binary-search the largest existing page
+    — ~log2(N) tiny (1-row) requests, so ~25 for a 7k feed, a few seconds total.
+    Returns the exact number of jobs, or 0 if unavailable.
+    """
+    def exists(off: int) -> bool:
+        try:
+            return len(_page_jobs(_get_timed(f"/jobs?limit=1&offset={off}", _COUNT_TIMEOUT))) > 0
+        except Exception:
+            return False
+
+    if not exists(1):
+        return 0
+    hi = 1
+    while hi < 1_048_576 and exists(hi * 2):
+        hi *= 2
+    lo, high = hi, min(hi * 2, 1_048_576)
+    while lo + 1 < high:
+        mid = (lo + high) // 2
+        if exists(mid):
+            lo = mid
+        else:
+            high = mid
+    return lo
 
 
 def _get_timed(path: str, timeout: int):
@@ -256,43 +286,59 @@ _COUNT_TTL = 600  # seconds — the true feed count is cached like the deep samp
 
 
 def live_file_counts():
-    """Return the TRUE file counts from the light /jobs feed, or None.
+    """Return live file counts, or None.
 
-    Shape: {total, active, pages, exhausted, by_status}. This pages the whole
-    feed WITHOUT per-file sub-calls (fast + safe), so it gives the real number of
-    files instead of the deep-loaded sample cap. Cached separately (TTL) so page
-    loads don't re-page the feed every time.
+    `total` is EXACT (binary search, cheap). `active` is estimated: we scan a
+    BOUNDED sample of the feed for the status mix within a short budget and apply
+    the non-cancelled rate to the exact total — keeping the whole call fast so it
+    never trips the proxy/worker timeout. `active_estimated` flags this. Cached.
     """
     if not have_creds():
         return None
     now = time.time()
     if _COUNT_CACHE["data"] is not None and now - _COUNT_CACHE["at"] < _COUNT_TTL:
         return _COUNT_CACHE["data"]
+
+    try:
+        total = _feed_total()
+    except Exception:
+        total = 0
+    if not total:
+        return None
+
+    # Bounded status sample (not the whole feed) → status mix + active rate.
     try:
         jobs, pages, exhausted = _paginate_all_jobs()
     except Exception:
-        return None
-    if not jobs:
-        return None
+        jobs, pages, exhausted = [], 0, False
+
     by_status: dict = {}
-    active = 0
-    ids = []
+    active_seen = 0
     for j in jobs:
         st = _job_status(j) or "(blank)"
         by_status[st] = by_status.get(st, 0) + 1
         if _job_active(j):
-            active += 1
-        jid = _first(j, "id", "jobId", "jobNumber", "jobFile")
-        if jid not in (None, ""):
-            ids.append(str(jid))
+            active_seen += 1
+    seen = len(jobs)
+
+    if seen and seen >= total:          # sample covered the whole feed → exact
+        active = active_seen
+        estimated = False
+    elif seen:                           # extrapolate the active rate to the total
+        active = round(total * active_seen / seen)
+        estimated = True
+    else:                                # no sample → can't estimate active
+        active = None
+        estimated = True
+
     data = {
-        "total": len(jobs),
+        "total": total,                  # EXACT
         "active": active,
+        "active_estimated": estimated,
+        "sample_scanned": seen,
         "pages": pages,
-        "exhausted": exhausted,
+        "exhausted": bool(seen and seen >= total),
         "by_status": by_status,
-        "id_min": min(ids) if ids else None,
-        "id_max": max(ids) if ids else None,
     }
     _COUNT_CACHE["data"] = data
     _COUNT_CACHE["at"] = now

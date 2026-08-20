@@ -94,55 +94,43 @@ def _link_href(links, rel):
 def _recent_job_items(limit_jobs: int):
     """Return the MOST RECENT `limit_jobs` job list-items.
 
-    The Moveware `/jobs` feed is ordered oldest-first (it leads with the 2016
-    test record 100001 "Prueba/Carlos"), so reading from the top returns legacy
-    files. We reach the current files by jumping to the last page via
-    `_links.last` (walking `prev` for enough rows); if the feed exposes no
-    `last` link we page forward through `next` within a budget and keep the tail.
+    The Moveware `/jobs` feed is ordered oldest-first (it leads with the 2016 test
+    record 100001 "Prueba/Carlos"), and `offset` is a 1-indexed PAGE number. To
+    surface CURRENT files we compute the last page of size `limit_jobs` from the
+    total count and fetch it directly. Falls back to the first page's tail if the
+    count is unavailable.
     """
+    total = 0
     try:
-        first = _get("/jobs?limit=100")
+        counts = live_file_counts()
+        total = int((counts or {}).get("total") or 0)
     except Exception:
-        first = _get("/jobs")
-    if not isinstance(first, dict):
-        return []
-    links = first.get("_links") or {}
+        total = 0
 
-    # Preferred: jump to the last page and collect backwards until we have enough.
-    last_href = _link_href(links, "last")
-    if last_href:
-        acc = []
-        href = last_href
-        for _ in range(6):
+    if total and limit_jobs:
+        last_page = max(1, (total + limit_jobs - 1) // limit_jobs)
+        # Grab the last page (newest) and, if it's short, the page before it so we
+        # always return a full `limit_jobs` of recent files.
+        for pg in (last_page, last_page - 1):
+            if pg < 1:
+                continue
             try:
-                page = _get_abs(href)
+                jobs = _page_jobs(_get_timed(f"/jobs?limit={limit_jobs}&offset={pg}", _REQ_TIMEOUT))
             except Exception:
-                break
-            acc = list(_first(page, "jobs", default=[]) or []) + acc
-            if len(acc) >= limit_jobs:
-                break
-            prev = _link_href(page.get("_links") if isinstance(page, dict) else {}, "prev")
-            if not prev:
-                break
-            href = prev
-        if acc:
-            return acc[-limit_jobs:]
+                jobs = []
+            if len(jobs) >= limit_jobs:
+                return jobs[-limit_jobs:]
+            if jobs:
+                return jobs
 
-    # Fallback: page forward following `next`, keep the tail (most recent).
-    jobs = list(_first(first, "jobs", default=[]) or [])
-    payload = first
-    pages = 1
-    start = time.time()
-    while pages < 25 and time.time() - start < 6:
-        nxt = _link_href(payload.get("_links") if isinstance(payload, dict) else {}, "next")
-        if not nxt:
-            break
+    # Fallback: first page tail (least-bad if the count is unavailable).
+    try:
+        jobs = _page_jobs(_get_timed("/jobs?limit=100", _REQ_TIMEOUT))
+    except Exception:
         try:
-            payload = _get_abs(nxt)
+            jobs = _page_jobs(_get("/jobs"))
         except Exception:
-            break
-        jobs.extend(_first(payload, "jobs", default=[]) or [])
-        pages += 1
+            jobs = []
     return jobs[-limit_jobs:] if jobs else []
  
  
@@ -184,17 +172,17 @@ def _paginate_all_jobs(page_budget: float = _COUNT_BUDGET, max_pages: int = _MAX
     per-job sub-calls (never touches quotes/invoices/account).
 
     Pages `?limit=_PAGE_SIZE&offset=PAGE`. CRITICAL: Moveware's `offset` is a
-    PAGE INDEX (page number), not a row offset — confirmed live (offset=485,
-    limit=15 returns job ids ~107261, i.e. row ~7275 = 485×15). So we step the
-    page index by 1 each request, not by _PAGE_SIZE. `exhausted` is True only when
-    a page comes back SHORT (fewer than _PAGE_SIZE rows) — the real end of the feed
-    — so the count is exact. If we stop for any other reason (budget, page cap, an
-    error, or the server repeating a page) the count is a floor (rendered "N+").
+    1-INDEXED PAGE NUMBER, not a row offset — confirmed live: offset=1 & offset=0
+    both return page 1 (ids from 100001), and offset=485 with limit=15 returns ids
+    ~107261 = row (485-1)×15 = 7260. So pages start at 1 and step by 1. `exhausted`
+    is True only when a page comes back SHORT (fewer than _PAGE_SIZE rows) — the
+    real end of the feed — so the count is exact. If we stop for any other reason
+    (budget, page cap, error, or a repeated page) the count is a floor ("N+").
     """
     start = time.time()
     jobs = []
     seen_first = set()
-    page_idx = 0
+    page_idx = 1  # Moveware pages are 1-indexed; page 1 = the first rows.
     pages = 0
     exhausted = False
     while pages < max_pages and time.time() - start < page_budget:

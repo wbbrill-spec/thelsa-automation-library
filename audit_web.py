@@ -131,12 +131,12 @@ def _reconcile_revenue(files):
     for f in files:
         gaps = []
         sell = f.get("sell", 0) or 0
-        inv = f.get("inv_amt", 0) or 0
         invoiced = bool(f.get("invoiced"))
         delivery = f.get("delivery")
 
-        if invoiced and sell and abs(inv - sell) >= CALC_EPS:
-            gaps.append(("invoiced_vs_quoted", inv - sell, True))
+        # Note: quote-vs-invoice differences are handled by the line-level
+        # reconciliation in check_calculations (which distinguishes scope changes
+        # from errors), NOT by a naive total comparison here.
         if (not invoiced) and delivery and delivery < today and sell:
             gaps.append(("delivered_not_invoiced", sell, True))
 
@@ -219,56 +219,96 @@ def _disc_active(f):
     return f.get("stage") != "closed"
 
 
+def _reconcile_lines(q_lines, i_lines, tol=1.0):
+    """Match each invoiced charge line to a quoted charge line by amount.
+
+    Returns (matched_total, added_lines, missing_lines):
+      • added_lines   — invoiced lines with NO matching quote line (billed but not
+                        quoted → an added service / scope change, not an error)
+      • missing_lines — quoted lines never invoiced (unbilled or an unchosen
+                        alternative option; NOT treated as an error)
+    Tolerance is absolute-or-relative so tax rounding doesn't break a match.
+    """
+    pool = [q.get("value", 0) for q in (q_lines or [])]
+    added = []
+    matched_total = 0.0
+    for il in (i_lines or []):
+        v = il.get("value", 0)
+        hit = None
+        for idx, qv in enumerate(pool):
+            if abs(qv - v) <= max(tol, 0.01 * abs(v)):
+                hit = idx
+                break
+        if hit is not None:
+            matched_total += v
+            pool.pop(hit)
+        else:
+            added.append(il)
+    missing = [{"value": qv} for qv in pool if qv > 0]
+    return round(matched_total, 2), added, missing
+
+
+def _scope_driver_note(f):
+    """Human note on what materially changed vs the quote (weight/volume), so an
+    invoiced-vs-quoted difference reads as a scope change, not an error."""
+    parts = []
+    est_wt, act_wt = f.get("est_wt"), f.get("act_wt")
+    if est_wt and act_wt and act_wt > est_wt * 1.05:
+        parts.append(f"actual weight {act_wt:,.0f}kg vs estimated {est_wt:,.0f}kg (+{round((act_wt/est_wt-1)*100)}%)")
+    return "; ".join(parts)
+
+
 def check_calculations(files):
     """Attach `disc_flags` (list) and `disc_value` (float) to each file.
 
-    disc_flags entries: {type, label, expected, found, diff}. disc_value is the
-    summed absolute discrepancy across all flags on that file. Only active files
-    are checked; closed files get an empty result.
+    LIVE (files carry `q_lines`/`i_lines`): reconcile invoice charge lines against
+    quote charge lines. A fully-matched file has NO flag. Invoiced lines with no
+    quote match are ADDED CHARGES — surfaced as informational scope items (with a
+    driver note), NOT errors. This is what stops legitimate scope changes (extra
+    services, a bigger/heavier shipment) from being flagged as discrepancies.
+
+    DEMO (no line data): the original header-level checks, unchanged.
     """
     for f in files:
         flags = []
-        # Revenue checks run on EVERY file (including invoiced/closed) — the
-        # quote-vs-invoice mismatch is exactly what we want to catch on invoiced
-        # files. The cost check below simply won't fire when cost is unavailable.
-        if True:
-            # 1a) Revenue internal recalculation: the reported revenue header must
-            #     equal the sum of its charge line items. Skipped when no line
-            #     items are available (n_rev_lines == 0) so we never invent a flag
-            #     on files that simply lack a breakdown.
+        has_lines = f.get("q_lines") is not None and f.get("i_lines") is not None
+        if has_lines:
+            if f.get("invoiced") and f.get("i_lines"):
+                matched, added, _missing = _reconcile_lines(f["q_lines"], f["i_lines"])
+                added_total = round(sum(a.get("value", 0) for a in added), 2)
+                if added_total > CALC_EPS:
+                    note = _scope_driver_note(f)
+                    label = "Additional charges billed vs quote"
+                    if note:
+                        label += " — " + note
+                    flags.append({
+                        "type": "extra_charges", "info": True, "label": label,
+                        "expected": matched, "found": round(f.get("inv_amt", 0), 2),
+                        "diff": added_total,
+                        "added": [a.get("desc") or "charge" for a in added][:6],
+                    })
+        else:
+            # DEMO / header-only path (original checks)
             rev_rep = f.get("rev_reported")
             rev_lines = f.get("rev_lines")
             if f.get("n_rev_lines", 0) and rev_rep is not None and rev_lines is not None:
                 diff = round(rev_rep - rev_lines, 2)
                 if abs(diff) > CALC_EPS:
-                    flags.append({
-                        "type": "revenue_not_summing",
-                        "label": "Revenue total ≠ sum of line items",
-                        "expected": round(rev_lines, 2), "found": round(rev_rep, 2),
-                        "diff": diff,
-                    })
-            # 1b) Revenue quote-to-invoice: the client-invoiced total must equal
-            #     the quoted/agreed sell price.
+                    flags.append({"type": "revenue_not_summing",
+                                  "label": "Revenue total ≠ sum of line items",
+                                  "expected": round(rev_lines, 2), "found": round(rev_rep, 2), "diff": diff})
             if f.get("invoiced") and f.get("inv_amt", 0):
                 diff = round(f["inv_amt"] - f["sell"], 2)
                 if abs(diff) > CALC_EPS:
-                    flags.append({
-                        "type": "invoiced_vs_quoted",
-                        "label": "Invoiced amount ≠ quoted revenue",
-                        "expected": round(f["sell"], 2), "found": round(f["inv_amt"], 2),
-                        "diff": diff,
-                    })
-            # 2) Cost quote-to-actual: the actual/supplier cost must equal the
-            #    quoted (estimated) cost. Only asserted when both are present.
+                    flags.append({"type": "invoiced_vs_quoted",
+                                  "label": "Invoiced amount ≠ quoted revenue",
+                                  "expected": round(f["sell"], 2), "found": round(f["inv_amt"], 2), "diff": diff})
             if f.get("est", 0) and f.get("act", 0):
                 diff = round(f["act"] - f["est"], 2)
                 if abs(diff) > CALC_EPS:
-                    flags.append({
-                        "type": "cost_quote_vs_actual",
-                        "label": "Actual cost ≠ quoted cost",
-                        "expected": round(f["est"], 2), "found": round(f["act"], 2),
-                        "diff": diff,
-                    })
+                    flags.append({"type": "cost_quote_vs_actual",
+                                  "label": "Actual cost ≠ quoted cost",
+                                  "expected": round(f["est"], 2), "found": round(f["act"], 2), "diff": diff})
         f["disc_flags"] = flags
         f["disc_value"] = round(sum(abs(g["diff"]) for g in flags), 2)
     return files
@@ -773,28 +813,29 @@ TEMPLATE = r"""<!DOCTYPE html>
       {% for mode,d in m.modes.items() %}<tr><td>{{ mode }}</td><td class="num">{{ d.files }}</td><td class="num">{{ "{:,.0f}".format(d.profit) }}</td><td class="num">{{ d.margin }}%</td></tr>{% endfor %}</table></div>
   </div>
   {% endif %}
-  <h2>{% if m.cost_available %}Calculation Accuracy — Revenue &amp; Cost{% else %}Revenue Accuracy — Quote vs Invoice{% endif %}</h2>
+  <h2>{% if m.cost_available %}Calculation Accuracy — Revenue &amp; Cost{% else %}Quote vs Invoice — Additional Charges{% endif %}</h2>
+  {% if not m.cost_available %}<p style="font-size:12px;color:var(--muted);margin:-4px 0 12px">Invoice charge lines are matched to the quote line-by-line. Amounts below are <b>extra charges billed beyond the original quote</b> — usually a legitimate scope change (added service, heavier/larger shipment). They are surfaced for review, not treated as errors. A file whose invoices fully match its quote shows nothing here.</p>{% endif %}
   <div class="grid g4">
-    <div class="tile"><div class="label">Total discrepancy</div><div class="value num {{ 'bad' if m.total_disc else 'good' }}">{{ "{:,.0f}".format(m.total_disc) }}</div><div class="sub">across {{ "{:,}".format(m.sample_n) if not m.cost_available else 'active' }} checked files</div></div>
-    <div class="tile"><div class="label">Files with discrepancies</div><div class="value num {{ 'bad' if m.disc_files else 'good' }}">{{ m.disc_files }}</div><div class="sub">{% if m.cost_available %}revenue/cost not reconciling{% else %}invoiced ≠ quoted revenue{% endif %}</div></div>
+    <div class="tile"><div class="label">{% if m.cost_available %}Total discrepancy{% else %}Extra charges vs quote{% endif %}</div><div class="value num {{ 'warn' if m.total_disc else 'good' }}">{{ "{:,.0f}".format(m.total_disc) }}</div><div class="sub">across {{ "{:,}".format(m.sample_n) if not m.cost_available else 'active' }} checked files</div></div>
+    <div class="tile"><div class="label">Files with extra charges</div><div class="value num {{ 'warn' if m.disc_files else 'good' }}">{{ m.disc_files }}</div><div class="sub">{% if m.cost_available %}revenue/cost not reconciling{% else %}billed beyond the quote{% endif %}</div></div>
     <div class="tile"><div class="label">Coordinators affected</div><div class="value num {{ 'warn' if m.coords_affected else 'good' }}">{{ m.coords_affected }}</div><div class="sub">move coordinator of each file</div></div>
-    <div class="tile"><div class="label">Checks applied</div><div class="value num">{% if m.cost_available %}3{% else %}2{% endif %}</div><div class="sub">{% if m.cost_available %}recalc · quote↔invoice · quote↔cost{% else %}revenue recalc · quote↔invoice{% endif %}</div></div>
+    <div class="tile"><div class="label">Method</div><div class="value num">{% if m.cost_available %}3{% else %}line{% endif %}</div><div class="sub">{% if m.cost_available %}recalc · quote↔invoice · quote↔cost{% else %}invoice lines ↔ quote lines{% endif %}</div></div>
   </div>
   <div class="row" style="margin-top:12px">
-    <div class="tile" style="flex:1;min-width:320px"><div class="label" style="margin-bottom:8px">Total discrepancy by move coordinator <span style="color:var(--muted)">· amount · # files</span></div>
+    <div class="tile" style="flex:1;min-width:320px"><div class="label" style="margin-bottom:8px">{% if m.cost_available %}Total discrepancy by move coordinator{% else %}Additional charges vs quote by move coordinator{% endif %} <span style="color:var(--muted)">· amount · # files</span></div>
       {% if m.by_coordinator_disc %}
       <div class="bars">{% set mxd = (m.by_coordinator_disc[0].value if m.by_coordinator_disc else 1) or 1 %}
       {% for c in m.by_coordinator_disc %}<div class="bar"><span style="width:150px">{{ c.coordinator }}</span>
         <span class="track"><span class="fill" style="width:{{ (c.value/mxd*100)|round(0) }}%"></span></span>
         <span class="num" style="width:120px;text-align:right">{{ "{:,.0f}".format(c.value) }} <span style="color:var(--muted)">· {{ c.files }}</span></span></div>{% endfor %}</div>
-      {% else %}<div class="sub good">No revenue/cost discrepancies on active files. ✓</div>{% endif %}
+      {% else %}<div class="sub good">{% if m.cost_available %}No revenue/cost discrepancies on active files. ✓{% else %}No files billed beyond quote in the checked sample. ✓{% endif %}</div>{% endif %}
     </div>
   </div>
   {% if m.disc_worklist %}
-  <table style="margin-top:12px"><tr><th>Job</th><th>Client</th><th>Coordinator</th><th>Discrepancy type(s)</th><th>Amount</th></tr>
+  <table style="margin-top:12px"><tr><th>Job</th><th>Client</th><th>Coordinator</th>{% if m.cost_available %}<th>Discrepancy type(s)</th><th>Amount</th>{% else %}<th>Extra charges vs quote</th><th>Amount</th>{% endif %}</tr>
   {% for r in m.disc_worklist %}<tr>
     <td class="num">{{ r.job }}</td><td>{{ r.client }}</td><td>{{ r.coordinator }}</td>
-    <td>{{ r.types }}</td><td class="num bad">{{ "{:,.0f}".format(r.value) }}</td></tr>{% endfor %}</table>
+    <td>{{ r.types }}</td><td class="num {{ 'bad' if m.cost_available else 'warn' }}">{{ "{:,.0f}".format(r.value) }}</td></tr>{% endfor %}</table>
   {% endif %}
 
   <h2>{% if m.cost_available %}Files Needing Attention{% else %}Sampled Files{% endif %}</h2>

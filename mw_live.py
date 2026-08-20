@@ -446,6 +446,13 @@ def _map_job(job: dict) -> dict | None:
     charge_lines_total = 0.0
     n_charge_lines = 0
     declared = ins = weight = None
+    # Line-level reconciliation inputs: every quoted charge line across ALL quote
+    # options (multi-component quotes bill move + insurance + storage separately),
+    # plus the size the quote was based on. audit_web matches invoice lines to
+    # these so a legitimate scope change (extra service, volume/weight increase)
+    # is surfaced as context — not flagged as an error.
+    q_lines = []          # list of {"desc", "value"} for every quote charge line
+    est_vol = act_vol = est_wt = act_wt = None
     rich = {}
     try:
         qd = _get(f"/jobs/{job_id}/quotes")
@@ -483,6 +490,33 @@ def _map_job(job: dict) -> dict | None:
                     n_charge_lines += 1
                     if _classify_charge(ch) == "cost":
                         est_cost += cval
+            # Collect EVERY quote charge line across ALL options (and the quote's
+            # `services`) for line-level reconciliation against the invoices.
+            for q in quotes:
+                for opt in (_first(q, "options", default=[]) or []):
+                    for ch in (_first(opt, "charges", default=[]) or []):
+                        cval = _num(_first(ch, "valueInc", "value", "valueEx"))
+                        if cval > 0:
+                            q_lines.append({"desc": _code_text(_first(ch, "description", default="")), "value": round(cval, 2)})
+                svcs = _first(q, "services", default={}) or {}
+                if isinstance(svcs, dict):
+                    for sv in svcs.values():
+                        cval = _num(_first(sv, "valueInc", "value", "valueEx")) if isinstance(sv, dict) else 0
+                        if cval > 0:
+                            q_lines.append({"desc": _code_text(_first(sv, "description", default="")), "value": round(cval, 2)})
+                # Size the quote was based on (estimated vs actual measurements).
+                meas = _first(q0, "measurements") or (_first(option, "measurements") if option else None) or []
+                for mrow in (meas if isinstance(meas, list) else []):
+                    mt = (_code_text(_first(mrow, "type", default="")) or "").lower()
+                    uom = (str(_first(mrow, "uom", default="")).lower())
+                    v = _num(_first(mrow, "value"))
+                    if mt == "volumenett" and uom in ("m", "m3", ""):
+                        est_vol = v or est_vol
+                    elif mt == "actualweight" and uom == "kg":
+                        act_wt = v or act_wt
+                    elif mt == "weightnett" and uom == "kg":
+                        est_wt = v or est_wt
+                break  # measurements/services taken from the first quote only
     except Exception:
         pass
  
@@ -504,13 +538,23 @@ def _map_job(job: dict) -> dict | None:
         mgr = _first(src, "moveManager", default="")
         coordinator = _code_text(mgr)
  
-    # Invoices → invoiced amount.
+    # Invoices → invoiced amount + every invoiced charge line (for reconciliation).
     invoiced_amt = 0.0
     invoiced = False
+    i_lines = []
     try:
         inv = _get(f"/jobs/{job_id}/invoices")
         for it in (_first(inv, "invoices", default=[]) or []):
-            invoiced_amt += _num(_first(it, "value", "total", "amount"))
+            iv = _num(_first(it, "value", "total", "amount"))
+            invoiced_amt += iv
+            chs = _first(it, "charges", default=[]) or []
+            if chs:
+                for ch in chs:
+                    cval = _num(_first(ch, "valueInc", "value", "valueEx"))
+                    if cval > 0:
+                        i_lines.append({"desc": _code_text(_first(ch, "description", default="")), "value": round(cval, 2)})
+            elif iv > 0:
+                i_lines.append({"desc": _code_text(_first(it, "description", default="")), "value": round(iv, 2)})
         invoiced = invoiced_amt > 0
     except Exception:
         pass
@@ -547,6 +591,14 @@ def _map_job(job: dict) -> dict | None:
         "agent": None,
         "pack": pack,
         "delivery": delivery,
+        # Line-level reconciliation: every quoted charge line vs every invoiced
+        # charge line, plus the quote's estimated size vs the actual. audit_web
+        # matches these so scope changes are explained, not flagged as errors.
+        "q_lines": q_lines,
+        "i_lines": i_lines,
+        "est_vol": est_vol,
+        "act_wt": act_wt,
+        "est_wt": est_wt,
         # Internal-recalculation inputs (revenue side). rev_reported is the
         # selected option's header value; rev_lines is the sum of that option's
         # charge lines. When n_rev_lines == 0 the check is skipped (no lines to

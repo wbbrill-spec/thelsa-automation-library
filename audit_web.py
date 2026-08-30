@@ -436,6 +436,9 @@ def compute_metrics(files, live_counts=None, cost_available=True):
         audited_total = live_counts.get("audited_total") or 0
         full_coverage = bool(live_counts.get("full_coverage"))
         backfill_complete = bool(live_counts.get("backfill_complete"))
+        ub_rows = live_counts.get("underbilling_rows") or []
+        ub_have_creds = bool(live_counts.get("underbilling_have_creds"))
+        ub_scanned_at = live_counts.get("underbilling_scanned_at")
     else:
         true_active = len(active)
         active_available = True
@@ -455,6 +458,10 @@ def compute_metrics(files, live_counts=None, cost_available=True):
         audited_total = 0
         full_coverage = False
         backfill_complete = False
+        ub_rows = []
+        ub_have_creds = False
+        ub_scanned_at = None
+    ub_total_gap = round(sum(r.get("gap", 0) for r in ub_rows), 2)
     window_months = int(round(window_days / 30.0))
     cov_pct = round(audited_total / feed_total * 100) if (full_coverage and feed_total) else 0
     refresh_hours = int(round(refresh_seconds / 3600.0)) if refresh_seconds else 0
@@ -493,6 +500,9 @@ def compute_metrics(files, live_counts=None, cost_available=True):
         "refresh_hours": refresh_hours,
         "audited_total": audited_total, "full_coverage": full_coverage,
         "backfill_complete": backfill_complete, "cov_pct": cov_pct,
+        "ub_rows": ub_rows, "ub_have_creds": ub_have_creds,
+        "ub_scanned_at": ub_scanned_at, "ub_total_gap": ub_total_gap,
+        "ub_count": len(ub_rows),
         "sample_n": sample_n, "feed_total": feed_total,
         "feed_exhausted": feed_exhausted, "feed_pages": feed_pages,
         "audited_this_month": len(files),
@@ -550,6 +560,20 @@ def _load_checked():
                 "full_coverage": prog.get("full_coverage"),
                 "backfill_complete": prog.get("backfill_complete"),
             }
+            # Under-billing detector: approved coordinator charges not invoiced.
+            # Runs in the background only once the Azure app secret is configured;
+            # a no-op (have_creds False) otherwise, so this never slows the page.
+            try:
+                import underbilling
+                underbilling.ensure_scanner()
+                ub = underbilling.get_underbilling()
+                counts["underbilling_rows"] = ub.get("rows") or []
+                counts["underbilling_have_creds"] = bool(ub.get("have_creds"))
+                counts["underbilling_scanned_at"] = ub.get("scanned_at")
+                counts["underbilling_n_findings"] = ub.get("n_findings") or 0
+            except Exception:
+                counts["underbilling_rows"] = []
+                counts["underbilling_have_creds"] = False
             files = reconcile(audited, cost_available=False) if audited else []
             check_calculations(files)
             return files, True, counts
@@ -820,6 +844,31 @@ TEMPLATE = r"""<!DOCTYPE html>
     <b style="color:var(--ink)">Rolling {{ m.window_months }}-month audit</b> · <b style="color:var(--ink)">{{ "{:,}".format(m.sample_n) }}</b> files{% if m.window_complete %}{% if m.last_updated %} · updated {{ m.last_updated }}{% endif %}{% if m.refresh_hours %} · auto-refreshes every {{ m.refresh_hours }}h{% endif %}{% if m.refreshing %} · refreshing now{% endif %}{% elif m.audit_running %} · building, and counting{% endif %}. This is the recoverable view — every file with move activity in the last {{ m.window_months }} months. Cost, profit and margin are not shown — Thelsa's current MoveWare API exposes revenue (quotes &amp; invoices) but not supplier cost.
     {% if m.full_coverage %}<div style="margin-top:6px;padding-top:6px;border-top:1px solid var(--line)"><b style="color:var(--ink)">Full-history coverage:</b> {% if m.backfill_complete %}all <b style="color:var(--ink)">{{ "{:,}".format(m.audited_total) }}</b> files in MoveWare audited ✓{% else %}<b style="color:var(--ink)">{{ "{:,}".format(m.audited_total) }}</b> of ~{{ "{:,}".format(m.feed_total) }} files audited ({{ m.cov_pct }}%) — backfilling older files in the background.{% endif %}</div>{% endif %}
   </div>
+  {% endif %}
+  {% endif %}
+  {% if not demo %}
+  <h2>Under-billing — Approved Charges Not Invoiced</h2>
+  <p style="font-size:12px;color:var(--muted);margin:-4px 0 12px">Scans the 12 TMS coordinators' "FINAL CHARGES" emails, matches each to its MoveWare job, and flags charges the client <b>approved</b> that were never invoiced — revenue that should be billed.</p>
+  {% if not m.ub_have_creds %}
+  <div style="background:var(--tint);border:1px solid var(--line);border-radius:12px;padding:12px 15px;font-size:12.5px;color:var(--muted)">
+    <b style="color:var(--rust-dark)">Waiting on coordinator mailbox access.</b> The detector is built and tested; it goes live automatically once the Thelsa AI app's client secret is set on the server (env <code>MS_CLIENT_SECRET</code>). It will then read the coordinators' approved‑charge emails and list every job billed for less than was approved.
+  </div>
+  {% elif m.ub_count %}
+  <div class="grid g4">
+    <div class="tile"><div class="label">Under-billed (approved − invoiced)</div><div class="value num bad">{{ "{:,.0f}".format(m.ub_total_gap) }}</div><div class="sub">recoverable revenue</div></div>
+    <div class="tile"><div class="label">Jobs under-billed</div><div class="value num bad">{{ m.ub_count }}</div><div class="sub">approved charges not fully invoiced</div></div>
+    <div class="tile"><div class="label">Source</div><div class="value num">email</div><div class="sub">coordinator FINAL CHARGES ↔ MoveWare invoice</div></div>
+    <div class="tile"><div class="label">Method</div><div class="value num">match</div><div class="sub">by job number</div></div>
+  </div>
+  <table style="margin-top:12px"><tr><th>Job</th><th>Coordinator</th><th>Client</th><th>Approved</th><th>Invoiced</th><th>Gap</th></tr>
+  {% for r in m.ub_rows %}<tr>
+    <td class="num">{{ r.job }}</td><td>{{ r.coordinator }}</td><td>{{ r.client or '' }}</td>
+    <td class="num">{{ "{:,.0f}".format(r.approved_total) }} {{ r.currency }}</td>
+    <td class="num">{{ "{:,.0f}".format(r.invoiced) }}{% if r.invoiced_currency %} {{ r.invoiced_currency }}{% endif %}</td>
+    <td class="num bad">{{ "{:,.0f}".format(r.gap) }}{% if not r.currency_match %} <span class="warn" title="currency mismatch — verify FX">⚠</span>{% endif %}</td></tr>{% endfor %}</table>
+  <p class="sub" style="color:var(--muted);margin-top:6px">⚠ = approved and invoiced currencies differ; verify the FX before acting.</p>
+  {% else %}
+  <div class="sub good">No under-billed jobs found in the coordinator mail checked so far. ✓</div>
   {% endif %}
   {% endif %}
   <h2>{% if m.cost_available %}Profitability{% else %}Revenue{% endif %}</h2>

@@ -106,25 +106,51 @@ def test_job_110995_multi_option_fully_invoiced_does_not_flag():
     assert f["disc_value"] == 0
 
 
-def test_genuine_extra_charge_flags_as_informational_scope_item():
+def test_underbilled_file_flags_missing_quoted_charge():
+    """Accepted quote had Removal + Storage; only Removal was invoiced -> the
+    unbilled Storage line is surfaced as approved-but-not-invoiced revenue."""
     f = _mkfile(
-        job=110996, coordinator="Ben", inv_amt=15000, sell=12000,
-        q_lines=[{"desc": "Removal", "value": 12000}],
-        i_lines=[{"desc": "Removal", "value": 12000}, {"desc": "Storage", "value": 3000}],
-        est_wt=600, act_wt=900,
+        job=110996, coordinator="Ben", invoiced=True, inv_amt=9000, sell=12000,
+        sel_lines=[{"desc": "Removal", "value": 9000}, {"desc": "Storage", "value": 3000}],
+        i_lines=[{"desc": "Removal", "value": 9000}],
     )
     aw.check_calculations([f])
     assert f["disc_value"] == 3000
     flag = f["disc_flags"][0]
-    assert flag["type"] == "extra_charges"
-    assert flag["info"] is True
-    assert "+50%" in flag["label"]
+    assert flag["type"] == "under_billed"
+    assert flag["under"] is True
+    assert flag["label"] == "Approved charges not yet invoiced"
+    assert flag["expected"] == 12000 and flag["found"] == 9000
     assert "Storage" in flag["added"]
+
+
+def test_over_invoiced_file_does_not_flag_as_underbilled():
+    """Invoiced ABOVE the accepted quote (extra charges billed) is NOT under-billing
+    and must not appear in this section."""
+    f = _mkfile(
+        job=110997, invoiced=True, inv_amt=15000, sell=12000,
+        sel_lines=[{"desc": "Removal", "value": 12000}],
+        i_lines=[{"desc": "Removal", "value": 12000}, {"desc": "Storage", "value": 3000}],
+    )
+    aw.check_calculations([f])
+    assert f["disc_flags"] == []
+    assert f["disc_value"] == 0
+
+
+def test_immaterial_shortfall_not_flagged():
+    """A tiny shortfall (< 2% of accepted value) is rounding/discount noise."""
+    f = _mkfile(
+        job=110998, invoiced=True, inv_amt=11900, sell=12000,
+        sel_lines=[{"desc": "Removal", "value": 12000}],
+        i_lines=[{"desc": "Removal", "value": 11900}],
+    )
+    aw.check_calculations([f])
+    assert f["disc_flags"] == []
 
 
 def test_not_invoiced_file_never_flags():
     f = _mkfile(job=200, invoiced=False, inv_amt=0, sell=5000,
-                q_lines=[{"desc": "Removal", "value": 5000}], i_lines=[])
+                sel_lines=[{"desc": "Removal", "value": 5000}], i_lines=[])
     aw.check_calculations([f])
     assert f["disc_value"] == 0
 
@@ -495,10 +521,10 @@ def test_only_flagged_files_appear_in_disc_worklist():
         est_wt=760, act_wt=760, delivery=TODAY - dt.timedelta(days=20),
     )
     flagged = _mkfile(
-        job=110996, coordinator="Ben", inv_amt=15000, sell=12000,
-        q_lines=[{"desc": "Removal", "value": 12000}],
-        i_lines=[{"desc": "Removal", "value": 12000}, {"desc": "Storage", "value": 3000}],
-        est_wt=600, act_wt=900, delivery=TODAY - dt.timedelta(days=10),
+        job=110996, coordinator="Ben", invoiced=True, inv_amt=9000, sell=12000,
+        sel_lines=[{"desc": "Removal", "value": 9000}, {"desc": "Storage", "value": 3000}],
+        i_lines=[{"desc": "Removal", "value": 9000}],
+        delivery=TODAY - dt.timedelta(days=10),
     )
     files = [clean, flagged]
     aw.check_calculations(files)

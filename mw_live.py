@@ -453,6 +453,9 @@ def _map_job(job: dict) -> dict | None:
     # these so a legitimate scope change (extra service, volume/weight increase)
     # is surfaced as context — not flagged as an error.
     q_lines = []          # list of {"desc", "value"} for every quote charge line
+    sel_lines = []        # charge lines of the SELECTED/accepted option only —
+                          # the agreed scope the invoice is expected to cover.
+                          # Used for the under-billing (quoted-but-not-invoiced) check.
     est_vol = act_vol = est_wt = act_wt = None
     rich = {}
     try:
@@ -491,6 +494,12 @@ def _map_job(job: dict) -> dict | None:
                     n_charge_lines += 1
                     if _classify_charge(ch) == "cost":
                         est_cost += cval
+                    # Sell-side line of the accepted option = a charge the client
+                    # agreed to and should therefore be invoiced.
+                    sval = _num(_first(ch, "valueInc", "value", "valueEx"))
+                    if sval > 0 and _classify_charge(ch) != "cost":
+                        sel_lines.append({"desc": _code_text(_first(ch, "description", default="")),
+                                          "value": round(sval, 2)})
             # Collect EVERY quote charge line across ALL options (and the quote's
             # `services`) for line-level reconciliation against the invoices.
             for q in quotes:
@@ -614,6 +623,7 @@ def _map_job(job: dict) -> dict | None:
         # charge line, plus the quote's estimated size vs the actual. audit_web
         # matches these so scope changes are explained, not flagged as errors.
         "q_lines": q_lines,
+        "sel_lines": sel_lines,   # accepted-option charge lines (under-billing check)
         "i_lines": i_lines,
         "est_vol": est_vol,
         "act_wt": act_wt,

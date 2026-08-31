@@ -271,21 +271,45 @@ def check_calculations(files):
     """
     for f in files:
         flags = []
-        has_lines = f.get("q_lines") is not None and f.get("i_lines") is not None
+        has_lines = f.get("i_lines") is not None and (
+            f.get("sel_lines") is not None or f.get("q_lines") is not None)
         if has_lines:
+            # UNDER-billing check: the client accepted a quote option; every line in
+            # that accepted scope should be invoiced. Flag the money that was quoted-
+            # and-accepted but never made it onto an invoice. This is the opposite of
+            # the old "additional charges billed" view — we surface what we FAILED to
+            # bill, not what we billed above quote.
             if f.get("invoiced") and f.get("i_lines"):
-                matched, added, _missing = _reconcile_lines(f["q_lines"], f["i_lines"])
-                added_total = round(sum(a.get("value", 0) for a in added), 2)
-                if added_total > CALC_EPS:
-                    note = _scope_driver_note(f)
-                    label = "Additional charges billed vs quote"
-                    if note:
-                        label += " — " + note
+                sell = round(f.get("sell", 0) or 0, 2)
+                inv_amt = round(f.get("inv_amt", 0) or 0, 2)
+                # True money gap = accepted quote value minus what was invoiced.
+                under_amt = round(sell - inv_amt, 2)
+                # Materiality guard: ignore rounding/small discounts. Only a gap that
+                # is both > $/‑MXN 50 AND > 2% of the accepted value is surfaced.
+                material = max(50.0, 0.02 * abs(sell))
+                if under_amt > material:
+                    # Which accepted-scope lines have no matching invoice line — the
+                    # "what wasn't billed" detail. Match by value (tax rounding safe).
+                    sel = f.get("sel_lines") or f.get("q_lines") or []
+                    inv_pool = [il.get("value", 0) for il in (f.get("i_lines") or [])]
+                    unbilled = []
+                    for ql in sel:
+                        v = ql.get("value", 0)
+                        hit = None
+                        for idx, iv in enumerate(inv_pool):
+                            if abs(iv - v) <= max(CALC_EPS, 0.01 * abs(v)):
+                                hit = idx
+                                break
+                        if hit is not None:
+                            inv_pool.pop(hit)
+                        elif v > 0:
+                            unbilled.append(ql)
                     flags.append({
-                        "type": "extra_charges", "info": True, "label": label,
-                        "expected": matched, "found": round(f.get("inv_amt", 0), 2),
-                        "diff": added_total,
-                        "added": [a.get("desc") or "charge" for a in added][:6],
+                        "type": "under_billed", "under": True,
+                        "label": "Approved charges not yet invoiced",
+                        "expected": sell, "found": inv_amt,
+                        "diff": under_amt,
+                        "added": [u.get("desc") or "charge" for u in unbilled][:6],
                     })
         else:
             # DEMO / header-only path (original checks)
@@ -826,6 +850,16 @@ TEMPLATE = r"""<!DOCTYPE html>
   .bar .fill{height:100%;background:var(--rust)}
   .stage-line{display:flex;justify-content:space-between;font-size:12px;padding:4px 0;border-bottom:1px dashed var(--line)}
   .num{font-variant-numeric:tabular-nums}
+  .tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin:4px 0 4px;flex-wrap:wrap}
+  .tab-btn{appearance:none;background:none;border:none;cursor:pointer;text-decoration:none;
+           padding:10px 16px;font-size:13px;font-weight:700;color:var(--muted);
+           border-bottom:2px solid transparent;margin-bottom:-1px;border-radius:8px 8px 0 0}
+  .tab-btn:hover{color:var(--ink);background:var(--tint)}
+  .tab-btn.active{color:var(--rust);border-bottom-color:var(--rust)}
+  .tab-btn .badge{display:inline-block;min-width:18px;padding:0 6px;margin-left:6px;border-radius:20px;
+           background:var(--rust);color:#fff;font-size:11px;font-weight:700;line-height:18px;text-align:center;vertical-align:middle}
+  .tab-btn .badge.zero{background:var(--line);color:var(--muted)}
+  .tab[hidden]{display:none!important}
   footer{color:var(--muted);font-size:11px;text-align:center;padding:22px}
 </style></head><body>
 <header>
@@ -846,31 +880,14 @@ TEMPLATE = r"""<!DOCTYPE html>
   </div>
   {% endif %}
   {% endif %}
-  {% if not demo %}
-  <h2>Under-billing — Approved Charges Not Invoiced</h2>
-  <p style="font-size:12px;color:var(--muted);margin:-4px 0 12px">Scans the 12 TMS coordinators' "FINAL CHARGES" emails, matches each to its MoveWare job, and flags charges the client <b>approved</b> that were never invoiced — revenue that should be billed.</p>
-  {% if not m.ub_have_creds %}
-  <div style="background:var(--tint);border:1px solid var(--line);border-radius:12px;padding:12px 15px;font-size:12.5px;color:var(--muted)">
-    <b style="color:var(--rust-dark)">Waiting on coordinator mailbox access.</b> The detector is built and tested; it goes live automatically once the Thelsa AI app's client secret is set on the server (env <code>MS_CLIENT_SECRET</code>). It will then read the coordinators' approved‑charge emails and list every job billed for less than was approved.
-  </div>
-  {% elif m.ub_count %}
-  <div class="grid g4">
-    <div class="tile"><div class="label">Under-billed (approved − invoiced)</div><div class="value num bad">{{ "{:,.0f}".format(m.ub_total_gap) }}</div><div class="sub">recoverable revenue</div></div>
-    <div class="tile"><div class="label">Jobs under-billed</div><div class="value num bad">{{ m.ub_count }}</div><div class="sub">approved charges not fully invoiced</div></div>
-    <div class="tile"><div class="label">Source</div><div class="value num">email</div><div class="sub">coordinator FINAL CHARGES ↔ MoveWare invoice</div></div>
-    <div class="tile"><div class="label">Method</div><div class="value num">match</div><div class="sub">by job number</div></div>
-  </div>
-  <table style="margin-top:12px"><tr><th>Job</th><th>Coordinator</th><th>Client</th><th>Approved</th><th>Invoiced</th><th>Gap</th></tr>
-  {% for r in m.ub_rows %}<tr>
-    <td class="num">{{ r.job }}</td><td>{{ r.coordinator }}</td><td>{{ r.client or '' }}</td>
-    <td class="num">{{ "{:,.0f}".format(r.approved_total) }} {{ r.currency }}</td>
-    <td class="num">{{ "{:,.0f}".format(r.invoiced) }}{% if r.invoiced_currency %} {{ r.invoiced_currency }}{% endif %}</td>
-    <td class="num bad">{{ "{:,.0f}".format(r.gap) }}{% if not r.currency_match %} <span class="warn" title="currency mismatch — verify FX">⚠</span>{% endif %}</td></tr>{% endfor %}</table>
-  <p class="sub" style="color:var(--muted);margin-top:6px">⚠ = approved and invoiced currencies differ; verify the FX before acting.</p>
-  {% else %}
-  <div class="sub good">No under-billed jobs found in the coordinator mail checked so far. ✓</div>
-  {% endif %}
-  {% endif %}
+
+  <nav class="tabs" role="tablist">
+    <a class="tab-btn" data-tab="overview" href="#overview" role="tab">Overview</a>
+    <a class="tab-btn" data-tab="underbilling" href="#underbilling" role="tab">{% if m.cost_available %}Discrepancies{% else %}Under-billing{% endif %}{% if not m.cost_available %}<span class="badge {{ '' if (m.disc_files or m.ub_count) else 'zero' }}">{{ (m.disc_files or 0) + (m.ub_count or 0) }}</span>{% endif %}</a>
+    <a class="tab-btn" data-tab="files" href="#files" role="tab">Files</a>
+  </nav>
+
+  <section class="tab" data-tab="overview" role="tabpanel">
   <h2>{% if m.cost_available %}Profitability{% else %}Revenue{% endif %}</h2>
   {% if m.cost_available %}
   <div class="grid g4">
@@ -917,31 +934,61 @@ TEMPLATE = r"""<!DOCTYPE html>
       {% for mode,d in m.modes.items() %}<tr><td>{{ mode }}</td><td class="num">{{ d.files }}</td><td class="num">{{ "{:,.0f}".format(d.profit) }}</td><td class="num">{{ d.margin }}%</td></tr>{% endfor %}</table></div>
   </div>
   {% endif %}
-  <h2>{% if m.cost_available %}Calculation Accuracy — Revenue &amp; Cost{% else %}Quote vs Invoice — Additional Charges{% endif %}</h2>
-  {% if not m.cost_available %}<p style="font-size:12px;color:var(--muted);margin:-4px 0 12px">Invoice charge lines are matched to the quote line-by-line. Amounts below are <b>extra charges billed beyond the original quote</b> — usually a legitimate scope change (added service, heavier/larger shipment). They are surfaced for review, not treated as errors. A file whose invoices fully match its quote shows nothing here.</p>{% endif %}
+  </section>
+
+  <section class="tab" data-tab="underbilling" role="tabpanel">
+  {% if not demo %}
+  <h2>Under-billing — Approved Charges Not Invoiced (email)</h2>
+  <p style="font-size:12px;color:var(--muted);margin:-4px 0 12px">Scans the 12 TMS coordinators' "FINAL CHARGES" emails, matches each to its MoveWare job, and flags charges the client <b>approved</b> that were never invoiced — revenue that should be billed.</p>
+  {% if not m.ub_have_creds %}
+  <div style="background:var(--tint);border:1px solid var(--line);border-radius:12px;padding:12px 15px;font-size:12.5px;color:var(--muted)">
+    <b style="color:var(--rust-dark)">Waiting on coordinator mailbox access.</b> The detector is built and tested; it goes live automatically once the Thelsa AI app's client secret is set on the server (env <code>MS_CLIENT_SECRET</code>). It will then read the coordinators' approved‑charge emails and list every job billed for less than was approved.
+  </div>
+  {% elif m.ub_count %}
   <div class="grid g4">
-    <div class="tile"><div class="label">{% if m.cost_available %}Total discrepancy{% else %}Extra charges vs quote{% endif %}</div><div class="value num {{ 'warn' if m.total_disc else 'good' }}">{{ "{:,.0f}".format(m.total_disc) }}</div><div class="sub">across {{ "{:,}".format(m.sample_n) if not m.cost_available else 'active' }} checked files</div></div>
-    <div class="tile"><div class="label">Files with extra charges</div><div class="value num {{ 'warn' if m.disc_files else 'good' }}">{{ m.disc_files }}</div><div class="sub">{% if m.cost_available %}revenue/cost not reconciling{% else %}billed beyond the quote{% endif %}</div></div>
+    <div class="tile"><div class="label">Under-billed (approved − invoiced)</div><div class="value num bad">{{ "{:,.0f}".format(m.ub_total_gap) }}</div><div class="sub">recoverable revenue</div></div>
+    <div class="tile"><div class="label">Jobs under-billed</div><div class="value num bad">{{ m.ub_count }}</div><div class="sub">approved charges not fully invoiced</div></div>
+    <div class="tile"><div class="label">Source</div><div class="value num">email</div><div class="sub">coordinator FINAL CHARGES ↔ MoveWare invoice</div></div>
+    <div class="tile"><div class="label">Method</div><div class="value num">match</div><div class="sub">by job number</div></div>
+  </div>
+  <table style="margin-top:12px"><tr><th>Job</th><th>Coordinator</th><th>Client</th><th>Approved</th><th>Invoiced</th><th>Gap</th></tr>
+  {% for r in m.ub_rows %}<tr>
+    <td class="num">{{ r.job }}</td><td>{{ r.coordinator }}</td><td>{{ r.client or '' }}</td>
+    <td class="num">{{ "{:,.0f}".format(r.approved_total) }} {{ r.currency }}</td>
+    <td class="num">{{ "{:,.0f}".format(r.invoiced) }}{% if r.invoiced_currency %} {{ r.invoiced_currency }}{% endif %}</td>
+    <td class="num bad">{{ "{:,.0f}".format(r.gap) }}{% if not r.currency_match %} <span class="warn" title="currency mismatch — verify FX">⚠</span>{% endif %}</td></tr>{% endfor %}</table>
+  <p class="sub" style="color:var(--muted);margin-top:6px">⚠ = approved and invoiced currencies differ; verify the FX before acting.</p>
+  {% else %}
+  <div class="sub good">No under-billed jobs found in the coordinator mail checked so far. ✓</div>
+  {% endif %}
+  {% endif %}
+  <h2>{% if m.cost_available %}Calculation Accuracy — Revenue &amp; Cost{% else %}Quote vs Invoice — Approved Charges Not Yet Invoiced (MoveWare){% endif %}</h2>
+  {% if not m.cost_available %}<p style="font-size:12px;color:var(--muted);margin:-4px 0 12px">Each file's <b>accepted quote</b> is compared to what was actually invoiced. Amounts below are <b>approved charges that were quoted but never made it onto an invoice</b> — revenue Thelsa may have failed to bill. Only gaps above a materiality threshold (&gt; 2% of the accepted value) are surfaced. A file invoiced for its full accepted quote shows nothing here. <b>Note:</b> this uses MoveWare quote-vs-invoice lines; charges approved by the client <i>over email</i> beyond the original quote are caught by the Under-billing detector below.</p>{% endif %}
+  <div class="grid g4">
+    <div class="tile"><div class="label">{% if m.cost_available %}Total discrepancy{% else %}Approved not yet invoiced{% endif %}</div><div class="value num {{ 'warn' if m.total_disc else 'good' }}">{{ "{:,.0f}".format(m.total_disc) }}</div><div class="sub">across {{ "{:,}".format(m.sample_n) if not m.cost_available else 'active' }} checked files</div></div>
+    <div class="tile"><div class="label">Files under-invoiced</div><div class="value num {{ 'warn' if m.disc_files else 'good' }}">{{ m.disc_files }}</div><div class="sub">{% if m.cost_available %}revenue/cost not reconciling{% else %}quoted but not invoiced{% endif %}</div></div>
     <div class="tile"><div class="label">Coordinators affected</div><div class="value num {{ 'warn' if m.coords_affected else 'good' }}">{{ m.coords_affected }}</div><div class="sub">move coordinator of each file</div></div>
     <div class="tile"><div class="label">Method</div><div class="value num">{% if m.cost_available %}3{% else %}line{% endif %}</div><div class="sub">{% if m.cost_available %}recalc · quote↔invoice · quote↔cost{% else %}invoice lines ↔ quote lines{% endif %}</div></div>
   </div>
   <div class="row" style="margin-top:12px">
-    <div class="tile" style="flex:1;min-width:320px"><div class="label" style="margin-bottom:8px">{% if m.cost_available %}Total discrepancy by move coordinator{% else %}Additional charges vs quote by move coordinator{% endif %} <span style="color:var(--muted)">· amount · # files</span></div>
+    <div class="tile" style="flex:1;min-width:320px"><div class="label" style="margin-bottom:8px">{% if m.cost_available %}Total discrepancy by move coordinator{% else %}Approved-not-invoiced by move coordinator{% endif %} <span style="color:var(--muted)">· amount · # files</span></div>
       {% if m.by_coordinator_disc %}
       <div class="bars">{% set mxd = (m.by_coordinator_disc[0].value if m.by_coordinator_disc else 1) or 1 %}
       {% for c in m.by_coordinator_disc %}<div class="bar"><span style="width:150px">{{ c.coordinator }}</span>
         <span class="track"><span class="fill" style="width:{{ (c.value/mxd*100)|round(0) }}%"></span></span>
         <span class="num" style="width:120px;text-align:right">{{ "{:,.0f}".format(c.value) }} <span style="color:var(--muted)">· {{ c.files }}</span></span></div>{% endfor %}</div>
-      {% else %}<div class="sub good">{% if m.cost_available %}No revenue/cost discrepancies on active files. ✓{% else %}No files billed beyond quote in the checked sample. ✓{% endif %}</div>{% endif %}
+      {% else %}<div class="sub good">{% if m.cost_available %}No revenue/cost discrepancies on active files. ✓{% else %}Every checked file was invoiced for its full accepted quote. ✓{% endif %}</div>{% endif %}
     </div>
   </div>
   {% if m.disc_worklist %}
-  <table style="margin-top:12px"><tr><th>Job</th><th>Client</th><th>Coordinator</th>{% if m.cost_available %}<th>Discrepancy type(s)</th><th>Amount</th>{% else %}<th>Extra charges vs quote</th><th>Amount</th>{% endif %}</tr>
+  <table style="margin-top:12px"><tr><th>Job</th><th>Client</th><th>Coordinator</th>{% if m.cost_available %}<th>Discrepancy type(s)</th><th>Amount</th>{% else %}<th>Approved charges not yet invoiced</th><th>Amount</th>{% endif %}</tr>
   {% for r in m.disc_worklist %}<tr>
     <td class="num">{{ r.job }}</td><td>{{ r.client }}</td><td>{{ r.coordinator }}</td>
     <td>{{ r.types }}</td><td class="num {{ 'bad' if m.cost_available else 'warn' }}">{{ "{:,.0f}".format(r.value) }}</td></tr>{% endfor %}</table>
   {% endif %}
+  </section>
 
+  <section class="tab" data-tab="files" role="tabpanel">
   <h2>{% if m.cost_available %}Files Needing Attention{% else %}Sampled Files{% endif %}</h2>
   {% if m.cost_available %}
   <table><tr><th>Job</th><th>Client</th><th>Mode</th><th>Stage</th><th>Margin</th><th>Actual profit</th><th>Open gaps</th><th>Gap value</th></tr>
@@ -957,6 +1004,32 @@ TEMPLATE = r"""<!DOCTYPE html>
     <td>{% if r.stage=='gap_flagged' %}<span class="pill gap">gap flagged</span>{% elif r.stage in ('resolved','closed') %}<span class="pill ok">{{ r.stage }}</span>{% else %}<span class="pill rev">{{ r.stage.replace('_',' ') }}</span>{% endif %}</td></tr>{% endfor %}</table>
   <p class="sub" style="color:var(--muted);margin-top:8px">Sample of {{ m.sample_n }} files deep-checked this load (of {{ m.total_active }} active). Cost/margin columns hidden — supplier cost not available from Moveware RestV1.</p>
   {% endif %}
+  </section>
+
   <footer>Thelsa Automation Library · the audit runs on imperfect data and flags it — figures in file currency (mixed).</footer>
-</main></body></html>
+</main>
+<script>
+(function(){
+  var tabs = Array.prototype.slice.call(document.querySelectorAll('.tab'));
+  var btns = Array.prototype.slice.call(document.querySelectorAll('.tab-btn'));
+  var names = tabs.map(function(t){return t.getAttribute('data-tab');});
+  function show(name){
+    if(names.indexOf(name) < 0){ name = names[0]; }
+    tabs.forEach(function(t){ t.hidden = (t.getAttribute('data-tab') !== name); });
+    btns.forEach(function(b){ b.classList.toggle('active', b.getAttribute('data-tab') === name); });
+  }
+  btns.forEach(function(b){
+    b.addEventListener('click', function(e){
+      e.preventDefault();
+      var name = b.getAttribute('data-tab');
+      if(history.replaceState){ history.replaceState(null, '', '#' + name); }
+      else { location.hash = name; }
+      show(name);
+    });
+  });
+  window.addEventListener('hashchange', function(){ show((location.hash || '').slice(1)); });
+  show((location.hash || '').slice(1) || names[0]);
+})();
+</script>
+</body></html>
 """

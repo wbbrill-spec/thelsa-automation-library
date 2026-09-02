@@ -355,11 +355,25 @@ def compute_metrics(files, live_counts=None, cost_available=True):
     for f in files:
         by_stage[f["stage"]] = by_stage.get(f["stage"], 0) + 1
 
-    invoiced_m = sum(1 for f in files if f["invoiced"] and (_in_month(f["delivery"], ms, me) or _in_month(f["pack"], ms, me)))
-    invoiceable_m = sum(1 for f in files if not f["invoiced"] and (_in_month(f["delivery"], ms, me) or _in_month(f["pack"], ms, me)))
+    def _month_hit(f):
+        return _in_month(f["delivery"], ms, me) or _in_month(f["pack"], ms, me)
+
+    def _bill_value(f):
+        # Dollar value of a file for invoicing purposes: what was invoiced if it
+        # was, else the quoted revenue we still expect to bill.
+        return round((f.get("inv_amt") if f.get("invoiced") else 0) or f.get("sell") or 0, 2)
+
+    invoiced_m = sum(1 for f in files if f["invoiced"] and _month_hit(f))
+    invoiceable_m = sum(1 for f in files if not f["invoiced"] and _month_hit(f))
+    invoiced_m_val = round(sum(_bill_value(f) for f in files if f["invoiced"] and _month_hit(f)), 2)
+    invoiceable_m_val = round(sum(_bill_value(f) for f in files if not f["invoiced"] and _month_hit(f)), 2)
     denom = invoiced_m + invoiceable_m
     pct_billed = round(invoiced_m / denom * 100, 1) if denom else 0.0
+    denom_val = invoiced_m_val + invoiceable_m_val
+    pct_billed_val = round(invoiced_m_val / denom_val * 100, 1) if denom_val else 0.0
     overdue = sum(1 for f in files if not f["invoiced"] and ((f["delivery"] and f["delivery"] < ms) or (f["pack"] and f["pack"] < ms)))
+    overdue_val = round(sum(_bill_value(f) for f in files if not f["invoiced"]
+                           and ((f["delivery"] and f["delivery"] < ms) or (f["pack"] and f["pack"] < ms))), 2)
 
     n = len(files) or 1
     avg_gaps = round(len(all_gaps) / n, 2)
@@ -531,7 +545,9 @@ def compute_metrics(files, live_counts=None, cost_available=True):
         "feed_exhausted": feed_exhausted, "feed_pages": feed_pages,
         "audited_this_month": len(files),
         "invoiced_m": invoiced_m, "invoiceable_m": invoiceable_m,
-        "pct_billed": pct_billed, "overdue": overdue,
+        "invoiced_m_val": invoiced_m_val, "invoiceable_m_val": invoiceable_m_val,
+        "pct_billed": pct_billed, "pct_billed_val": pct_billed_val,
+        "overdue": overdue, "overdue_val": overdue_val,
         "avg_gaps": avg_gaps, "avg_gap_val": avg_gap_val,
         "recovered": recovered, "recoverable": round(recoverable, 2),
         "recovery_rate": recovery_rate, "open_count": len(open_gaps), "open_val": open_val,
@@ -910,10 +926,10 @@ TEMPLATE = r"""<!DOCTYPE html>
   </div>
   <h2>Invoicing Progress</h2>
   <div class="grid g4">
-    <div class="tile"><div class="label">Invoiced this month</div><div class="value num">{{ m.invoiced_m }}</div></div>
-    <div class="tile"><div class="label">Still invoiceable</div><div class="value num">{{ m.invoiceable_m }}</div><div class="sub">pack/load or delivery in month</div></div>
-    <div class="tile"><div class="label">Percent billed</div><div class="value num {{ 'good' if m.pct_billed>=80 else 'warn' }}">{{ m.pct_billed }}%</div></div>
-    <div class="tile"><div class="label">Overdue to invoice</div><div class="value num {{ 'bad' if m.overdue else 'good' }}">{{ m.overdue }}</div><div class="sub">date passed, not billed</div></div>
+    <div class="tile"><div class="label">Invoiced this month</div><div class="value num">{{ m.invoiced_m }}</div><div class="sub">{{ "{:,.0f}".format(m.invoiced_m_val) }} billed</div></div>
+    <div class="tile"><div class="label">Still invoiceable</div><div class="value num">{{ m.invoiceable_m }}</div><div class="sub">{{ "{:,.0f}".format(m.invoiceable_m_val) }} to bill · pack/load or delivery in month</div></div>
+    <div class="tile"><div class="label">Percent billed</div><div class="value num {{ 'good' if m.pct_billed>=80 else 'warn' }}">{{ m.pct_billed }}%</div><div class="sub">{{ m.pct_billed_val }}% by value</div></div>
+    <div class="tile"><div class="label">Overdue to invoice</div><div class="value num {{ 'bad' if m.overdue else 'good' }}">{{ m.overdue }}</div><div class="sub">{{ "{:,.0f}".format(m.overdue_val) }} unbilled · date passed</div></div>
   </div>
   {% if m.cost_available %}
   <h2>Gaps &amp; Recovery</h2>

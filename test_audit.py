@@ -513,6 +513,26 @@ def test_revenue_sums_invoiced_where_billed_else_quoted():
     assert m["tot_revenue"] == round(196166.22 + 5000)
 
 
+def test_invoicing_progress_reports_dollar_values():
+    """Invoicing tiles carry the dollar value of billed / to-bill / overdue files,
+    using invoiced amount where billed else quoted revenue (both from the API)."""
+    this_month = TODAY.replace(day=1) + dt.timedelta(days=5)
+    last_month = TODAY.replace(day=1) - dt.timedelta(days=10)
+    files = [
+        _mkfile(job=1, invoiced=True, inv_amt=10000, sell=9000, delivery=this_month),
+        _mkfile(job=2, invoiced=False, inv_amt=0, sell=26000, delivery=this_month),
+        _mkfile(job=3, invoiced=False, inv_amt=0, sell=5000, delivery=this_month),
+        _mkfile(job=4, invoiced=False, inv_amt=0, sell=69000, delivery=last_month),
+    ]
+    aw.check_calculations(files)
+    m = aw.compute_metrics(files, live_counts=LIVE_COUNTS, cost_available=False)
+    assert m["invoiced_m"] == 1 and m["invoiced_m_val"] == 10000        # inv_amt when billed
+    assert m["invoiceable_m"] == 2 and m["invoiceable_m_val"] == 31000  # 26000 + 5000 (quoted)
+    assert m["overdue"] == 1 and m["overdue_val"] == 69000
+    assert m["pct_billed"] == 33.3                                       # 1 of 3 files
+    assert m["pct_billed_val"] == round(10000 / 41000 * 100, 1)          # by value
+
+
 def test_only_flagged_files_appear_in_disc_worklist():
     clean = _mkfile(
         job=110995, inv_amt=196166.22, sell=186240.68,

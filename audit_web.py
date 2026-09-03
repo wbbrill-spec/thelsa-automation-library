@@ -397,6 +397,7 @@ def compute_metrics(files, live_counts=None, cost_available=True):
     to_invoice_worklist = sorted(
         [{"job": f["job"], "client": f["client"],
           "coordinator": f.get("coordinator") or "Unassigned",
+          "coordinator_email": f.get("coordinator_email") or "",
           "value": _bill_value(f), "embassy": bool(f.get("is_embassy")),
           "pack": f["pack"].isoformat() if f.get("pack") else None,
           "delivery": f["delivery"].isoformat() if f.get("delivery") else None}

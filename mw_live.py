@@ -455,6 +455,7 @@ def _map_job(job: dict) -> dict | None:
     # method, status) comes back inside the quotes response, so pull that.
     client = _first(job, "name", "transfereeName", "customerName", default="")
     coordinator = _code_text(_first(job, "moveManager", default=""))
+    coordinator_email = ""   # populated from the quote roles below (carries the email)
  
     sell = est_cost = 0.0
     # Internal-recalculation inputs: the selected option's header value (sell)
@@ -486,6 +487,16 @@ def _map_job(job: dict) -> dict | None:
                 corp = _first(roles, "corporate", default={}) or {}
                 cust = _first(roles, "customer", default={}) or {}
                 client = _first(corp, "name") or _first(cust, "name") or ""
+            # The move coordinator / manager lives in the quote roles and carries
+            # the real @thelsa.com email — so alerts can address the right person
+            # automatically (no name→email map needed).
+            mgr_role = (_first(roles, "accountManager", default={})
+                        or _first(roles, "manager", default={}) or {})
+            _cn = (f"{_first(mgr_role, 'firstName', default='') or ''} "
+                   f"{_first(mgr_role, 'lastName', default='') or ''}").strip()
+            if _cn:
+                coordinator = _cn
+            coordinator_email = (_first(mgr_role, "email", default="") or "").strip()
             # Selected quote option carries the sell price + measurements.
             option = None
             for q in quotes:
@@ -638,6 +649,7 @@ def _map_job(job: dict) -> dict | None:
         "declared": declared,
         "ins": ins,
         "coordinator": coordinator,
+        "coordinator_email": coordinator_email,
         "agent": None,
         "pack": pack,
         "delivery": delivery,

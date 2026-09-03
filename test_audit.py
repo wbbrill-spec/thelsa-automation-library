@@ -578,6 +578,23 @@ def test_invoice_alerts_group_by_coordinator_and_cc_both():
     assert maria["file_count"] == 2 and maria["total"] == 19723
 
 
+def test_invoice_alert_uses_coordinator_email_from_file():
+    """The coordinator's email travels on the file (from MoveWare quote roles), so
+    the alert addresses the right person without a name→email map."""
+    import coordinator_alerts as ca
+    worklist = [{"job": 1, "client": "HSBC", "coordinator": "Sara Reyes",
+                 "coordinator_email": "sarareyes@thelsa.com", "value": 5000}]
+    alerts = ca.build_invoice_alerts(worklist)
+    assert alerts[0]["to"] == "sarareyes@thelsa.com" and alerts[0]["resolved"] is True
+
+
+def test_invoice_alert_falls_back_when_no_email():
+    import coordinator_alerts as ca
+    worklist = [{"job": 1, "client": "X", "coordinator": "Unassigned", "value": 5000}]
+    alerts = ca.build_invoice_alerts(worklist)
+    assert alerts[0]["resolved"] is False          # routed to fallback, not a guess
+
+
 def test_invoice_drafts_gated_off_by_default():
     import coordinator_alerts as ca
     wl = [{"job": 1, "client": "X", "coordinator": "Y", "value": 100}]

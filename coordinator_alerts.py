@@ -67,12 +67,16 @@ def _coordinator_map():
     return out
 
 
-def resolve_email(coordinator):
-    """Return (to_email, resolved: bool) for a coordinator name.
+def resolve_email(coordinator, direct_email=None):
+    """Return (to_email, resolved: bool) for a coordinator.
 
-    Resolved from AUDIT_COORDINATOR_EMAILS; if unknown, routes to the fallback
-    inbox so a person assigns it — we never send to a guessed address.
+    Prefers the email carried on the file itself (MoveWare quote roles), then the
+    AUDIT_COORDINATOR_EMAILS override map; if neither, routes to the fallback inbox
+    so a person assigns it — we never send to a guessed address.
     """
+    direct = (direct_email or "").strip()
+    if "@" in direct:
+        return direct, True
     name = (coordinator or "").strip()
     email = _coordinator_map().get(name.lower())
     if email:
@@ -234,7 +238,8 @@ def build_invoice_alerts(worklist):
     for coord, rows in sorted(by_coord.items(),
                               key=lambda kv: -sum(r.get("value", 0) for r in kv[1])):
         rows.sort(key=lambda r: -r.get("value", 0))
-        to_email, resolved = resolve_email(coord)
+        direct = next((r.get("coordinator_email") for r in rows if r.get("coordinator_email")), None)
+        to_email, resolved = resolve_email(coord, direct_email=direct)
         total = round(sum(r.get("value", 0) for r in rows), 2)
         n = len(rows)
         followup = any(r.get("_followup") for r in rows)

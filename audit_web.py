@@ -489,6 +489,8 @@ def compute_metrics(files, live_counts=None, cost_available=True):
         ub_scanned_at = live_counts.get("underbilling_scanned_at")
         ub_n_findings = live_counts.get("underbilling_n_findings") or 0
         ub_n_approved = live_counts.get("underbilling_n_approved") or 0
+        ub_n_messages = live_counts.get("underbilling_n_messages") or 0
+        ub_diag = live_counts.get("underbilling_diag") or {}
         ub_error = live_counts.get("underbilling_error")
     else:
         true_active = len(active)
@@ -514,6 +516,8 @@ def compute_metrics(files, live_counts=None, cost_available=True):
         ub_scanned_at = None
         ub_n_findings = 0
         ub_n_approved = 0
+        ub_n_messages = 0
+        ub_diag = {}
         ub_error = None
     ub_total_gap = round(sum(r.get("gap", 0) for r in ub_rows), 2)
     window_months = int(round(window_days / 30.0))
@@ -558,7 +562,7 @@ def compute_metrics(files, live_counts=None, cost_available=True):
         "ub_scanned_at": ub_scanned_at, "ub_total_gap": ub_total_gap,
         "ub_count": len(ub_rows),
         "ub_n_findings": ub_n_findings, "ub_n_approved": ub_n_approved,
-        "ub_error": ub_error,
+        "ub_n_messages": ub_n_messages, "ub_diag": ub_diag, "ub_error": ub_error,
         "sample_n": sample_n, "feed_total": feed_total,
         "feed_exhausted": feed_exhausted, "feed_pages": feed_pages,
         "audited_this_month": len(files),
@@ -630,6 +634,8 @@ def _load_checked():
                 counts["underbilling_scanned_at"] = ub.get("scanned_at")
                 counts["underbilling_n_findings"] = ub.get("n_findings") or 0
                 counts["underbilling_n_approved"] = ub.get("n_approved") or 0
+                counts["underbilling_n_messages"] = ub.get("n_messages") or 0
+                counts["underbilling_diag"] = ub.get("diag")
                 counts["underbilling_error"] = ub.get("error")
             except Exception as _e:
                 counts["underbilling_rows"] = []
@@ -998,8 +1004,15 @@ TEMPLATE = r"""<!DOCTYPE html>
     <td class="num bad">{{ "{:,.0f}".format(r.gap) }}{% if not r.currency_match %} <span class="warn" title="currency mismatch — verify FX">⚠</span>{% endif %}</td></tr>{% endfor %}</table>
   <p class="sub" style="color:var(--muted);margin-top:6px">⚠ = approved and invoiced currencies differ; verify the FX before acting.</p>
   {% else %}
+  {% if m.ub_error %}
+  <div style="background:color-mix(in srgb,var(--amber) 12%,transparent);border:1px solid #f0dcb8;border-radius:12px;padding:12px 15px;font-size:12.5px;color:var(--amber)">
+    <b>Connected, but mailbox reads didn't return data.</b> {{ m.ub_error }}<br>
+    {% if m.ub_diag %}<span style="color:var(--muted)">Mailboxes: {{ m.ub_diag.mailboxes }} · returned OK: {{ m.ub_diag.ok }} · denied (401/403): {{ m.ub_diag.forbidden }} · not found: {{ m.ub_diag.notfound }} · other: {{ m.ub_diag.other }} · token OK: {{ m.ub_diag.token_ok }}</span>{% endif %}
+  </div>
+  {% else %}
   <div class="sub good">Connected to coordinator mail. No under-billed jobs found so far. ✓</div>
-  <p class="sub" style="color:var(--muted);margin-top:4px">Scanned {{ m.ub_n_findings }} "FINAL CHARGES" message{{ '' if m.ub_n_findings==1 else 's' }} · {{ m.ub_n_approved }} approved{% if m.ub_scanned_at %} · last scan just now{% endif %}.{% if m.ub_error %} <span class="warn">Note: {{ m.ub_error }}</span>{% endif %}</p>
+  <p class="sub" style="color:var(--muted);margin-top:4px">Read {{ m.ub_diag.ok if m.ub_diag else 0 }}/{{ m.ub_diag.mailboxes if m.ub_diag else 0 }} coordinator mailboxes · {{ m.ub_n_messages }} "FINAL CHARGES" message{{ '' if m.ub_n_messages==1 else 's' }} found · {{ m.ub_n_approved }} approved{% if m.ub_scanned_at %} · last scan just now{% endif %}.</p>
+  {% endif %}
   {% endif %}
   {% endif %}
   <h2>{% if m.cost_available %}Calculation Accuracy — Revenue &amp; Cost{% else %}Quote vs Invoice — Approved Charges Not Yet Invoiced (MoveWare){% endif %}</h2>

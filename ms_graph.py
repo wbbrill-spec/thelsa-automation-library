@@ -114,27 +114,53 @@ def _plain(msg: dict) -> str:
     return content
 
 
+# Diagnostics from the most recent fetch, surfaced on the dashboard so a silent
+# 0-result is explainable (token failure vs per-mailbox 403 vs simply no matches).
+LAST_DIAG = {"mailboxes": 0, "ok": 0, "forbidden": 0, "notfound": 0,
+             "other": 0, "hits": 0, "token_ok": None, "first_error": None}
+
+
+def _short(r) -> str:
+    try:
+        j = r.json()
+        return (((j.get("error") or {}).get("message")) or r.text or "")[:140]
+    except Exception:
+        return (r.text or "")[:140]
+
+
 def fetch_final_charges(days: int = 400, per_mailbox: int = 50) -> list[dict]:
-    """Return recent 'FINAL CHARGES' messages across the 12 TMS coordinator
-    mailboxes: {subject, body, sender, date, conversationId, mailbox}. [] if no creds."""
-    h = _headers()
-    if not h:
+    """Return recent 'FINAL CHARGES' / 'CARGOS FINALES' messages across the 12 TMS
+    coordinator mailboxes: {subject, body, sender, date, conversationId, mailbox}.
+    Records per-mailbox outcome in LAST_DIAG. [] if no creds/token."""
+    global LAST_DIAG
+    diag = {"mailboxes": len(TMS_COORDINATORS), "ok": 0, "forbidden": 0,
+            "notfound": 0, "other": 0, "hits": 0, "token_ok": False, "first_error": None}
+    tok = _get_token()
+    diag["token_ok"] = bool(tok)
+    if not tok:
+        diag["first_error"] = "token request failed — check the GRAPH_* / MS_* tenant, client id and secret"
+        LAST_DIAG = diag
         return []
+    h = {"Authorization": f"Bearer {tok}", "ConsistencyLevel": "eventual"}
     out = []
     for mbx in TMS_COORDINATORS:
-        # $search on subject; Graph requires ConsistencyLevel:eventual for $search
         params = {
-            "$search": '"subject:FINAL CHARGES"',
+            "$search": '"subject:FINAL CHARGES" OR "subject:CARGOS FINALES"',
             "$select": "subject,from,receivedDateTime,conversationId,body,bodyPreview",
             "$top": str(per_mailbox),
         }
         try:
-            r = requests.get(f"{GRAPH}/users/{mbx}/messages",
-                             headers={**h, "ConsistencyLevel": "eventual"},
+            r = requests.get(f"{GRAPH}/users/{mbx}/messages", headers=h,
                              params=params, timeout=_TIMEOUT)
-            if r.status_code != 200:
-                continue
-            for m in r.json().get("value", []):
+        except Exception as e:
+            diag["other"] += 1
+            diag["first_error"] = diag["first_error"] or f"{mbx}: {e}"
+            continue
+        if r.status_code == 200:
+            diag["ok"] += 1
+            vals = r.json().get("value", [])
+            diag["hits"] += len(vals)
+            for m in vals:
                 out.append({
                     "subject": m.get("subject", ""),
                     "body": _plain(m),
@@ -143,8 +169,16 @@ def fetch_final_charges(days: int = 400, per_mailbox: int = 50) -> list[dict]:
                     "conversationId": m.get("conversationId"),
                     "mailbox": mbx,
                 })
-        except Exception:
-            continue
+        elif r.status_code in (401, 403):
+            diag["forbidden"] += 1
+            diag["first_error"] = diag["first_error"] or f"{mbx}: {r.status_code} {_short(r)}"
+        elif r.status_code == 404:
+            diag["notfound"] += 1
+            diag["first_error"] = diag["first_error"] or f"{mbx}: 404 mailbox not found"
+        else:
+            diag["other"] += 1
+            diag["first_error"] = diag["first_error"] or f"{mbx}: {r.status_code} {_short(r)}"
+    LAST_DIAG = diag
     return out
 
 

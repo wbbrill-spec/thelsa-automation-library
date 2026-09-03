@@ -225,7 +225,7 @@ def build_findings(messages, thread_fetcher=None, known_jobs=None):
 
 # Cached scan result the dashboard reads.
 _SCAN = {"rows": [], "scanned_at": None, "n_findings": 0, "n_approved": 0,
-         "have_creds": False, "error": None}
+         "have_creds": False, "error": None, "diag": None, "n_messages": 0}
 _SCAN_LOCK = threading.Lock()
 _SCAN_THREAD = None
 _SCAN_INTERVAL = int(os.environ.get("UNDERBILLING_SCAN_SECONDS", 6 * 3600))
@@ -255,11 +255,20 @@ def scan_live():
                         "client": m.get("client"), "coordinator": m.get("coordinator")}
                     for j, m in audited.items()}
         rows = reconcile(findings, invoiced)
+        diag = getattr(ms_graph, "LAST_DIAG", None)
+        # If the credential works but every mailbox 403s (or the token fails),
+        # surface that as the scan error so the dashboard explains the 0-result.
+        derived_err = None
+        if diag:
+            if not diag.get("token_ok"):
+                derived_err = diag.get("first_error") or "token request failed"
+            elif diag.get("ok", 0) == 0 and (diag.get("forbidden") or diag.get("notfound") or diag.get("other")):
+                derived_err = "mailbox reads failed — " + (diag.get("first_error") or "no mailbox returned 200")
         with _SCAN_LOCK:
             _SCAN.update({"rows": rows, "scanned_at": time.time(),
-                          "n_findings": len(findings),
+                          "n_findings": len(findings), "n_messages": len(msgs),
                           "n_approved": sum(1 for f in findings if f.get("approved")),
-                          "error": None})
+                          "diag": diag, "error": derived_err})
     except Exception as e:
         with _SCAN_LOCK:
             _SCAN["error"] = str(e)

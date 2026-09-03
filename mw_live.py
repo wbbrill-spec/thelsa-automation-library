@@ -1228,6 +1228,18 @@ def audited_files():
         return list(_AUDIT["files"].values())
 
 
+def force_refresh():
+    """Make the auditor re-audit the in-window files on its next tick (≤60s) by
+    ageing out last_full_at. Used to pick up mapping changes (e.g. coordinator
+    email) without waiting for the scheduled 6h refresh. Returns True if the
+    backfill is complete (so a refresh will actually run)."""
+    with _AUDIT_LOCK:
+        complete = _AUDIT.get("window_complete")
+        if complete:
+            _AUDIT["last_full_at"] = 0
+        return bool(complete)
+
+
 def audited_in_window():
     """Just the in-window (last-12-months) audited files — what the recoverable
     dashboard metrics run over. Historical files are excluded here."""

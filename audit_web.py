@@ -767,6 +767,20 @@ def audit_alerts_draft():
     return jsonify(ca.create_drafts(files, live=is_live))
 
 
+@audit_bp.route("/audit/refresh", methods=["POST", "GET"])
+@_login_required
+def audit_refresh():
+    """Force the auditor to re-audit in-window files on its next tick (≤60s), so
+    mapping changes (e.g. coordinator email) show up without waiting 6h."""
+    from flask import jsonify
+    import mw_live
+    ran = mw_live.force_refresh()
+    return jsonify({"refresh_queued": ran,
+                    "note": ("In-window files will re-audit within ~60s; reload the "
+                             "dashboard shortly." if ran else
+                             "Backfill still in progress — refresh not needed yet.")})
+
+
 @audit_bp.route("/audit/invoice-alerts")
 @_login_required
 def audit_invoice_alerts_preview():

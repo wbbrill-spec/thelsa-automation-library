@@ -553,6 +553,8 @@ def test_embassy_regex_matches_expected_names():
     import mw_live
     assert mw_live._is_embassy("EMBAJADA DE LOS ESTADOS UNIDOS DE AMERICA")
     assert mw_live._is_embassy("US Embassy Mexico City")
+    assert mw_live._is_embassy("U.S. Consulate General Matamoros")   # consulates too
+    assert mw_live._is_embassy("Consulado General Americano")
     assert not mw_live._is_embassy("BMW Group")
 
 

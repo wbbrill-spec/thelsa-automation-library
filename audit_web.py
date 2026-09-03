@@ -1077,12 +1077,12 @@ TEMPLATE = r"""<!DOCTYPE html>
       {% for s,n in m.by_stage.items() %}<div class="stage-line"><span>{{ s.replace('_',' ') }}</span><span class="num">{{ n }}</span></div>{% endfor %}</div>
   </div>
   <h2>Ready to Invoice</h2>
-  {% if not m.cost_available %}<p style="font-size:12px;color:var(--muted);margin:-4px 0 12px">Files with a <b>pack or delivery date that has passed</b> but <b>no invoice yet</b> — money that can be billed now. Move milestone (not status) decides it. <b>US Embassy</b> files are excluded until <b>delivered</b>. Dollar value = the accepted MoveWare quote.</p>{% endif %}
+  {% if not m.cost_available %}<p style="font-size:12px;color:var(--muted);margin:-4px 0 12px">Files with a <b>pack or delivery date that has passed</b> but <b>no invoice yet</b> — money that can be billed now. Move milestone (not status) decides it. <b>US Embassy &amp; Consulate</b> files are excluded until <b>delivered</b>. Dollar value = the accepted MoveWare quote.</p>{% endif %}
   <div class="grid g4">
     <div class="tile"><div class="label">Ready to invoice</div><div class="value num {{ 'warn' if m.invoiceable_n else 'good' }}">{{ m.invoiceable_n }}</div><div class="sub">files packed/delivered, not billed</div></div>
     <div class="tile"><div class="label">Value to invoice</div><div class="value num {{ 'warn' if m.invoiceable_val else 'good' }}">{{ "{:,.0f}".format(m.invoiceable_val) }}</div><div class="sub">total billable now</div></div>
-    <div class="tile"><div class="label">US Embassy in transit</div><div class="value num">{{ m.embassy_transit_n }}</div><div class="sub">packed, not yet delivered</div></div>
-    <div class="tile"><div class="label">Embassy value (pending delivery)</div><div class="value num">{{ "{:,.0f}".format(m.embassy_transit_val) }}</div><div class="sub">bills after delivery</div></div>
+    <div class="tile"><div class="label">US Embassy/Consulate in transit</div><div class="value num">{{ m.embassy_transit_n }}</div><div class="sub">packed, not yet delivered</div></div>
+    <div class="tile"><div class="label">Embassy/Consulate value (pending delivery)</div><div class="value num">{{ "{:,.0f}".format(m.embassy_transit_val) }}</div><div class="sub">bills after delivery</div></div>
   </div>
   <div class="row" style="margin-top:12px">
     <div class="tile" style="flex:1;min-width:220px"><div class="label">Invoiced this month</div><div class="value num">{{ m.invoiced_m }}</div><div class="sub">{{ "{:,.0f}".format(m.invoiced_m_val) }} billed</div></div>
@@ -1091,7 +1091,7 @@ TEMPLATE = r"""<!DOCTYPE html>
   {% if m.to_invoice_worklist %}
   <table style="margin-top:12px"><tr><th>Job</th><th>Client</th><th>Coordinator</th><th>Packed</th><th>Delivered</th><th>Value</th></tr>
   {% for r in m.to_invoice_worklist[:40] %}<tr>
-    <td class="num">{{ r.job }}{% if r.embassy %} <span class="pill rev" title="US Embassy">EMB</span>{% endif %}</td>
+    <td class="num">{{ r.job }}{% if r.embassy %} <span class="pill rev" title="US Embassy or Consulate">EMB</span>{% endif %}</td>
     <td>{{ r.client }}</td><td>{{ r.coordinator }}</td>
     <td>{{ r.pack or '—' }}</td><td>{{ r.delivery or '—' }}</td>
     <td class="num warn">{{ "{:,.0f}".format(r.value) }}</td></tr>{% endfor %}</table>

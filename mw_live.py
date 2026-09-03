@@ -31,16 +31,20 @@ from concurrent.futures import ThreadPoolExecutor
 _CACHE = {"at": 0.0, "data": None}
 _CACHE_TTL = 600  # seconds
 
-# US Embassy files bill only after DELIVERY (not at pack), unlike other moves.
-# Identify them by debtor/client name. Override the pattern with EMBASSY_PATTERN.
+# US Embassy AND US Consulate files bill only after DELIVERY (not at pack),
+# unlike other moves. Identify them by debtor/client name. Override with
+# EMBASSY_PATTERN.
 _EMBASSY_RE = re.compile(
     os.environ.get("EMBASSY_PATTERN",
                    r"embajada.*estados\s+unidos|estados\s+unidos.*embajada|"
-                   r"u\.?s\.?\s*embassy|embassy\s+of\s+the\s+united\s+states|american\s+embassy"),
+                   r"u\.?\s*s\.?\s*embassy|embassy\s+of\s+the\s+united\s+states|american\s+embassy|"
+                   r"u\.?\s*s\.?\s*consulate|consulate\s+general\s+of\s+the\s+united\s+states|"
+                   r"consulado.*estados\s+unidos|consulado\s+(general\s+)?americano"),
     re.IGNORECASE)
 
 
 def _is_embassy(name: str) -> bool:
+    """US Embassy OR US Consulate — both bill only after delivery."""
     return bool(name and _EMBASSY_RE.search(name))
 _MAX_JOBS = 3     # cap the deep-load sample — each job makes sub-calls
                   # (quotes/invoices) at ~2-3s each, so keep this low to stay well

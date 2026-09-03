@@ -1228,16 +1228,33 @@ def audited_files():
         return list(_AUDIT["files"].values())
 
 
+_FORCE_REFRESH_RUNNING = False
+
+
 def force_refresh():
-    """Make the auditor re-audit the in-window files on its next tick (≤60s) by
-    ageing out last_full_at. Used to pick up mapping changes (e.g. coordinator
-    email) without waiting for the scheduled 6h refresh. Returns True if the
-    backfill is complete (so a refresh will actually run)."""
+    """Immediately re-audit the in-window files in a background thread (regardless
+    of backfill state), so mapping changes (e.g. coordinator name/email) show up
+    without waiting for the scheduled 6h refresh. Re-persists the snapshot after.
+    Returns True if a refresh was started (False if one is already running)."""
+    global _FORCE_REFRESH_RUNNING
     with _AUDIT_LOCK:
-        complete = _AUDIT.get("window_complete")
-        if complete:
-            _AUDIT["last_full_at"] = 0
-        return bool(complete)
+        if _FORCE_REFRESH_RUNNING:
+            return False
+        _FORCE_REFRESH_RUNNING = True
+        _AUDIT["last_full_at"] = 0
+
+    def _run():
+        global _FORCE_REFRESH_RUNNING
+        try:
+            _refresh_recent()
+            _persist_snapshot()
+        except Exception:
+            pass
+        finally:
+            _FORCE_REFRESH_RUNNING = False
+
+    threading.Thread(target=_run, daemon=True, name="force-refresh").start()
+    return True
 
 
 def audited_in_window():

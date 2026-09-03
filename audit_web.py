@@ -775,10 +775,10 @@ def audit_refresh():
     from flask import jsonify
     import mw_live
     ran = mw_live.force_refresh()
-    return jsonify({"refresh_queued": ran,
-                    "note": ("In-window files will re-audit within ~60s; reload the "
-                             "dashboard shortly." if ran else
-                             "Backfill still in progress — refresh not needed yet.")})
+    return jsonify({"refresh_started": ran,
+                    "note": ("Re-auditing in-window files now (~1-3 min); reload the "
+                             "dashboard shortly to see coordinators populate." if ran else
+                             "A refresh is already running — reload in a minute.")})
 
 
 @audit_bp.route("/audit/invoice-alerts")

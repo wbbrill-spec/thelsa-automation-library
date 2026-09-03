@@ -6,14 +6,15 @@ Cesar registered ("Thelsa AI Personal Assistant"), which has application
 Mail.ReadWrite scoped by RBAC to the AI-Assistant-Users group (the 20 mailboxes).
 We read only the 12 TMS coordinator mailboxes and only "FINAL CHARGES" threads.
 
-Config via env (tenant + client id default to the known app; the SECRET must be
-supplied and is never hard-coded):
-    MS_TENANT_ID       (default: the Thelsa tenant)
-    MS_CLIENT_ID       (default: the Thelsa AI Personal Assistant app)
-    MS_CLIENT_SECRET   (REQUIRED — from Bill's Bitwarden vault; set on Render)
+Credential (app-only, client_credentials). No secret is ever hard-coded. It is
+resolved at import from env, preferring a dedicated app but FALLING BACK to the
+engine's existing Graph credential so nothing new needs configuring:
+    1. MS_TENANT_ID / MS_CLIENT_ID / MS_CLIENT_SECRET   (dedicated app, if secret set)
+    2. GRAPH_TENANT_ID / GRAPH_CLIENT_ID / GRAPH_CLIENT_SECRET   (the SAME app-only
+       credential engine/mailer.py already uses to read/write employee mailboxes)
 
-Everything degrades gracefully: with no secret, have_ms_creds() is False and the
-fetch functions return [] so the dashboard simply shows "waiting for access".
+Everything degrades gracefully: with no secret in either set, have_ms_creds() is
+False and the fetch functions return [] so the dashboard shows "waiting for access".
 """
 from __future__ import annotations
 
@@ -22,9 +23,36 @@ import time
 
 import requests
 
-MS_TENANT_ID = os.environ.get("MS_TENANT_ID", "b054f5d3-0c08-46c0-8e80-cc38cbd9e58e")
-MS_CLIENT_ID = os.environ.get("MS_CLIENT_ID", "8210a2b4-4bc5-4eef-abbc-03ac092ff11f")
-MS_CLIENT_SECRET = os.environ.get("MS_CLIENT_SECRET", "")
+MS_TENANT_DEFAULT = "b054f5d3-0c08-46c0-8e80-cc38cbd9e58e"
+MS_CLIENT_DEFAULT = "8210a2b4-4bc5-4eef-abbc-03ac092ff11f"
+
+
+def _resolve_creds():
+    """Pick the app-only Graph credential to read coordinator mailboxes with.
+
+    Preference order:
+      1. Dedicated MS_* vars (the "Thelsa AI Personal Assistant" app), if a secret
+         is set — tenant/client fall back to the known app defaults.
+      2. The engine's EXISTING app-only credential (GRAPH_TENANT_ID / GRAPH_CLIENT_ID
+         / GRAPH_CLIENT_SECRET) — the same app the mailer / lead-gen already use to
+         read employee mailboxes. Reusing it means no separate secret to configure.
+    Each option is a MATCHED triplet — we never mix a secret from one app with the
+    client id of another.
+    """
+    if os.environ.get("MS_CLIENT_SECRET"):
+        return (os.environ.get("MS_TENANT_ID", MS_TENANT_DEFAULT).strip(),
+                os.environ.get("MS_CLIENT_ID", MS_CLIENT_DEFAULT).strip(),
+                os.environ["MS_CLIENT_SECRET"].strip())
+    if os.environ.get("GRAPH_CLIENT_SECRET"):
+        return (os.environ.get("GRAPH_TENANT_ID", "").strip(),
+                os.environ.get("GRAPH_CLIENT_ID", "").strip(),
+                os.environ.get("GRAPH_CLIENT_SECRET", "").strip())
+    return (os.environ.get("MS_TENANT_ID", MS_TENANT_DEFAULT).strip(),
+            os.environ.get("MS_CLIENT_ID", MS_CLIENT_DEFAULT).strip(),
+            "")
+
+
+MS_TENANT_ID, MS_CLIENT_ID, MS_CLIENT_SECRET = _resolve_creds()
 
 GRAPH = "https://graph.microsoft.com/v1.0"
 _TIMEOUT = 20

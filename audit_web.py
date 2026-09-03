@@ -487,6 +487,9 @@ def compute_metrics(files, live_counts=None, cost_available=True):
         ub_rows = live_counts.get("underbilling_rows") or []
         ub_have_creds = bool(live_counts.get("underbilling_have_creds"))
         ub_scanned_at = live_counts.get("underbilling_scanned_at")
+        ub_n_findings = live_counts.get("underbilling_n_findings") or 0
+        ub_n_approved = live_counts.get("underbilling_n_approved") or 0
+        ub_error = live_counts.get("underbilling_error")
     else:
         true_active = len(active)
         active_available = True
@@ -509,6 +512,9 @@ def compute_metrics(files, live_counts=None, cost_available=True):
         ub_rows = []
         ub_have_creds = False
         ub_scanned_at = None
+        ub_n_findings = 0
+        ub_n_approved = 0
+        ub_error = None
     ub_total_gap = round(sum(r.get("gap", 0) for r in ub_rows), 2)
     window_months = int(round(window_days / 30.0))
     cov_pct = round(audited_total / feed_total * 100) if (full_coverage and feed_total) else 0
@@ -551,6 +557,8 @@ def compute_metrics(files, live_counts=None, cost_available=True):
         "ub_rows": ub_rows, "ub_have_creds": ub_have_creds,
         "ub_scanned_at": ub_scanned_at, "ub_total_gap": ub_total_gap,
         "ub_count": len(ub_rows),
+        "ub_n_findings": ub_n_findings, "ub_n_approved": ub_n_approved,
+        "ub_error": ub_error,
         "sample_n": sample_n, "feed_total": feed_total,
         "feed_exhausted": feed_exhausted, "feed_pages": feed_pages,
         "audited_this_month": len(files),
@@ -621,9 +629,12 @@ def _load_checked():
                 counts["underbilling_have_creds"] = bool(ub.get("have_creds"))
                 counts["underbilling_scanned_at"] = ub.get("scanned_at")
                 counts["underbilling_n_findings"] = ub.get("n_findings") or 0
-            except Exception:
+                counts["underbilling_n_approved"] = ub.get("n_approved") or 0
+                counts["underbilling_error"] = ub.get("error")
+            except Exception as _e:
                 counts["underbilling_rows"] = []
                 counts["underbilling_have_creds"] = False
+                counts["underbilling_error"] = str(_e)
             files = reconcile(audited, cost_available=False) if audited else []
             check_calculations(files)
             return files, True, counts
@@ -969,8 +980,9 @@ TEMPLATE = r"""<!DOCTYPE html>
   <p style="font-size:12px;color:var(--muted);margin:-4px 0 12px">Scans the 12 TMS coordinators' "FINAL CHARGES" emails, matches each to its MoveWare job, and flags charges the client <b>approved</b> that were never invoiced — revenue that should be billed.</p>
   {% if not m.ub_have_creds %}
   <div style="background:var(--tint);border:1px solid var(--line);border-radius:12px;padding:12px 15px;font-size:12.5px;color:var(--muted)">
-    <b style="color:var(--rust-dark)">Waiting on coordinator mailbox access.</b> The detector is built and tested; it goes live automatically once the Thelsa AI app's client secret is set on the server (env <code>MS_CLIENT_SECRET</code>). It will then read the coordinators' approved‑charge emails and list every job billed for less than was approved.
+    <b style="color:var(--rust-dark)">Waiting on coordinator mailbox access.</b> The detector is built and tested; it goes live automatically once a Microsoft Graph app-only credential is set on the server (dedicated <code>MS_CLIENT_SECRET</code>, or it reuses the engine's existing <code>GRAPH_CLIENT_SECRET</code>). It will then read the coordinators' approved‑charge emails and list every job billed for less than was approved.
   </div>
+  {% if m.ub_error %}<p class="sub" style="color:var(--amber);margin-top:6px">Detector note: {{ m.ub_error }}</p>{% endif %}
   {% elif m.ub_count %}
   <div class="grid g4">
     <div class="tile"><div class="label">Under-billed (approved − invoiced)</div><div class="value num bad">{{ "{:,.0f}".format(m.ub_total_gap) }}</div><div class="sub">recoverable revenue</div></div>
@@ -986,7 +998,8 @@ TEMPLATE = r"""<!DOCTYPE html>
     <td class="num bad">{{ "{:,.0f}".format(r.gap) }}{% if not r.currency_match %} <span class="warn" title="currency mismatch — verify FX">⚠</span>{% endif %}</td></tr>{% endfor %}</table>
   <p class="sub" style="color:var(--muted);margin-top:6px">⚠ = approved and invoiced currencies differ; verify the FX before acting.</p>
   {% else %}
-  <div class="sub good">No under-billed jobs found in the coordinator mail checked so far. ✓</div>
+  <div class="sub good">Connected to coordinator mail. No under-billed jobs found so far. ✓</div>
+  <p class="sub" style="color:var(--muted);margin-top:4px">Scanned {{ m.ub_n_findings }} "FINAL CHARGES" message{{ '' if m.ub_n_findings==1 else 's' }} · {{ m.ub_n_approved }} approved{% if m.ub_scanned_at %} · last scan just now{% endif %}.{% if m.ub_error %} <span class="warn">Note: {{ m.ub_error }}</span>{% endif %}</p>
   {% endif %}
   {% endif %}
   <h2>{% if m.cost_available %}Calculation Accuracy — Revenue &amp; Cost{% else %}Quote vs Invoice — Approved Charges Not Yet Invoiced (MoveWare){% endif %}</h2>

@@ -25,7 +25,7 @@ TODAY = dt.date.today()
 def _mkfile(**kw):
     base = dict(
         job=1, client="C", coordinator="Ana", mode="sea", stage="closed", status="W",
-        invoiced=True, inv_amt=0, sell=0, est=0, act=0,
+        is_embassy=False, invoiced=True, inv_amt=0, sell=0, est=0, act=0,
         q_lines=None, i_lines=None, est_wt=None, act_wt=None,
         gaps=[], open_gaps=0, gap_value=0,
         rev_reported=None, rev_lines=None, n_rev_lines=0, pack=None, delivery=None,
@@ -513,33 +513,127 @@ def test_revenue_sums_invoiced_where_billed_else_quoted():
     assert m["tot_revenue"] == round(196166.22 + 5000)
 
 
-def test_invoicing_progress_reports_dollar_values():
-    """Invoicing tiles carry the dollar value of billed / to-bill / overdue BOOKED
-    moves (status W), using invoiced amount where billed else quoted revenue. Open
-    quotes/leads (P/L) are excluded — they were never booked, nothing to invoice."""
-    this_month = TODAY.replace(day=1) + dt.timedelta(days=5)
-    last_month = TODAY.replace(day=1) - dt.timedelta(days=10)
+def test_ready_to_invoice_by_move_dates_not_status():
+    """'Ready to invoice' = a real move (pack OR delivery date passed) not yet
+    invoiced — keyed on milestone dates, NOT status code (packed/invoiced files
+    can show status 'Pending'). Files with no move dates (leads) are excluded."""
+    past = TODAY - dt.timedelta(days=10)
     files = [
-        _mkfile(job=1, status="W", invoiced=True, inv_amt=10000, sell=9000, delivery=this_month),
-        _mkfile(job=2, status="W", invoiced=False, inv_amt=0, sell=26000, delivery=this_month),
-        _mkfile(job=3, status="W", invoiced=False, inv_amt=0, sell=5000, delivery=this_month),
-        _mkfile(job=4, status="W", invoiced=False, inv_amt=0, sell=69000, delivery=last_month),
-        # Not booked — must be ignored everywhere in the invoicing tiles:
-        _mkfile(job=5, status="P", invoiced=False, inv_amt=0, sell=0, delivery=this_month),
-        _mkfile(job=6, status="L", invoiced=False, inv_amt=0, sell=99999, delivery=last_month),
+        _mkfile(job=1, status="P", invoiced=False, inv_amt=0, sell=7723, pack=past),        # packed -> ready
+        _mkfile(job=2, status="P", invoiced=False, inv_amt=0, sell=12000, delivery=past),   # delivered -> ready
+        _mkfile(job=3, status="W", invoiced=True, inv_amt=8000, sell=8000, pack=past),       # already invoiced
+        _mkfile(job=4, status="W", invoiced=False, inv_amt=0, sell=9999),                    # no dates -> lead, excluded
+        _mkfile(job=5, status="P", invoiced=False, inv_amt=0, sell=5000, pack=TODAY + dt.timedelta(days=5)),  # future pack -> not yet
     ]
     aw.check_calculations(files)
     m = aw.compute_metrics(files, live_counts=LIVE_COUNTS, cost_available=False)
-    assert m["invoiced_m"] == 1 and m["invoiced_m_val"] == 10000        # inv_amt when billed
-    assert m["invoiceable_m"] == 2 and m["invoiceable_m_val"] == 31000  # 26000 + 5000 (booked, quoted)
-    assert m["overdue"] == 1 and m["overdue_val"] == 69000              # the P/L rows excluded
-    assert m["pct_billed"] == 33.3                                       # 1 of 3 booked files
-    assert m["pct_billed_val"] == round(10000 / 41000 * 100, 1)          # by value
+    assert m["invoiceable_n"] == 2
+    assert m["invoiceable_val"] == 19723            # 7723 + 12000
+    assert {r["job"] for r in m["to_invoice_worklist"]} == {1, 2}
 
 
-def test_status_field_defaults_present_in_mkfile():
-    """_mkfile carries a status field so booked-filtering behaves in tests."""
-    assert "status" in _mkfile()
+def test_us_embassy_bills_only_after_delivery():
+    """US Embassy files are NOT ready to invoice until delivered; while packed but
+    not delivered they show as 'in transit' with their own dollar value."""
+    past = TODAY - dt.timedelta(days=10)
+    files = [
+        _mkfile(job=1, client="EMBAJADA DE LOS ESTADOS UNIDOS", is_embassy=True,
+                invoiced=False, inv_amt=0, sell=50000, pack=past),                 # packed, not delivered
+        _mkfile(job=2, client="EMBAJADA DE LOS ESTADOS UNIDOS", is_embassy=True,
+                invoiced=False, inv_amt=0, sell=60000, pack=past, delivery=past),  # delivered -> ready
+    ]
+    aw.check_calculations(files)
+    m = aw.compute_metrics(files, live_counts=LIVE_COUNTS, cost_available=False)
+    assert m["embassy_transit_n"] == 1 and m["embassy_transit_val"] == 50000
+    assert m["invoiceable_n"] == 1 and m["invoiceable_val"] == 60000   # only the delivered one
+    assert {r["job"] for r in m["to_invoice_worklist"]} == {2}
+
+
+def test_embassy_regex_matches_expected_names():
+    import mw_live
+    assert mw_live._is_embassy("EMBAJADA DE LOS ESTADOS UNIDOS DE AMERICA")
+    assert mw_live._is_embassy("US Embassy Mexico City")
+    assert not mw_live._is_embassy("BMW Group")
+
+
+def test_invoice_alerts_group_by_coordinator_and_cc_both():
+    import coordinator_alerts as ca
+    worklist = [
+        {"job": 1, "client": "HSBC", "coordinator": "Maria", "value": 7723,
+         "embassy": False, "pack": "2026-07-13", "delivery": None},
+        {"job": 2, "client": "Bayer", "coordinator": "Maria", "value": 12000,
+         "embassy": False, "pack": None, "delivery": "2026-08-01"},
+        {"job": 3, "client": "EMBAJADA", "coordinator": "Wendy", "value": 60000,
+         "embassy": True, "pack": "2026-07-01", "delivery": "2026-08-10"},
+    ]
+    alerts = ca.build_invoice_alerts(worklist)
+    assert len(alerts) == 2                       # grouped by coordinator
+    top = alerts[0]                               # Wendy first (highest value)
+    assert top["coordinator"] == "Wendy" and top["total"] == 60000
+    assert "maria.gonzalez@thelsa.com" in top["cc"] and "bbrill@thelsa.com" in top["cc"]
+    assert "US EMBASSY" in top["body"]
+    maria = [a for a in alerts if a["coordinator"] == "Maria"][0]
+    assert maria["file_count"] == 2 and maria["total"] == 19723
+
+
+def test_invoice_drafts_gated_off_by_default():
+    import coordinator_alerts as ca
+    wl = [{"job": 1, "client": "X", "coordinator": "Y", "value": 100}]
+    st = ca.create_invoice_drafts(wl, live=True)   # enabled flag not set in tests
+    assert st["drafts"] == [] and st["skipped_reason"]
+
+
+def _fake_mailer(monkeypatch, log):
+    import engine.mailer as em
+
+    class Fake:
+        def __init__(self, mailbox=None):
+            self.mailbox = mailbox
+
+        def create_draft(self, to, subj, body, cc=None, folder=None):
+            log.append(("draft", to, subj, folder)); return {"id": "d", "folder": folder}
+
+        def send_mail(self, to, subj, body, cc=None, html=False):
+            log.append(("send", to, subj)); return {"sent": True}
+
+    monkeypatch.setattr(em, "GraphMailer", Fake)
+
+
+def test_invoice_alerts_send_and_dedupe_within_48h(tmp_path, monkeypatch):
+    import coordinator_alerts as ca
+    monkeypatch.setenv("AUDIT_ALERTS_ENABLED", "1")
+    monkeypatch.setenv("DRY_RUN", "0")
+    monkeypatch.setenv("INVOICE_ALERTS_SEND", "1")
+    monkeypatch.setenv("AUDIT_CACHE_PATH", str(tmp_path / "audit_cache.json"))
+    log = []
+    _fake_mailer(monkeypatch, log)
+    wl = [{"job": 1, "client": "A", "coordinator": "Maria", "value": 100},
+          {"job": 2, "client": "B", "coordinator": "Maria", "value": 200}]
+    st1 = ca.dispatch_invoice_alerts(wl, live=True)          # send=None -> uses flags -> SEND
+    assert st1["mode"] == "send" and len(st1["sent"]) == 1   # grouped into one email
+    assert log[0][0] == "send"
+    st2 = ca.dispatch_invoice_alerts(wl, live=True)          # immediate re-run
+    assert st2["alert_count"] == 0                            # de-duped within 48h
+    assert len(log) == 1                                      # nothing sent again
+
+
+def test_invoice_alerts_followup_after_48h(tmp_path, monkeypatch):
+    import json as _json
+    import datetime as _dt
+    import coordinator_alerts as ca
+    monkeypatch.setenv("AUDIT_ALERTS_ENABLED", "1")
+    monkeypatch.setenv("DRY_RUN", "0")
+    monkeypatch.setenv("AUDIT_CACHE_PATH", str(tmp_path / "audit_cache.json"))
+    # Seed state: job 1 last alerted 50h ago -> a follow-up is due.
+    old = (_dt.datetime.now() - _dt.timedelta(hours=50)).isoformat()
+    (tmp_path / "invoice_alert_state.json").write_text(_json.dumps({"1": {"last": old, "count": 1}}))
+    log = []
+    _fake_mailer(monkeypatch, log)
+    wl = [{"job": 1, "client": "A", "coordinator": "Maria", "value": 100}]
+    st = ca.dispatch_invoice_alerts(wl, live=True, send=False)
+    assert st["followups"] == 1 and len(st["drafts"]) == 1
+    assert "REMINDER" in log[0][2]                            # subject marks the follow-up
+    assert log[0][3] == "Audit Alert Drafts"                  # draft lands in the folder
 
 
 def test_only_flagged_files_appear_in_disc_worklist():

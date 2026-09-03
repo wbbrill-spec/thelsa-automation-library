@@ -21,6 +21,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+import re
 import threading
 import time
 import urllib.error
@@ -29,6 +30,18 @@ from concurrent.futures import ThreadPoolExecutor
  
 _CACHE = {"at": 0.0, "data": None}
 _CACHE_TTL = 600  # seconds
+
+# US Embassy files bill only after DELIVERY (not at pack), unlike other moves.
+# Identify them by debtor/client name. Override the pattern with EMBASSY_PATTERN.
+_EMBASSY_RE = re.compile(
+    os.environ.get("EMBASSY_PATTERN",
+                   r"embajada.*estados\s+unidos|estados\s+unidos.*embajada|"
+                   r"u\.?s\.?\s*embassy|embassy\s+of\s+the\s+united\s+states|american\s+embassy"),
+    re.IGNORECASE)
+
+
+def _is_embassy(name: str) -> bool:
+    return bool(name and _EMBASSY_RE.search(name))
 _MAX_JOBS = 3     # cap the deep-load sample — each job makes sub-calls
                   # (quotes/invoices) at ~2-3s each, so keep this low to stay well
                   # inside the proxy/worker timeout; result is cached (TTL) and
@@ -500,6 +513,12 @@ def _map_job(job: dict) -> dict | None:
                     if sval > 0 and _classify_charge(ch) != "cost":
                         sel_lines.append({"desc": _code_text(_first(ch, "description", default="")),
                                           "value": round(sval, 2)})
+                # Some real moves carry the priced charge lines but no option-level
+                # `value` header — fall back to the sum of the accepted charge lines
+                # so a genuine quote total isn't lost (verified: option value == sum
+                # of charges on live files).
+                if not sell and sel_lines:
+                    sell = round(sum(l["value"] for l in sel_lines), 2)
             # Collect EVERY quote charge line across ALL options (and the quote's
             # `services`) for line-level reconciliation against the invoices.
             for q in quotes:
@@ -606,6 +625,7 @@ def _map_job(job: dict) -> dict | None:
         "client": client or "",
         "mode": mode,
         "status": status,
+        "is_embassy": _is_embassy(client or ""),
         "est": round(est_cost, 2),
         "act": round(actual_cost, 2),
         "sell": round(sell, 2),

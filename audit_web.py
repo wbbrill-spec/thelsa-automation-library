@@ -22,6 +22,7 @@ dict shape returned below. Nothing else needs to change.
 """
 import datetime as dt
 import functools
+import os
 
 from flask import (
     Blueprint,
@@ -355,35 +356,52 @@ def compute_metrics(files, live_counts=None, cost_available=True):
     for f in files:
         by_stage[f["stage"]] = by_stage.get(f["stage"], 0) + 1
 
-    def _month_hit(f):
-        return _in_month(f["delivery"], ms, me) or _in_month(f["pack"], ms, me)
-
     def _bill_value(f):
-        # Dollar value of a file for invoicing purposes: what was invoiced if it
-        # was, else the quoted revenue we still expect to bill.
+        # Dollar value of a file for invoicing: what was invoiced if it was, else
+        # the accepted MoveWare quote value we still expect to bill.
         return round((f.get("inv_amt") if f.get("invoiced") else 0) or f.get("sell") or 0, 2)
 
-    def _past(f):
-        return (f["delivery"] and f["delivery"] < ms) or (f["pack"] and f["pack"] < ms)
+    # ── Invoiceable = a REAL move (has a pack or delivery date in the past), by
+    # its milestone dates, NOT its status code (status is unreliable — packed &
+    # invoiced files show as "Pending"). A move can be invoiced once packed OR
+    # delivered — EXCEPT US Embassy files, which bill only after DELIVERY.
+    def _packed(f):
+        return bool(f.get("pack") and f["pack"] <= today)
 
-    # BOOKED moves only. Invoicing is about confirmed/booked jobs (MoveWare status
-    # "W" = Won), NOT open quotes/leads (P = Pending, L = Lead) that were never
-    # booked — those have no accepted price and must not count as "to invoice".
-    # When status is absent (demo dataset), fall back to all files so the demo
-    # still renders.
-    _have_status = any(f.get("status") for f in files)
-    booked = [f for f in files if (not _have_status) or (f.get("status") or "").upper() == "W"]
+    def _delivered(f):
+        return bool(f.get("delivery") and f["delivery"] <= today)
 
-    invoiced_m = sum(1 for f in booked if f["invoiced"] and _month_hit(f))
-    invoiceable_m = sum(1 for f in booked if not f["invoiced"] and _month_hit(f))
-    invoiced_m_val = round(sum(_bill_value(f) for f in booked if f["invoiced"] and _month_hit(f)), 2)
-    invoiceable_m_val = round(sum(_bill_value(f) for f in booked if not f["invoiced"] and _month_hit(f)), 2)
-    denom = invoiced_m + invoiceable_m
-    pct_billed = round(invoiced_m / denom * 100, 1) if denom else 0.0
-    denom_val = invoiced_m_val + invoiceable_m_val
-    pct_billed_val = round(invoiced_m_val / denom_val * 100, 1) if denom_val else 0.0
-    overdue = sum(1 for f in booked if not f["invoiced"] and _past(f))
-    overdue_val = round(sum(_bill_value(f) for f in booked if not f["invoiced"] and _past(f)), 2)
+    def _invoiceable(f):
+        if f.get("is_embassy"):
+            return _delivered(f)          # embassy: not until delivered
+        return _packed(f) or _delivered(f)
+
+    to_invoice = [f for f in files if not f["invoiced"] and _invoiceable(f)]
+    invoiceable_n = len(to_invoice)
+    invoiceable_val = round(sum(_bill_value(f) for f in to_invoice), 2)
+
+    # US Embassy files packed but NOT yet delivered — in transit, not yet billable.
+    embassy_transit = [f for f in files if f.get("is_embassy") and _packed(f) and not _delivered(f)]
+    embassy_transit_n = len(embassy_transit)
+    embassy_transit_val = round(sum(_bill_value(f) for f in embassy_transit), 2)
+
+    # Invoiced this month (context) — by move date in the current month.
+    def _month_hit(f):
+        return _in_month(f["delivery"], ms, me) or _in_month(f["pack"], ms, me)
+    invoiced_m = sum(1 for f in files if f["invoiced"] and _month_hit(f))
+    invoiced_m_val = round(sum(_bill_value(f) for f in files if f["invoiced"] and _month_hit(f)), 2)
+    # Percent billed among moves that have happened (invoiced vs invoiceable-not).
+    _done = sum(1 for f in files if f["invoiced"] and _invoiceable(f))
+    pct_billed = round(_done / (_done + invoiceable_n) * 100, 1) if (_done + invoiceable_n) else 100.0
+    # Worklist of files that should be invoiced (for the coordinator alert drafts).
+    to_invoice_worklist = sorted(
+        [{"job": f["job"], "client": f["client"],
+          "coordinator": f.get("coordinator") or "Unassigned",
+          "value": _bill_value(f), "embassy": bool(f.get("is_embassy")),
+          "pack": f["pack"].isoformat() if f.get("pack") else None,
+          "delivery": f["delivery"].isoformat() if f.get("delivery") else None}
+         for f in to_invoice],
+        key=lambda r: -r["value"])
 
     n = len(files) or 1
     avg_gaps = round(len(all_gaps) / n, 2)
@@ -566,10 +584,10 @@ def compute_metrics(files, live_counts=None, cost_available=True):
         "sample_n": sample_n, "feed_total": feed_total,
         "feed_exhausted": feed_exhausted, "feed_pages": feed_pages,
         "audited_this_month": len(files),
-        "invoiced_m": invoiced_m, "invoiceable_m": invoiceable_m,
-        "invoiced_m_val": invoiced_m_val, "invoiceable_m_val": invoiceable_m_val,
-        "pct_billed": pct_billed, "pct_billed_val": pct_billed_val,
-        "overdue": overdue, "overdue_val": overdue_val,
+        "invoiced_m": invoiced_m, "invoiced_m_val": invoiced_m_val,
+        "invoiceable_n": invoiceable_n, "invoiceable_val": invoiceable_val,
+        "embassy_transit_n": embassy_transit_n, "embassy_transit_val": embassy_transit_val,
+        "pct_billed": pct_billed, "to_invoice_worklist": to_invoice_worklist,
         "avg_gaps": avg_gaps, "avg_gap_val": avg_gap_val,
         "recovered": recovered, "recoverable": round(recoverable, 2),
         "recovery_rate": recovery_rate, "open_count": len(open_gaps), "open_val": open_val,
@@ -652,10 +670,68 @@ def _load_checked():
     return files, False, None
 
 
+# ── Auto-send: coordinator "ready to invoice" alerts on a schedule ───────────
+# A background thread that, only when AUDIT_ALERTS_ENABLED=1, builds the live
+# ready-to-invoice worklist and dispatches alerts (SEND when INVOICE_ALERTS_SEND=1,
+# else DRAFT). It re-runs periodically so the 48h follow-up fires; the de-dupe and
+# per-run cap live in coordinator_alerts. Completely inert unless enabled.
+import threading as _threading
+import time as _time
+
+_INV_ALERTER = None
+
+
+def _run_invoice_alerts_once():
+    import mw_live
+    import coordinator_alerts as ca
+    if not ca.alerts_enabled():
+        return {"skipped_reason": "AUDIT_ALERTS_ENABLED != 1"}
+    audited = [m for m in mw_live.audited_files() if m.get("job")]
+    if not audited:
+        return {"skipped_reason": "no audited files yet"}
+    files = reconcile(audited, cost_available=False)
+    check_calculations(files)
+    m = compute_metrics(files, live_counts=None, cost_available=False)
+    return ca.dispatch_invoice_alerts(m.get("to_invoice_worklist", []), live=True)
+
+
+def _invoice_alert_loop():
+    _time.sleep(int(os.environ.get("INVOICE_ALERTS_START_DELAY", "300")))
+    interval = int(os.environ.get("INVOICE_ALERTS_EVERY_SECONDS", str(12 * 3600)))
+    while True:
+        try:
+            import coordinator_alerts as ca
+            if ca.alerts_enabled():
+                _run_invoice_alerts_once()
+        except Exception:
+            pass
+        _time.sleep(max(600, interval))
+
+
+def ensure_invoice_alerter():
+    """Start the auto-alert thread once — no-op unless alerting is enabled."""
+    global _INV_ALERTER
+    try:
+        import coordinator_alerts as ca
+        if not ca.alerts_enabled():
+            return
+    except Exception:
+        return
+    if _INV_ALERTER is not None and _INV_ALERTER.is_alive():
+        return
+    _INV_ALERTER = _threading.Thread(target=_invoice_alert_loop, daemon=True,
+                                     name="invoice-alerter")
+    _INV_ALERTER.start()
+
+
 @audit_bp.route("/audit")
 @_login_required
 def audit():
     files, is_live, counts = _load_checked()
+    try:
+        ensure_invoice_alerter()
+    except Exception:
+        pass
     # Live RestV1 data has NO supplier cost (see mw_live._map_job), so profit and
     # margin can't be computed from it — hide them rather than show fabricated 0s.
     m = compute_metrics(files, live_counts=counts, cost_available=not is_live)
@@ -688,6 +764,55 @@ def audit_alerts_draft():
     import coordinator_alerts as ca
     files, is_live, _counts = _load_checked()
     return jsonify(ca.create_drafts(files, live=is_live))
+
+
+@audit_bp.route("/audit/invoice-alerts")
+@_login_required
+def audit_invoice_alerts_preview():
+    """Preview the 'ready to invoice' coordinator alerts. Creates nothing."""
+    from flask import jsonify
+    import coordinator_alerts as ca
+    files, is_live, counts = _load_checked()
+    m = compute_metrics(files, live_counts=counts, cost_available=not is_live)
+    wl = m.get("to_invoice_worklist", [])
+    return jsonify({
+        "live": is_live, "enabled": ca.alerts_enabled(),
+        "note": ("Preview only — no drafts created. Drafts are created via POST "
+                 "/audit/invoice-alerts/draft, and only when AUDIT_ALERTS_ENABLED=1, "
+                 "DRY_RUN!=1, and the data is live. Never auto-sends."),
+        "cc": ca._invoice_cc_list(),
+        "ready_to_invoice": len(wl),
+        "alerts": ca.build_invoice_alerts(wl),
+    })
+
+
+@audit_bp.route("/audit/invoice-alerts/draft", methods=["POST"])
+@_login_required
+def audit_invoice_alerts_draft():
+    """Create one DRAFT per coordinator for files ready to invoice (gated; never
+    sends). cc maria.gonzalez@thelsa.com + bbrill@thelsa.com."""
+    from flask import jsonify
+    import coordinator_alerts as ca
+    files, is_live, counts = _load_checked()
+    m = compute_metrics(files, live_counts=counts, cost_available=not is_live)
+    return jsonify(ca.create_invoice_drafts(m.get("to_invoice_worklist", []), live=is_live))
+
+
+@audit_bp.route("/audit/invoice-alerts/send", methods=["POST"])
+@_login_required
+def audit_invoice_alerts_send():
+    """SEND one email per coordinator for files ready to invoice, from
+    bbrill@thelsa.com (gated: needs AUDIT_ALERTS_ENABLED=1 AND INVOICE_ALERTS_SEND=1
+    AND live data; de-duped with a 48h follow-up; capped per run). Force draft/send
+    with ?mode=draft|send."""
+    from flask import jsonify, request
+    import coordinator_alerts as ca
+    files, is_live, counts = _load_checked()
+    m = compute_metrics(files, live_counts=counts, cost_available=not is_live)
+    mode = request.args.get("mode")
+    send = True if mode == "send" else (False if mode == "draft" else None)
+    return jsonify(ca.dispatch_invoice_alerts(m.get("to_invoice_worklist", []),
+                                              live=is_live, send=send))
 
 
 @audit_bp.route("/audit/raw")
@@ -951,14 +1076,27 @@ TEMPLATE = r"""<!DOCTYPE html>
     <div class="tile" style="flex:2;min-width:280px"><div class="label">Files by audit stage</div>
       {% for s,n in m.by_stage.items() %}<div class="stage-line"><span>{{ s.replace('_',' ') }}</span><span class="num">{{ n }}</span></div>{% endfor %}</div>
   </div>
-  <h2>Invoicing Progress</h2>
-  {% if not m.cost_available %}<p style="font-size:12px;color:var(--muted);margin:-4px 0 12px"><b>Booked moves only</b> (MoveWare status Won) — open quotes and leads that were never booked are excluded. Dollar figures are the invoiced amount where billed, else the accepted quote value from MoveWare.</p>{% endif %}
+  <h2>Ready to Invoice</h2>
+  {% if not m.cost_available %}<p style="font-size:12px;color:var(--muted);margin:-4px 0 12px">Files with a <b>pack or delivery date that has passed</b> but <b>no invoice yet</b> — money that can be billed now. Move milestone (not status) decides it. <b>US Embassy</b> files are excluded until <b>delivered</b>. Dollar value = the accepted MoveWare quote.</p>{% endif %}
   <div class="grid g4">
-    <div class="tile"><div class="label">Invoiced this month</div><div class="value num">{{ m.invoiced_m }}</div><div class="sub">{{ "{:,.0f}".format(m.invoiced_m_val) }} billed</div></div>
-    <div class="tile"><div class="label">Still to invoice</div><div class="value num {{ 'warn' if m.invoiceable_m else 'good' }}">{{ m.invoiceable_m }}</div><div class="sub">{{ "{:,.0f}".format(m.invoiceable_m_val) }} to bill · booked this month</div></div>
-    <div class="tile"><div class="label">Percent billed</div><div class="value num {{ 'good' if m.pct_billed>=80 else 'warn' }}">{{ m.pct_billed }}%</div><div class="sub">{{ m.pct_billed_val }}% by value</div></div>
-    <div class="tile"><div class="label">Overdue to invoice</div><div class="value num {{ 'bad' if m.overdue else 'good' }}">{{ m.overdue }}</div><div class="sub">{{ "{:,.0f}".format(m.overdue_val) }} unbilled · move date passed</div></div>
+    <div class="tile"><div class="label">Ready to invoice</div><div class="value num {{ 'warn' if m.invoiceable_n else 'good' }}">{{ m.invoiceable_n }}</div><div class="sub">files packed/delivered, not billed</div></div>
+    <div class="tile"><div class="label">Value to invoice</div><div class="value num {{ 'warn' if m.invoiceable_val else 'good' }}">{{ "{:,.0f}".format(m.invoiceable_val) }}</div><div class="sub">total billable now</div></div>
+    <div class="tile"><div class="label">US Embassy in transit</div><div class="value num">{{ m.embassy_transit_n }}</div><div class="sub">packed, not yet delivered</div></div>
+    <div class="tile"><div class="label">Embassy value (pending delivery)</div><div class="value num">{{ "{:,.0f}".format(m.embassy_transit_val) }}</div><div class="sub">bills after delivery</div></div>
   </div>
+  <div class="row" style="margin-top:12px">
+    <div class="tile" style="flex:1;min-width:220px"><div class="label">Invoiced this month</div><div class="value num">{{ m.invoiced_m }}</div><div class="sub">{{ "{:,.0f}".format(m.invoiced_m_val) }} billed</div></div>
+    <div class="tile" style="flex:1;min-width:220px"><div class="label">Percent billed</div><div class="value num {{ 'good' if m.pct_billed>=80 else 'warn' }}">{{ m.pct_billed }}%</div><div class="sub">of moves that have happened</div></div>
+  </div>
+  {% if m.to_invoice_worklist %}
+  <table style="margin-top:12px"><tr><th>Job</th><th>Client</th><th>Coordinator</th><th>Packed</th><th>Delivered</th><th>Value</th></tr>
+  {% for r in m.to_invoice_worklist[:40] %}<tr>
+    <td class="num">{{ r.job }}{% if r.embassy %} <span class="pill rev" title="US Embassy">EMB</span>{% endif %}</td>
+    <td>{{ r.client }}</td><td>{{ r.coordinator }}</td>
+    <td>{{ r.pack or '—' }}</td><td>{{ r.delivery or '—' }}</td>
+    <td class="num warn">{{ "{:,.0f}".format(r.value) }}</td></tr>{% endfor %}</table>
+  {% if m.to_invoice_worklist|length > 40 %}<p class="sub" style="color:var(--muted)">Showing top 40 of {{ m.to_invoice_worklist|length }} by value.</p>{% endif %}
+  {% endif %}
   {% if m.cost_available %}
   <h2>Gaps &amp; Recovery</h2>
   <div class="grid g4">
@@ -990,19 +1128,9 @@ TEMPLATE = r"""<!DOCTYPE html>
   </div>
   {% if m.ub_error %}<p class="sub" style="color:var(--amber);margin-top:6px">Detector note: {{ m.ub_error }}</p>{% endif %}
   {% elif m.ub_count %}
-  <div class="grid g4">
-    <div class="tile"><div class="label">Under-billed (approved − invoiced)</div><div class="value num bad">{{ "{:,.0f}".format(m.ub_total_gap) }}</div><div class="sub">recoverable revenue</div></div>
-    <div class="tile"><div class="label">Jobs under-billed</div><div class="value num bad">{{ m.ub_count }}</div><div class="sub">approved charges not fully invoiced</div></div>
-    <div class="tile"><div class="label">Source</div><div class="value num">email</div><div class="sub">coordinator FINAL CHARGES ↔ MoveWare invoice</div></div>
-    <div class="tile"><div class="label">Method</div><div class="value num">match</div><div class="sub">by job number</div></div>
+  <div style="background:color-mix(in srgb,var(--amber) 12%,transparent);border:1px solid #f0dcb8;border-radius:12px;padding:12px 15px;font-size:12.5px;color:var(--amber)">
+    <b>Connected — parser in validation.</b> The scan read the coordinator mail and produced {{ m.ub_count }} candidate flag{{ '' if m.ub_count==1 else 's' }}, but spot-checks showed the email amount-parser over-counts (it summed declared/insurance values, so figures were inflated). The dollar figures are hidden until the parser is corrected, so nobody acts on wrong numbers. The <b>reliable</b> under-billing signal is the MoveWare quote-vs-invoice section below. Scanned {{ m.ub_n_messages }} "FINAL CHARGES" message{{ '' if m.ub_n_messages==1 else 's' }}.
   </div>
-  <table style="margin-top:12px"><tr><th>Job</th><th>Coordinator</th><th>Client</th><th>Approved</th><th>Invoiced</th><th>Gap</th></tr>
-  {% for r in m.ub_rows %}<tr>
-    <td class="num">{{ r.job }}</td><td>{{ r.coordinator }}</td><td>{{ r.client or '' }}</td>
-    <td class="num">{{ "{:,.0f}".format(r.approved_total) }} {{ r.currency }}</td>
-    <td class="num">{{ "{:,.0f}".format(r.invoiced) }}{% if r.invoiced_currency %} {{ r.invoiced_currency }}{% endif %}</td>
-    <td class="num bad">{{ "{:,.0f}".format(r.gap) }}{% if not r.currency_match %} <span class="warn" title="currency mismatch — verify FX">⚠</span>{% endif %}</td></tr>{% endfor %}</table>
-  <p class="sub" style="color:var(--muted);margin-top:6px">⚠ = approved and invoiced currencies differ; verify the FX before acting.</p>
   {% else %}
   {% if m.ub_error %}
   <div style="background:color-mix(in srgb,var(--amber) 12%,transparent);border:1px solid #f0dcb8;border-radius:12px;padding:12px 15px;font-size:12.5px;color:var(--amber)">

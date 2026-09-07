@@ -221,3 +221,6 @@ app.register_blueprint(audit_bp)
 from faim_web import faim_bp
 app.register_blueprint(faim_bp)
 
+# Cross-Border Shipment Dashboard (TIM/ClickUp + TMS/Moveware, unified)
+from crossborder.web import crossborder_bp
+app.register_blueprint(crossborder_bp)

@@ -12,6 +12,8 @@ Routes:
   /crossborder/raw?completed=1     also walk the "Completed …" space.
   /crossborder/raw?discover=1      the workspace hierarchy (space/folder/list ids).
   /crossborder/raw?list=<id>,<id>  inspect specific lists in full (every task).
+  /crossborder/raw?tms=probe       Moveware shape discovery (a few calls; &env=test|prod).
+  /crossborder/raw?tms=1&days=30   a bounded TMS walk with diagnostics (&max_details=N).
   /crossborder                     the dashboard page (dashboard.py).
   /crossborder/api/shipments       JSON: normalized shipments + status +
                                    diagnostics (cached 5 min; ?refresh=1 to force).
@@ -26,7 +28,7 @@ import time
 
 from flask import Blueprint, jsonify, redirect, request, session, url_for
 
-from . import clickup, remisiones, tim
+from . import clickup, remisiones, tim, tms
 from .dashboard import DASHBOARD_HTML
 
 log = logging.getLogger(__name__)
@@ -55,6 +57,21 @@ def _refresh_worker(include_completed: bool, prog: dict):
         except Exception as exc:  # noqa: BLE001 — never lose the ClickUp fleet over the sheet
             log.exception("remisiones merge failed")
             diag["remisiones"] = {"error": f"{type(exc).__name__}: {exc}"}
+        # TMS shipments from Moveware (read-only, narrow walk). A Moveware
+        # failure never drops the TIM fleet either.
+        if os.environ.get("TMS_ENABLED", "0") in ("1", "true", "yes"):
+            try:
+                if not tms.MovewareClient.have_creds():
+                    diag["tms"] = {"error": "MW_USERNAME / MW_PASSWORD / MW_COMPANY_ID not set"}
+                else:
+                    tprog = {}
+                    prog["tms"] = tprog
+                    tms_ships, tdiag = tms.fetch_tms_shipments(progress=tprog)
+                    shipments = shipments + tms_ships
+                    diag["tms"] = tdiag
+            except Exception as exc:  # noqa: BLE001
+                log.exception("tms fetch failed")
+                diag["tms"] = {"error": f"{type(exc).__name__}: {exc}"}
         with _LOCK:
             _CACHE.update(at=time.time(), shipments=shipments, diag=diag,
                           completed=include_completed, error=None)
@@ -125,6 +142,19 @@ def raw():
         out["next_step"] = "Set CLICKUP_TOKEN in Render (personal API token, pk_…)."
         return jsonify(out)
     try:
+        if request.args.get("tms"):
+            mode = request.args.get("tms")
+            client = tms.MovewareClient(env=request.args.get("env"))
+            if mode == "probe":
+                out["tms"] = tms.probe(client, sample=int(request.args.get("sample", "3") or 3))
+            else:
+                ships, tdiag = tms.fetch_tms_shipments(
+                    client, days=int(request.args.get("days", "30") or 30),
+                    details=request.args.get("details", "1") != "0",
+                    max_details=int(request.args.get("max_details", "10") or 10))
+                out["tms"] = tdiag
+                out["shipments"] = [x.to_dict() for x in ships]
+            return jsonify(out)
         if request.args.get("list") or request.args.get("discover"):
             client = clickup.ClickUpClient()
             if request.args.get("list"):
@@ -144,6 +174,7 @@ def raw():
         out["by_stage"] = _count_by(shipments, lambda s: s.stage.value)
         out["by_agent"] = _count_by(shipments, lambda s: s.agent or "?")
         out["by_flag"] = _count_by([f for s in shipments for f in s.status_flags], lambda f: f)
+        out["by_source"] = _count_by(shipments, lambda s: s.source.value)
         out["by_hub"] = _count_by([s for s in shipments if s.is_open], lambda s: s.destination_hub.value)
         out["shipments"] = [s.to_dict() for s in shipments]
     except clickup.ClickUpError as exc:
@@ -172,7 +203,10 @@ def api_shipments():
         return jsonify({"error": f"{type(exc).__name__}: {exc}", "shipments": []}), 200
     return jsonify({"count": len(shipments), "status": status,
                     "diagnostics": {"remisiones": diag.get("remisiones"), "requests_made": diag.get("requests_made"),
-                                    "errors": diag.get("errors")},
+                                    "errors": diag.get("errors"),
+                                    "tms": {k: v for k, v in (diag.get("tms") or {}).items()
+                                            if k in ("env", "count", "error", "rows_seen", "cross_border", "by_direction",
+                                                     "details_fetched", "requests_made", "by_stage")}},
                     "shipments": [s.to_dict() for s in shipments]})
 
 

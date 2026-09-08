@@ -73,6 +73,14 @@ def test_unit_helpers():
     assert parse_date("") is None
 
 
+def test_lift_van_equivalents_from_volume():
+    from crossborder.models import Shipment, Source
+    s = Shipment(id="x", source=Source.TMS, source_ref="1", customer_name="a", volume_m3=17.1, stage=Stage.BOOKED)
+    assert s.lift_van_equivalents == 3.0
+    s.lift_vans = 2
+    assert s.lift_van_equivalents == 2.0          # explicit counts win over volume
+
+
 def test_webhook_signature():
     body = b'{"event":"taskUpdated"}'
     import hashlib

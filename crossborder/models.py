@@ -78,13 +78,13 @@ _HUB_CITIES: dict[Hub, list[str]] = {
     Hub.MEXICO_CITY: [
         "mexico city", "ciudad de mexico", "cdmx", "distrito federal", "df",
         "estado de mexico", "edomex", "toluca", "naucalpan", "huixquilucan",
-        "interlomas", "santa fe", "polanco", "cuernavaca", "morelos", "puebla",
+        "interlomas", "santa fe", "polanco", "iztapalapa", "cuernavaca", "morelos", "puebla", "atlixco",
         "pachuca", "hidalgo", "tlaxcala", "veracruz", "xalapa", "oaxaca",
         "acapulco", "guerrero", "chiapas", "tuxtla gutierrez",
     ],
     Hub.GUADALAJARA: [
         "guadalajara", "zapopan", "tlaquepaque", "tonala", "tlajomulco", "jalisco",
-        "chapala", "ajijic", "puerto vallarta", "nayarit", "tepic", "colima",
+        "chapala", "ajijic", "puerto vallarta", "ixtapa", "sayulita", "nayarit", "tepic", "colima",
         "manzanillo", "aguascalientes", "michoacan", "morelia", "sinaloa",
         "culiacan", "mazatlan",
     ],
@@ -226,6 +226,7 @@ class Shipment:
     milestones: dict = field(default_factory=dict)   # e.g. {"green_light": date, "crossed": date}
     last_progress_at: Optional[dt.date] = None       # when the latest step was completed
     days_since_progress: Optional[int] = None
+    extra: dict = field(default_factory=dict)        # source-specific facts (e.g. remisiones sale value)
 
     # ── derived ──
     @property

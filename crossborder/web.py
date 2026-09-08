@@ -25,7 +25,7 @@ import time
 
 from flask import Blueprint, jsonify, redirect, request, session, url_for
 
-from . import clickup, tim
+from . import clickup, remisiones, tim
 
 log = logging.getLogger(__name__)
 
@@ -40,6 +40,19 @@ _LOCK = threading.Lock()
 def _refresh_worker(include_completed: bool, prog: dict):
     try:
         shipments, diag = tim.fetch_tim_shipments(include_completed=include_completed, progress=prog)
+        # Merge the spreadsheet facts (volume / destination / sale) from the
+        # latest week of the Remisiones workbook, when it can be fetched.
+        try:
+            rows, info = remisiones.load_latest_rows()
+            if rows:
+                m = remisiones.match_rows_to_shipments(rows, shipments)
+                for sid, row in m["matches"].items():
+                    remisiones.enrich_shipment(next(x for x in shipments if x.id == sid), row)
+                info.update(m["diag"])
+            diag["remisiones"] = info
+        except Exception as exc:  # noqa: BLE001 — never lose the ClickUp fleet over the sheet
+            log.exception("remisiones merge failed")
+            diag["remisiones"] = {"error": f"{type(exc).__name__}: {exc}"}
         with _LOCK:
             _CACHE.update(at=time.time(), shipments=shipments, diag=diag,
                           completed=include_completed, error=None)
@@ -129,6 +142,7 @@ def raw():
         out["by_stage"] = _count_by(shipments, lambda s: s.stage.value)
         out["by_agent"] = _count_by(shipments, lambda s: s.agent or "?")
         out["by_flag"] = _count_by([f for s in shipments for f in s.status_flags], lambda f: f)
+        out["by_hub"] = _count_by([s for s in shipments if s.is_open], lambda s: s.destination_hub.value)
         out["shipments"] = [s.to_dict() for s in shipments]
     except clickup.ClickUpError as exc:
         out["error"] = str(exc)

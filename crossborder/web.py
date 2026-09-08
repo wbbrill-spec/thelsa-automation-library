@@ -147,6 +147,21 @@ def raw():
             client = tms.MovewareClient(env=request.args.get("env"))
             if mode == "probe":
                 out["tms"] = tms.probe(client, sample=int(request.args.get("sample", "3") or 3))
+            elif mode == "get":
+                # Read-only, allowlisted passthrough for shape discovery (never exposes creds).
+                path = request.args.get("path", "/jobs?limit=3")
+                if not path.startswith(("/jobs", "/codes", "/branches")):
+                    out["tms"] = {"error": "path must start with /jobs, /codes or /branches"}
+                    return jsonify(out)
+                try:
+                    body = client.get(path)
+                    rows = body.get("jobs") if isinstance(body, dict) else None
+                    out["tms"] = {"path": path, "rows": len(rows) if isinstance(rows, list) else None,
+                                  "body": body if not isinstance(rows, list) or len(rows) <= 5 else {**body, "jobs": rows[:5]}}
+                except tms.MovewareError as exc:
+                    out["tms"] = {"path": path, "error": str(exc)}
+                out["requests_made"] = client.requests_made
+                return jsonify(out)
             else:
                 ships, tdiag = tms.fetch_tms_shipments(
                     client, days=int(request.args.get("days", "30") or 30),

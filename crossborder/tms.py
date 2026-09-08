@@ -2,14 +2,16 @@
 tms.py — TMS shipments from Moveware, normalized into the unified Shipment model.
 
 Read-only. Honors the Moveware performance guardrail: one narrow, filtered,
-paginated list walk (recently *updated* jobs only, small pages) plus one detail
+paginated list walk (recently *created* jobs only, small pages) plus one detail
 call per cross-border job, run in the background a few times an hour and cached.
 Nothing here ever writes to Moveware.
 
 What we know about the instance (moveware-api-integration-guide.md, mw_live.py):
   • header auth (mw-username / mw-password / mw-company-id), ~2 s per call
   • `offset` on /jobs is a 1-indexed PAGE number, feed is oldest-first
-  • filtered lists silently cap at ~50–150 rows → walk small date slices
+  • filtered lists silently cap at ~50–150 rows → walk small date slices;
+    `updatedAfter` returns 400 on Thelsa's instance, `createdAfter/Before` work
+    (measured 2026-09-08 on the test DB) — so the window is by *created* date
   • list rows carry only 2-letter country codes for origin/destination — that is
     exactly what identifies a cross-border job (US↔MX) before paying for detail
   • detail carries measurements[] (volume/weight), extras[] (dtpacking,
@@ -146,7 +148,8 @@ def _extras(detail: dict) -> dict:
 def _measurements(detail: dict) -> dict:
     """{'volume_m3': float|None, 'weight_kg': float|None, 'items': int|None}"""
     vol_m3 = weight = items = None
-    weight_src = ""
+    weight_src = -1
+    vol_src = -1
     for m in detail.get("measurements") or []:
         if not isinstance(m, dict):
             continue
@@ -155,18 +158,19 @@ def _measurements(detail: dict) -> dict:
         val = to_number(m.get("value"))
         if val in (None, 0):
             continue
-        if t in ("volumenett", "volumegross") and (vol_m3 is None or t == "volumenett"):
-            if uom.startswith("m"):
-                vol_m3 = round(val, 2)
-            elif uom.startswith("f"):
-                vol_m3 = round(val / CUFT_PER_M3, 2)
-            elif vol_m3 is None:
-                vol_m3 = round(val, 2)
+        if t in ("volumenett", "volumegross"):
+            # Preference: nett > gross; a metric row beats a converted ft row.
+            rank = (2 if t == "volumenett" else 1) * 2 + (1 if uom.startswith("m") else 0)
+            if vol_m3 is None or rank > vol_src:
+                vol_m3 = round(val / CUFT_PER_M3, 2) if uom.startswith("f") else round(val, 2)
+                vol_src = rank
         elif t in ("actualweight", "weightnett", "weightgross"):
             kg = round(val * 0.4536, 1) if uom.startswith("lb") else round(val, 1)
-            # prefer actualWeight over nett/gross, and a kg row over a derived lb row
-            if weight is None or (t == "actualweight" and (weight_src != "actualweight" or not uom.startswith("lb"))):
-                weight, weight_src = kg, t
+            # Preference: weightNett kg > actualWeight kg > gross; a kg row beats a
+            # lb row of the same type (Moveware derives lb and it can go stale).
+            rank = {"weightnett": 3, "actualweight": 2, "weightgross": 1}[t] * 2 + (0 if uom.startswith("lb") else 1)
+            if weight is None or rank > weight_src:
+                weight, weight_src = kg, rank
         elif t == "items":
             items = int(val)
     return {"volume_m3": vol_m3, "weight_kg": weight, "items": items}
@@ -175,9 +179,19 @@ def _measurements(detail: dict) -> dict:
 def _place(v) -> str:
     """Best human-readable place from a list value or a detail address object."""
     if isinstance(v, dict):
-        parts = [v.get(k) for k in ("city", "suburb", "town", "state", "country") if v.get(k)]
-        return ", ".join(str(p).strip() for p in parts) or _s(v)
+        a = v.get("address") if isinstance(v.get("address"), dict) else v
+        parts = [a.get(k) for k in ("city", "suburb", "town", "state") if a.get(k)]
+        if not parts and a.get("formattedAddress"):
+            return str(a["formattedAddress"]).replace("\n", ", ").strip()
+        if not parts:
+            parts = [a.get("country") or a.get("countryISO2")]
+        return ", ".join(str(p).strip() for p in parts if p) or _s(v)
     return _s(v)
+
+
+def _loc(detail: dict, which: str) -> dict:
+    locs = detail.get("locations") if isinstance(detail.get("locations"), dict) else {}
+    return locs.get(which) if isinstance(locs.get(which), dict) else {}
 
 
 def stage_for(row: dict, detail: dict | None, today: dt.date) -> tuple[Stage, list[str], dict]:
@@ -186,12 +200,15 @@ def stage_for(row: dict, detail: dict | None, today: dt.date) -> tuple[Stage, li
     border' until the team tells us which extras carry the border/hub dates."""
     ex = _extras(detail or {})
     status = _s(row.get("status") or (detail or {}).get("jobStatus")).upper()[:1]
-    uplift = _mw_date((detail or {}).get("upliftStart")) or _mw_date(row.get("uplift")) or _mw_date(ex.get("dtpacking"))
-    delivery = _mw_date(ex.get("dtdelivery")) or _mw_date(row.get("delivery"))
+    d = detail or {}
+    uplift = (_mw_date(d.get("upliftStart")) or _mw_date(d.get("pack")) or _mw_date(row.get("uplift"))
+              or _mw_date(ex.get("dtpacking")) or _mw_date(d.get("estimatedMove")))
+    delivery = (_mw_date(d.get("deliveryStart")) or _mw_date(ex.get("dtdelivery")) or _mw_date(row.get("delivery"))
+                or _mw_date(d.get("estimatedDelivery")))
     ops_done = _mw_date(ex.get("dtopscomplete"))
     dates = {"uplift": uplift, "delivery": delivery, "ops_complete": ops_done}
     flags: list[str] = []
-    if status in DEAD_STATUSES:
+    if status in DEAD_STATUSES or str(d.get("isClosed") or "").upper() == "Y":
         return Stage.CLOSED, flags, dates
     if ops_done and ops_done <= today:
         return (Stage.CLOSED if (today - ops_done).days > CLOSED_AFTER_DAYS else Stage.DELIVERED), flags, dates
@@ -218,23 +235,33 @@ def build_shipment(row: dict, detail: dict | None, *, today: dt.date | None = No
     display = str(d.get("id") or list_id)
     billing = d.get("billing") if isinstance(d.get("billing"), dict) else {}
     mm = d.get("moveManager") if isinstance(d.get("moveManager"), dict) else {}
-    customer = _s(billing.get("name")) or _s(row.get("name"))
-    origin = _place(d.get("origin")) or _country(row.get("origin"))
-    destination = _place(d.get("destination")) or _country(row.get("destination"))
+    # The list row's `name` is the transferee; `billing.name` is who pays —
+    # for agent-booked jobs that is the agent (extras.debtortype == "Agent").
+    customer = _s(row.get("name")) or _s(billing.get("name"))
+    payer = _s(billing.get("name"))
+    agent = payer if str(ex.get("debtortype") or "").lower() == "agent" and payer else (
+        _s(d.get("branchName")) or payer or "TMS")
+    oloc, dloc = _loc(d, "origin"), _loc(d, "destination")
+    origin = _place(oloc) if oloc else (_place(d.get("origin")) or _country(row.get("origin")))
+    destination = _place(dloc) if dloc else (_place(d.get("destination")) or _country(row.get("destination")))
     hub = hub_for_destination(destination) if dirn == "import" else Hub.UNKNOWN
-    if dirn == "import" and hub is Hub.UNKNOWN and _country(row.get("destination")) == MX and not _place(d.get("destination")):
-        hub = Hub.UNKNOWN
     updated = _mw_date(row.get("lastUpdated")) or _mw_date(d.get("lastUpdated"))
     last_progress = max([x for x in (dates["ops_complete"], dates["delivery"] if dates["delivery"] and dates["delivery"] <= today else None,
                                     dates["uplift"] if dates["uplift"] and dates["uplift"] <= today else None, updated) if x], default=None)
     days = (today - last_progress).days if last_progress else None
     if stage not in (Stage.CLOSED, Stage.DELIVERED) and days is not None and days >= int(os.environ.get("CLICKUP_STALLED_DAYS", "7") or 7):
         flags.append("stalled")
-    method = _s(row.get("method") or d.get("method"))
+    method = _s(d.get("method") or row.get("method")).upper()
+    svc = _s(d.get("service"))
+    crew_note = ""
+    for n in d.get("notes") or []:
+        if isinstance(n, dict) and n.get("type") == "crewNote" and n.get("comment"):
+            crew_note = str(n["comment"]).strip()
+    sale = to_number(ex.get("revenue"))
     return Shipment(
         id=f"TMS:{list_id}", source=Source.TMS, source_ref=list_id,
         reference_number=display, customer_name=customer,
-        agent=_s(d.get("branchName")) or _s(row.get("jobType")) or "TMS",
+        agent=agent,
         origin=origin, destination=destination, destination_hub=hub,
         volume_m3=meas["volume_m3"], weight=meas["weight_kg"],
         stage=stage, source_status=_s(d.get("jobStatus")) or _s(row.get("status")),
@@ -246,11 +273,17 @@ def build_shipment(row: dict, detail: dict | None, *, today: dt.date | None = No
                     "delivered": dates["delivery"] if dates["delivery"] and dates["delivery"] <= today else None,
                     "closed": dates["ops_complete"]},
         last_progress_at=last_progress, days_since_progress=days,
-        extra={"direction": dirn, "method": method, "job_type": _s(row.get("jobType")),
+        extra={"direction": dirn, "method": method, "job_type": _s(row.get("jobType")), "service": svc,
+               "payer": payer, "branch": _s(d.get("branchName")), "branch_code": _s(d.get("branchCode")),
                "customer_type": _s(d.get("customerType")), "currency": _s(d.get("currency")),
                "coordinator_email": _s(mm.get("email")), "items": meas["items"],
                "origin_country": _country(row.get("origin")), "destination_country": _country(row.get("destination")),
-               "mw_env": env, "load_type": _s(ex.get("loadtype")), "sit_location": _s(ex.get("sitloc"))},
+               "origin_port": _s((oloc.get("port") or {}).get("name")) if oloc else "",
+               "destination_port": _s((dloc.get("port") or {}).get("name")) if dloc else "",
+               "destination_agent": _s((dloc.get("agent") or {}).get("name")) if dloc else "",
+               "sale_value": sale, "is_closed": str(d.get("isClosed") or ""), "note": crew_note[:400],
+               "mw_env": env, "load_type": _s(ex.get("loadtype")), "sit_location": _s(ex.get("sitloc")),
+               "delivery_type": _s(d.get("deliveryType"))},
     )
 
 
@@ -264,8 +297,8 @@ def fetch_tms_shipments(client: MovewareClient | None = None, *, days: int | Non
     (shipments, diag)."""
     today = today or dt.date.today()
     client = client or MovewareClient()
-    days = days or int(os.environ.get("TMS_DAYS", "120") or 120)
-    slice_days = slice_days or int(os.environ.get("TMS_SLICE_DAYS", "10") or 10)
+    days = days or int(os.environ.get("TMS_DAYS", "180") or 180)
+    slice_days = slice_days or int(os.environ.get("TMS_SLICE_DAYS", "7") or 7)
     workers = workers or int(os.environ.get("TMS_WORKERS", "3") or 3)
     max_details = max_details if max_details is not None else int(os.environ.get("TMS_MAX_DETAILS", "150") or 150)
     prog = progress if progress is not None else {}
@@ -282,7 +315,7 @@ def fetch_tms_shipments(client: MovewareClient | None = None, *, days: int | Non
         for page in range(1, max_pages_per_slice + 1):
             try:
                 rows = client.jobs(page=page, limit=page_limit,
-                                   updatedAfter=begin.isoformat(), updatedBefore=end.isoformat())
+                                   createdAfter=begin.isoformat(), createdBefore=end.isoformat())
             except MovewareError as exc:
                 diag["slices"].append({"from": begin.isoformat(), "to": end.isoformat(), "error": str(exc)})
                 rows = []
@@ -354,10 +387,10 @@ def probe(client: MovewareClient | None = None, sample: int = 3) -> dict:
     out: dict = {"env": client.env, "base_url": client.base_url, "have_creds": client.have_creds()}
     try:
         since = (dt.date.today() - dt.timedelta(days=14)).isoformat()
-        rows = client.jobs(page=1, limit=sample, updatedAfter=since)
+        rows = client.jobs(page=1, limit=sample, createdAfter=since)
         out["recent_rows"] = rows
         out["row_keys"] = sorted(rows[0].keys()) if rows else []
-        xb = [r for r in client.jobs(page=1, limit=50, updatedAfter=since) if direction(r)]
+        xb = [r for r in client.jobs(page=1, limit=50, createdAfter=since) if direction(r)]
         out["cross_border_in_last_14_days"] = len(xb)
         out["lanes"] = {}
         for r in xb:

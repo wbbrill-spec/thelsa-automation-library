@@ -97,12 +97,13 @@ def test_walk_slices_filters_and_details():
                 return []
             return [ROW, {**ROW, "id": "2", "origin": "US", "destination": "US"},
                     {**ROW, "id": "3", "origin": "MX", "destination": "US", "status": "L"},
-                    {**ROW, "id": "4", "origin": "MX", "destination": "CA"}]
+                    {**ROW, "id": "4", "origin": "MX", "destination": "CA"},
+                    {**ROW, "id": "5", "origin": "US", "destination": "MX", "status": "P"}]   # quote, not a shipment
         def job(self, jid):
             return DETAIL if jid == "110991" else {}
     ships, diag = tms.fetch_tms_shipments(Fake(), days=20, slice_days=10, today=TODAY)
-    assert diag["rows_seen"] == 4 and diag["cross_border"] == 2 and diag["by_direction"] == {"import": 1, "export": 1}
-    assert diag["by_lane"]["US→MX"] == 1 and diag["by_status"] == {"W": 3, "L": 1}
+    assert diag["rows_seen"] == 5 and diag["cross_border"] == 2 and diag["by_direction"] == {"import": 1, "export": 1}
+    assert diag["by_lane"]["US→MX"] == 2 and diag["by_status"] == {"W": 3, "L": 1, "P": 1}
     assert len(diag["slices"]) == 2 and diag["slices"][0]["from"] == "2026-08-29"
     assert sorted(s.source_ref for s in ships) == ["110991", "4"]
     ships.sort(key=lambda s: s.source_ref)

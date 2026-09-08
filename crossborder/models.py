@@ -218,6 +218,14 @@ class Shipment:
     updated_at: Optional[dt.datetime] = None
     url: str = ""                 # deep link back to the source record
     assignees: list[str] = field(default_factory=list)
+    # ── process-checklist progress (TIM: the numbered steps in the ClickUp list) ──
+    process_format: str = ""      # "DA" (13 steps) / "DTD" (17 steps) / ""
+    current_step: str = ""        # name of the first step not yet complete
+    steps_done: int = 0
+    steps_total: int = 0
+    milestones: dict = field(default_factory=dict)   # e.g. {"green_light": date, "crossed": date}
+    last_progress_at: Optional[dt.date] = None       # when the latest step was completed
+    days_since_progress: Optional[int] = None
 
     # ── derived ──
     @property
@@ -243,8 +251,9 @@ class Shipment:
         d["source"] = self.source.value
         d["stage"] = self.stage.value
         d["destination_hub"] = self.destination_hub.value
-        for k in ("ready_date", "clearance_date", "delivery_date", "updated_at"):
+        for k in ("ready_date", "clearance_date", "delivery_date", "updated_at", "last_progress_at"):
             d[k] = d[k].isoformat() if d[k] else None
+        d["milestones"] = {k: (v.isoformat() if v else None) for k, v in self.milestones.items()}
         d["lift_van_equivalents"] = self.lift_van_equivalents
         d["is_open"] = self.is_open
         return d

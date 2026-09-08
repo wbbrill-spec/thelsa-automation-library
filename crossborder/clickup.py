@@ -248,6 +248,52 @@ class ClickUpClient:
     def task(self, task_id: str) -> dict:
         return self.get(f"task/{task_id}", include_subtasks="true")
 
+    def list_detail(self, list_id: str) -> dict:
+        return self.get(f"list/{list_id}")
+
+    def inspect_list(self, list_id: str) -> dict:
+        """Everything about one list, for validating the real ClickUp structure:
+        list metadata, its custom-field definitions, and every task (open and
+        closed) with status, dates, assignees, and decoded custom-field values."""
+        detail = self.list_detail(list_id)
+        fields = self.list_fields(list_id)
+        tasks = self.list_tasks(list_id, include_closed=True)
+        names = {f.get("id"): f.get("name") for f in fields}
+        rows = []
+        for t in sorted(tasks, key=lambda x: (x.get("orderindex") or "0")):
+            rows.append({
+                "id": t.get("id"),
+                "name": t.get("name"),
+                "status": (t.get("status") or {}).get("status"),
+                "status_type": (t.get("status") or {}).get("type"),
+                "orderindex": t.get("orderindex"),
+                "parent": t.get("parent"),
+                "date_created": parse_date(t.get("date_created")),
+                "date_updated": parse_date(t.get("date_updated")),
+                "date_closed": parse_date(t.get("date_closed")),
+                "start_date": parse_date(t.get("start_date")),
+                "due_date": parse_date(t.get("due_date")),
+                "assignees": [a.get("username") or a.get("email") for a in t.get("assignees") or []],
+                "tags": [x.get("name") for x in t.get("tags") or []],
+                "custom_fields": {cf.get("name") or names.get(cf.get("id"), cf.get("id")): field_value(cf)
+                                  for cf in t.get("custom_fields") or []
+                                  if cf.get("value") not in (None, "")},
+                "description": (t.get("description") or "")[:500],
+            })
+        return {
+            "list": {k: detail.get(k) for k in ("id", "name", "content", "status",
+                                                 "due_date", "start_date", "archived")},
+            "folder": (detail.get("folder") or {}).get("name"),
+            "space": (detail.get("space") or {}).get("name"),
+            "statuses": [s.get("status") for s in detail.get("statuses") or []],
+            "custom_fields": [{"name": f.get("name"), "type": f.get("type"),
+                               "options": [o.get("name") for o in
+                                           (f.get("type_config") or {}).get("options") or []]}
+                              for f in fields],
+            "task_count": len(rows),
+            "tasks": rows,
+        }
+
 
 # ── Custom-field value decoding ─────────────────────────────────────────────────
 

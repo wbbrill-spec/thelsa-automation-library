@@ -73,6 +73,12 @@ def raw():
         return jsonify(out)
     try:
         client = clickup.ClickUpClient()
+        if request.args.get("list"):
+            # Inspect one or more lists in full: /crossborder/raw?list=<id>,<id>
+            ids = [x.strip() for x in request.args["list"].split(",") if x.strip()]
+            out["inspected"] = [client.inspect_list(i) for i in ids]
+            out["requests_made"] = client.requests_made
+            return jsonify(out)
         if not cfg["CLICKUP_LIST_ID"] or request.args.get("discover"):
             out["hierarchy"] = client.hierarchy()
             out["next_step"] = ("Pick the shipments list below and set CLICKUP_LIST_ID "

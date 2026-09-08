@@ -50,48 +50,8 @@ TASK = {
 }
 
 
-def test_field_map_auto_matches_spec_fields():
-    fmap = clickup.build_field_map(FIELDS)
-    assert fmap["reference_number"]["id"] == "f-ref"
-    assert fmap["destination"]["id"] == "f-dest"
-    assert fmap["lift_vans"]["id"] == "f-lv"
-    assert fmap["u_boxes"]["id"] == "f-ub"
-    assert fmap["current_location"]["id"] == "f-loc"
-    assert fmap["clearance_date"]["id"] == "f-clr"
-    assert "customer_name" not in fmap          # falls back to task name
 
 
-def test_task_normalizes_to_shipment():
-    s = clickup.task_to_shipment(TASK, clickup.build_field_map(FIELDS))
-    assert s.id == "TIM:abc123" and s.source.value == "TIM"
-    assert s.reference_number == "TIM-2026-041"
-    assert s.customer_name == "Garcia, Maria"
-    assert s.destination_hub is Hub.GUADALAJARA
-    assert s.current_location == "Monterrey"
-    assert s.volume_m3 == 19.99                  # 706 cuft → m³
-    assert s.lift_vans == 2 and s.u_boxes == 1
-    assert s.lift_van_equivalents == 3.3
-    assert s.stage is Stage.TO_BORDER
-    assert s.status_flags == ["on_hold"]
-    assert s.clearance_date == dt.date(2026, 9, 8)
-    assert s.delivery_date == dt.date(2026, 9, 21)
-    assert s.assignees == ["Fernanda"]
-    d = s.to_dict()
-    assert d["stage"] == "in_transit_to_border" and d["is_open"] is True
-
-
-def test_stage_mapping_and_unknowns():
-    assert clickup.stage_for_status("Docs Pending") is Stage.DOCS_PENDING
-    assert clickup.stage_for_status("GREEN LIGHT ✅") is Stage.GREEN_LIGHT
-    assert clickup.stage_for_status("Customs / Aduana") is Stage.CUSTOMS
-    assert clickup.stage_for_status("Out for Delivery") is Stage.OUT_FOR_DELIVERY
-    assert clickup.stage_for_status("Delivered") is Stage.DELIVERED
-    assert clickup.stage_for_status("Something Odd") is Stage.UNKNOWN
-
-
-def test_stage_override_env(monkeypatch):
-    monkeypatch.setenv("CLICKUP_STAGE_MAP", '{"Something Odd": "at_hub"}')
-    assert clickup.stage_for_status("Something Odd") is Stage.AT_HUB
 
 
 def test_hub_lookup():

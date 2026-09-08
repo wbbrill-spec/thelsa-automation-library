@@ -65,6 +65,7 @@ main { max-width: 1500px; margin: 0 auto; padding: 22px 24px 60px; }
 .card.f-on_hold, .card.f-payment_pending, .card.f-unresponsive { border-left-color: #c0392b; }
 .card.f-in_progress { border-left-color: #1e7e34; }
 .card .nm { font-size: 13px; font-weight: 700; line-height: 1.25; }
+.src { display: inline-block; font-size: 9px; font-weight: 800; letter-spacing: .5px; padding: 0 5px; border-radius: 4px; background: #1a1a2e; color: #fff; vertical-align: middle; margin-left: 4px; }
 .card .ag { font-size: 11px; color: #666; margin-top: 2px; }
 .card .dest { font-size: 11px; color: #444; margin-top: 4px; }
 .card .meta { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
@@ -142,6 +143,7 @@ td a { color: #1967d2; text-decoration: none; }
 </header>
 <main>
   <div class="toolbar">
+    <select id="f-source"><option value="">TIM + TMS</option><option value="TIM">TIM (ClickUp)</option><option value="TMS">TMS (Moveware)</option></select>
     <select id="f-agent"><option value="">All agents</option></select>
     <select id="f-flag"><option value="">All flags</option></select>
     <select id="f-hub"><option value="">All hubs</option></select>
@@ -218,6 +220,11 @@ async function load(force) {
   $("#asof").textContent = STATUS.refreshing ? "refreshing…" : (age == null ? "—" : `as of ${age < 60 ? age + " s" : Math.round(age/60) + " min"} ago`);
   const timN = ALL.filter(s => s.source === "TIM").length;
   $("#src-tim").textContent = `ClickUp · ${timN}`; $("#src-tim").className = "pill ok";
+  const t = DIAG.tms || {};
+  const tmsN = ALL.filter(s => s.source === "TMS").length;
+  if (t.error) { $("#src-tms").textContent = "Moveware · error"; $("#src-tms").className = "pill warn"; $("#src-tms").title = t.error; }
+  else if (t.count != null) { $("#src-tms").textContent = `Moveware · ${tmsN}${t.env && t.env !== "prod" ? " (" + t.env + ")" : ""}`; $("#src-tms").className = "pill ok"; $("#src-tms").title = `${t.rows_seen} jobs updated in window · ${t.cross_border} cross-border · ${t.requests_made} calls`; }
+  else { $("#src-tms").textContent = "Moveware · pending"; $("#src-tms").className = "pill"; }
   const rem = DIAG.remisiones || {};
   if (rem.error) { $("#src-rem").textContent = "Remisiones · no access"; $("#src-rem").className = "pill warn"; $("#src-rem").title = rem.error; }
   else if (rem.matched != null) { $("#src-rem").textContent = `Remisiones · ${rem.matched} matched (${rem.week || "latest"})`; $("#src-rem").className = "pill ok"; }
@@ -239,9 +246,9 @@ function buildFilters() {
 }
 
 function filtered() {
-  const a = $("#f-agent").value, f = $("#f-flag").value, h = $("#f-hub").value, st = $("#f-stage").value, q = $("#f-q").value.trim().toLowerCase();
+  const a = $("#f-agent").value, f = $("#f-flag").value, h = $("#f-hub").value, st = $("#f-stage").value, src = $("#f-source").value, q = $("#f-q").value.trim().toLowerCase();
   return ALL.filter(s =>
-    (!a || (s.agent || "?") === a) && (!f || s.status_flags.includes(f)) && (!h || s.destination_hub === h) &&
+    (!src || s.source === src) && (!a || (s.agent || "?") === a) && (!f || s.status_flags.includes(f)) && (!h || s.destination_hub === h) &&
     (!st || s.stage === st) &&
     (!kpiSel || kpiSel(s)) &&
     (!q || [s.customer_name, s.reference_number, s.destination, s.agent, s.current_step].join(" ").toLowerCase().includes(q)));
@@ -286,7 +293,7 @@ function cardHtml(s) {
   const vol = s.lift_vans ? `${s.lift_vans} LV` : s.u_boxes ? `${s.u_boxes} U-Box` : s.volume_m3 ? `${s.volume_m3} m³` : "";
   const pct = s.steps_total ? Math.round(100 * s.steps_done / s.steps_total) : 0;
   return `<div class="card f-${prim}" data-id="${esc(s.id)}">
-    <div class="nm">${esc(s.customer_name)}</div>
+    <div class="nm">${esc(s.customer_name)}${s.source === "TMS" ? ' <span class="src">TMS</span>' : ""}</div>
     <div class="ag">${esc(s.agent || "?")}${s.reference_number ? " · " + esc(s.reference_number) : ""}</div>
     ${s.destination ? `<div class="dest">→ ${esc(s.destination)}${s.destination_hub && s.destination_hub !== "Unknown" ? ` <span style="color:#999">(${esc(s.destination_hub)})</span>` : ""}</div>` : ""}
     <div class="meta">${vol ? `<span class="tag vol">${esc(vol)}</span>` : ""}${flags.map(f => `<span class="tag ${f}">${esc(FLAG_LABEL[f] || f)}</span>`).join("")}</div>
@@ -342,7 +349,7 @@ function renderHubs(rows) {
   $("#hubs").innerHTML = html + (unk ? `<div class="note">${unk} open shipment${unk > 1 ? "s" : ""} without a destination hub.${rem.error ? " Destinations and volumes come from the Remisiones workbook — waiting on Files.Read.All access for the Graph app." : " Extend the destination → hub table for the unmapped cities."}</div>` : "");
 }
 
-const COLS = [["customer_name","Customer"],["agent","Agent"],["reference_number","Reference"],["stage","Stage"],["current_step","Current step"],["days_since_progress","Days idle"],["destination","Destination"],["destination_hub","Hub"],["lift_van_equivalents","LV eq."],["status_flags","Flags"],["assignees","Assigned"],["milestones.green_light","Green light"],["milestones.crossed","Crossed"],["milestones.delivered","Delivered"]];
+const COLS = [["customer_name","Customer"],["source","Src"],["agent","Agent"],["reference_number","Reference"],["stage","Stage"],["current_step","Current step"],["days_since_progress","Days idle"],["destination","Destination"],["destination_hub","Hub"],["lift_van_equivalents","LV eq."],["status_flags","Flags"],["assignees","Assigned"],["milestones.green_light","Green light"],["milestones.crossed","Crossed"],["milestones.delivered","Delivered"]];
 const get = (s, k) => k.includes(".") ? k.split(".").reduce((o, p) => o && o[p], s) : s[k];
 function renderTable(rows) {
   rows = [...rows].sort((a, b) => { let x = get(a, sortKey), y = get(b, sortKey); if (Array.isArray(x)) x = x.join(","); if (Array.isArray(y)) y = y.join(",");
@@ -355,7 +362,7 @@ function renderTable(rows) {
     else if (c[0] === "assignees") v = esc((v || []).join(", "));
     else if (c[0].startsWith("milestones")) v = fmtD(v);
     else if (c[0] === "lift_van_equivalents") v = v ? fmtN(v) : "—";
-    else if (c[0] === "customer_name") v = `<a href="${esc(s.url)}" target="_blank" onclick="event.stopPropagation()">${esc(v)}</a>`;
+    else if (c[0] === "customer_name") v = s.url ? `<a href="${esc(s.url)}" target="_blank" onclick="event.stopPropagation()">${esc(v)}</a>` : esc(v);
     else v = esc(v ?? "—");
     return `<td>${v}</td>`; }).join("") + "</tr>").join("");
   $("#cnt-table").textContent = rows.length;
@@ -365,20 +372,21 @@ function renderTable(rows) {
 
 function openDrawer(id) {
   const s = ALL.find(x => x.id === id); if (!s) return;
-  const ms = ["booked","docs_complete","green_light","at_border_warehouse","docs_to_broker","crossed","at_hub","delivery_scheduled","delivered","closed"];
+  const ms = s.source === "TMS" ? ["booked","uplift","delivered","closed"] : ["booked","docs_complete","green_light","at_border_warehouse","docs_to_broker","crossed","at_hub","delivery_scheduled","delivered","closed"];
   const ex = s.extra || {};
   $("#dbody").innerHTML = `<h2>${esc(s.customer_name)}</h2>
-    <div class="sub">${esc(s.agent || "?")}${s.reference_number ? " · " + esc(s.reference_number) : ""} · <a href="${esc(s.url)}" target="_blank" style="color:#1967d2">open in ClickUp ↗</a></div>
+    <div class="sub">${s.source === "TMS" ? '<span class="src">TMS</span> ' : ""}${esc(s.agent || "?")}${s.reference_number ? " · " + esc(s.reference_number) : ""}${s.url ? ` · <a href="${esc(s.url)}" target="_blank" style="color:#1967d2">open in ClickUp ↗</a>` : " · Moveware job"}</div>
     <div class="meta" style="margin-bottom:14px">${s.status_flags.map(f => `<span class="tag ${f}">${esc(FLAG_LABEL[f] || f)}</span>`).join(" ")}</div>
     <div class="kv">
       <b>Stage</b><span>${esc(STAGE_LABEL[s.stage] || s.stage)}</span>
-      <b>Current step</b><span>${esc(s.current_step || "—")} (${s.steps_done}/${s.steps_total}, ${s.process_format || "?"})</span>
+      <b>Current step</b><span>${s.steps_total ? `${esc(s.current_step || "—")} (${s.steps_done}/${s.steps_total}, ${s.process_format || "?"})` : esc(s.source_status || "—") + (ex.direction ? ` · ${esc(ex.direction)}` : "") + (ex.method ? ` · ${esc(ex.method)}` : "")}</span>
       <b>Last progress</b><span>${s.last_progress_at ? esc(s.last_progress_at) + ` · ${s.days_since_progress} days ago` : "—"}</span>
       <b>Assigned</b><span>${esc((s.assignees || []).join(", ") || "—")}</span>
       <b>Origin → Dest.</b><span>${esc(s.origin || "?")} → ${esc(s.destination || "?")}${s.destination_hub !== "Unknown" ? ` (${esc(s.destination_hub)} hub)` : ""}</span>
       <b>Volume</b><span>${s.lift_vans ? s.lift_vans + " lift van(s) · " : ""}${s.u_boxes ? s.u_boxes + " U-Box(es) · " : ""}${s.volume_m3 ? s.volume_m3 + " m³ · " : ""}${esc(ex.volume_text || "")}${!(s.lift_vans || s.u_boxes || s.volume_m3 || ex.volume_text) ? "—" : ""}</span>
       <b>Sale value</b><span>${money(ex.sale_value)}</span>
-      <b>Remisiones</b><span>${ex.remisiones_block ? esc(ex.remisiones_block) + (ex.remisiones_week ? " · " + esc(ex.remisiones_week) : "") + (ex.remisiones_status ? "<br>" + esc(ex.remisiones_status) : "") : "not on the sheet"}</span>
+      ${s.weight ? `<b>Weight</b><span>${s.weight} kg</span>` : ""}
+      ${s.source === "TMS" ? "" : `<b>Remisiones</b><span>${ex.remisiones_block ? esc(ex.remisiones_block) + (ex.remisiones_week ? " · " + esc(ex.remisiones_week) : "") + (ex.remisiones_status ? "<br>" + esc(ex.remisiones_status) : "") : "not on the sheet"}</span>`}
     </div>
     <div class="section" style="margin-top:0">Milestones</div>
     <div class="ms">${ms.map(m => `<div class="${s.milestones && s.milestones[m] ? "done" : "todo"}"><span>${m.replace(/_/g, " ")}</span><span>${s.milestones && s.milestones[m] ? esc(s.milestones[m]) : "—"}</span></div>`).join("")}</div>`;
@@ -386,10 +394,10 @@ function openDrawer(id) {
 }
 function closeDrawer() { $("#drawer").classList.remove("open"); $("#overlay").classList.remove("open"); }
 
-["#f-agent","#f-flag","#f-hub","#f-stage"].forEach(id => $(id).onchange = render);
+["#f-source","#f-agent","#f-flag","#f-hub","#f-stage"].forEach(id => $(id).onchange = render);
 $("#f-q").oninput = render;
 $("#f-closed").onchange = () => load(false);
-$("#clear").onclick = () => { ["#f-agent","#f-flag","#f-hub","#f-stage"].forEach(id => $(id).value = ""); $("#f-q").value = ""; kpiSel = null; render(); };
+$("#clear").onclick = () => { ["#f-source","#f-agent","#f-flag","#f-hub","#f-stage"].forEach(id => $(id).value = ""); $("#f-q").value = ""; kpiSel = null; render(); };
 $("#view-board").onclick = () => { view = "board"; render(); };
 $("#view-table").onclick = () => { view = "table"; render(); };
 $("#refresh").onclick = () => load(true);

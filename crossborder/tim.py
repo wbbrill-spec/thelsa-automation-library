@@ -28,6 +28,7 @@ import datetime as dt
 import logging
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 from .clickup import ClickUpClient, ClickUpError
@@ -211,7 +212,8 @@ def _find_space(spaces: list[dict], wanted: str, prefix: bool = False) -> Option
 
 def fetch_tim_shipments(client: Optional[ClickUpClient] = None,
                         include_completed: bool = False,
-                        team_id: Optional[str] = None) -> tuple[list[Shipment], dict]:
+                        team_id: Optional[str] = None,
+                        progress: Optional[dict] = None) -> tuple[list[Shipment], dict]:
     """Walk the workspace and return every TIM shipment as a Shipment.
     ~1 + folders + lists requests; cache the result (see web.py)."""
     client = client or ClickUpClient()
@@ -235,7 +237,9 @@ def fetch_tim_shipments(client: Optional[ClickUpClient] = None,
                   "folders": [], "skipped_lists": [], "unmapped_steps": {}, "errors": []}
     shipments: list[Shipment] = []
 
-    def walk(space: dict, is_completed: bool):
+    # 1) Enumerate every shipment list (cheap: one call per space + per folder).
+    jobs: list[tuple[dict, Optional[str], dict, bool]] = []   # (list, folder, space, completed)
+    for space, is_completed in [(active, False)] + ([(completed, True)] if completed else []):
         folders = client.folders(space["id"])
         groups = [(f.get("name"), f.get("lists") or client.lists_in_folder(f["id"])) for f in folders]
         groups.append((None, client.folderless_lists(space["id"])))
@@ -246,23 +250,37 @@ def fetch_tim_shipments(client: Optional[ClickUpClient] = None,
                 if norm_text(name) in PLACEHOLDER_LIST_NAMES or name.startswith("***"):
                     diag["skipped_lists"].append(name)
                     continue
-                try:
-                    tasks = client.list_tasks(lst["id"], include_closed=True)
-                    s = build_shipment(lst, tasks, folder=folder_name, space=space.get("name", ""),
-                                       team_id=team_id, completed=is_completed)
-                except ClickUpError as exc:
-                    diag["errors"].append({"list": name, "error": str(exc)})
-                    continue
-                if s.stage is Stage.UNKNOWN and s.current_step:
-                    diag["unmapped_steps"][s.current_step] = diag["unmapped_steps"].get(s.current_step, 0) + 1
-                shipments.append(s)
+                jobs.append((lst, folder_name, space, is_completed))
                 count += 1
             if folder_name is not None or count:
                 diag["folders"].append({"space": space.get("name"), "folder": folder_name, "shipments": count})
 
-    walk(active, False)
-    if completed:
-        walk(completed, True)
+    # 2) Pull each list's tasks in parallel (the shared rate limiter keeps us
+    #    under ClickUp's 100 req/min); ~70 lists ≈ 10–15 s instead of a minute.
+    def fetch(job):
+        lst, folder_name, space, is_completed = job
+        try:
+            tasks = client.list_tasks(lst["id"], include_closed=True)
+            return build_shipment(lst, tasks, folder=folder_name, space=space.get("name", ""),
+                                  team_id=team_id, completed=is_completed), None
+        except Exception as exc:  # noqa: BLE001 — one bad list must not sink the fleet
+            return None, {"list": lst.get("name"), "error": f"{type(exc).__name__}: {exc}"}
+
+    workers = max(1, min(int(os.environ.get("CLICKUP_WORKERS", "4") or 4), 8))
+    if progress is not None:
+        progress["total"] = len(jobs)
+        progress["done"] = 0
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for s, err in pool.map(fetch, jobs):
+            if progress is not None:
+                progress["done"] += 1
+            if err:
+                diag["errors"].append(err)
+                continue
+            if s.stage is Stage.UNKNOWN and s.current_step:
+                diag["unmapped_steps"][s.current_step] = diag["unmapped_steps"].get(s.current_step, 0) + 1
+            shipments.append(s)
+    shipments.sort(key=lambda s: (s.agent, s.customer_name))
     diag["requests_made"] = client.requests_made
     diag["count"] = len(shipments)
     return shipments, diag

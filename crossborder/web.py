@@ -31,9 +31,48 @@ log = logging.getLogger(__name__)
 
 crossborder_bp = Blueprint("crossborder", __name__)
 
-_CACHE: dict = {"at": 0.0, "shipments": None, "diag": None}
-_CACHE_TTL = 300
+_CACHE: dict = {"at": 0.0, "shipments": None, "diag": None, "completed": False,
+                "refreshing": False, "progress": {}, "error": None, "started_at": 0.0}
+_CACHE_TTL = int(os.environ.get("CROSSBORDER_CACHE_TTL", "300") or 300)
 _LOCK = threading.Lock()
+
+
+def _refresh_worker(include_completed: bool, prog: dict):
+    try:
+        shipments, diag = tim.fetch_tim_shipments(include_completed=include_completed, progress=prog)
+        with _LOCK:
+            _CACHE.update(at=time.time(), shipments=shipments, diag=diag,
+                          completed=include_completed, error=None)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("crossborder refresh failed")
+        with _LOCK:
+            _CACHE["error"] = f"{type(exc).__name__}: {exc}"
+    finally:
+        with _LOCK:
+            _CACHE["refreshing"] = False
+
+
+def ensure_fresh(force: bool = False, include_completed: bool = False) -> dict:
+    """Kick off a background refresh when the cache is stale (or forced) and
+    return a status snapshot immediately — the ~80-request ClickUp walk must
+    never run inside a web request."""
+    with _LOCK:
+        age = time.time() - _CACHE["at"]
+        stale = _CACHE["shipments"] is None or age > _CACHE_TTL
+        needs_completed = include_completed and not _CACHE["completed"]
+        if (stale or force or needs_completed) and not _CACHE["refreshing"]:
+            _CACHE.update(refreshing=True, started_at=time.time(), progress={})
+            t = threading.Thread(target=_refresh_worker,
+                                 args=(include_completed or _CACHE["completed"], _CACHE["progress"]),
+                                 daemon=True, name="crossborder-refresh")
+            t.start()
+        return {
+            "refreshing": _CACHE["refreshing"],
+            "cached_at": _CACHE["at"] or None,
+            "cache_age_s": int(age) if _CACHE["at"] else None,
+            "error": _CACHE["error"],
+            "progress": dict(_CACHE["progress"]),
+        }
 
 
 def _login_required(f):
@@ -56,14 +95,10 @@ def _config_status() -> dict:
 
 
 def load_shipments(force: bool = False, include_completed: bool = False):
-    """Cached pull of every TIM shipment (Moveware/TMS joins in a later step)."""
+    """Cached shipments (may be empty while the first refresh runs)."""
+    status = ensure_fresh(force=force, include_completed=include_completed)
     with _LOCK:
-        fresh = _CACHE["shipments"] is not None and time.time() - _CACHE["at"] < _CACHE_TTL
-        if fresh and not force:
-            return _CACHE["shipments"], _CACHE["diag"]
-        shipments, diag = tim.fetch_tim_shipments(include_completed=include_completed)
-        _CACHE.update(at=time.time(), shipments=shipments, diag=diag)
-        return shipments, diag
+        return list(_CACHE["shipments"] or []), dict(_CACHE["diag"] or {}), status
 
 
 @crossborder_bp.route("/crossborder/raw")
@@ -75,22 +110,25 @@ def raw():
         out["next_step"] = "Set CLICKUP_TOKEN in Render (personal API token, pk_…)."
         return jsonify(out)
     try:
-        client = clickup.ClickUpClient()
-        if request.args.get("list"):
-            ids = [x.strip() for x in request.args["list"].split(",") if x.strip()]
-            out["inspected"] = [client.inspect_list(i) for i in ids]
+        if request.args.get("list") or request.args.get("discover"):
+            client = clickup.ClickUpClient()
+            if request.args.get("list"):
+                ids = [x.strip() for x in request.args["list"].split(",") if x.strip()]
+                out["inspected"] = [client.inspect_list(i) for i in ids]
+            else:
+                out["hierarchy"] = client.hierarchy()
             out["requests_made"] = client.requests_made
             return jsonify(out)
-        if request.args.get("discover"):
-            out["hierarchy"] = client.hierarchy()
-            out["requests_made"] = client.requests_made
-            return jsonify(out)
-        shipments, diag = tim.fetch_tim_shipments(
-            client, include_completed=bool(request.args.get("completed")))
+        shipments, diag, status = load_shipments(force=bool(request.args.get("refresh")),
+                                                 include_completed=bool(request.args.get("completed")))
+        out["status"] = status
+        if status["refreshing"] and not shipments:
+            out["next_step"] = "First pull is running in the background — reload this page in ~15 s."
         out["diagnostics"] = diag
         out["count"] = len(shipments)
         out["by_stage"] = _count_by(shipments, lambda s: s.stage.value)
         out["by_agent"] = _count_by(shipments, lambda s: s.agent or "?")
+        out["by_flag"] = _count_by([f for s in shipments for f in s.status_flags], lambda f: f)
         out["shipments"] = [s.to_dict() for s in shipments]
     except clickup.ClickUpError as exc:
         out["error"] = str(exc)
@@ -112,13 +150,12 @@ def _count_by(items, key) -> dict:
 @_login_required
 def api_shipments():
     try:
-        shipments, diag = load_shipments(force=bool(request.args.get("refresh")),
-                                         include_completed=bool(request.args.get("completed")))
+        shipments, diag, status = load_shipments(force=bool(request.args.get("refresh")),
+                                                 include_completed=bool(request.args.get("completed")))
     except Exception as exc:
         return jsonify({"error": f"{type(exc).__name__}: {exc}", "shipments": []}), 200
-    return jsonify({"count": len(shipments),
-                    "shipments": [s.to_dict() for s in shipments],
-                    "cached_at": _CACHE["at"]})
+    return jsonify({"count": len(shipments), "status": status,
+                    "shipments": [s.to_dict() for s in shipments]})
 
 
 @crossborder_bp.route("/crossborder")

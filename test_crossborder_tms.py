@@ -6,20 +6,30 @@ from crossborder.models import Hub, Stage
 
 TODAY = dt.date(2026, 9, 8)
 
-ROW = {"id": "110991", "name": "EMBAJADA DE ESTADOS UNIDOS", "status": "W", "jobType": "Import", "method": "Road",
+ROW = {"id": "110991", "name": "Eduardo Puentes / Marcelina Cid", "status": "W", "jobType": "IMA", "method": "Road",
        "origin": "US", "destination": "MX", "created": "2026-08-20T00:00:00+10:00", "lastUpdated": "2026-09-05T03:00:00+10:00",
        "jobDate": "", "salesRep": "GG", "moveManager": "Fernanda", "uplift": "2026-09-01", "delivery": "2026-09-20"}
 DETAIL = {"id": "110991", "branchCode": "MTY", "branchName": "Thelsa Monterrey", "jobStatus": {"code": "W", "text": "Booked"},
           "currency": "USD", "billing": {"name": "EMBAJADA DE ESTADOS UNIDOS DE NORTEAMERICA"},
           "moveManager": {"code": "FER", "name": "Fernanda Lopez", "email": "fernanda@thelsa.com"},
-          "upliftStart": {"dateTime": "2026-09-01T00:00:00+10:00"}, "customerType": "Corporate", "method": "Road",
-          "destination": {"city": "Guadalajara", "state": "JAL", "country": "MX"},
-          "origin": {"city": "McAllen", "state": "TX", "country": "US"},
-          "measurements": [{"type": "items", "uom": "", "value": "42"}, {"type": "volumeNett", "uom": "m", "value": "18.5"},
-                           {"type": "volumeGross", "uom": "m", "value": "23.1"}, {"type": "actualWeight", "uom": "kg", "value": "1600"},
-                           {"type": "actualWeight", "uom": "lb", "value": "3527"}],
+          "upliftStart": {"dateTime": "2026-09-01T00:00:00+10:00"}, "deliveryStart": {"dateTime": ""},
+          "customerType": {"code": "", "text": "Corporate"}, "method": {"code": "ROAD", "text": "ROAD"},
+          "service": {"code": "LCL", "text": "LCL"}, "isClosed": "N",
+          "locations": {"destination": {"address": {"suburb": "Guadalajara", "state": "Jalisco", "countryISO2": "MX",
+                                                    "formattedAddress": "Guadalajara Jalisco Mexico"},
+                                        "port": {"code": "MXVER", "name": "Veracruz"},
+                                        "agent": {"name": "Thelsa Mobility Solutions"}},
+                        "origin": {"address": {"suburb": "McAllen", "state": "TX", "countryISO2": "US"},
+                                   "port": {"code": "", "name": ""}}},
+          "measurements": [{"type": "items", "value": "42"}, {"type": "volumeNett", "uom": "m", "value": "18.5"},
+                           {"type": "volumeNett", "uom": "ft", "value": "653"},
+                           {"type": "volumeGross", "uom": "m", "value": "23.1"}, {"type": "weightNett", "uom": "lb", "value": "3527"},
+                           {"type": "weightNett", "uom": "kg", "value": "1600"}, {"type": "actualWeight", "uom": "kg", "value": "5333"},
+                           {"type": "actualWeight", "uom": "lb", "value": "5333"}],
+          "notes": [{"comment": "Pendiente dirección de entrega.", "type": "crewNote"}, {"type": "internalNote"}],
           "extras": [{"field": "dtpacking", "value": "2026-09-01"}, {"field": "dtdelivery", "value": "2026-09-20"},
-                     {"field": "dtopscomplete", "value": ""}, {"field": "loadtype", "value": "LCL"}]}
+                     {"field": "dtopscomplete", "value": ""}, {"field": "loadtype", "value": "Loose"},
+                     {"field": "debtortype", "value": "Agent"}, {"field": "revenue", "value": "7504.68"}]}
 
 
 def test_direction_and_country():
@@ -33,13 +43,15 @@ def test_direction_and_country():
 def test_build_shipment_in_transit():
     s = tms.build_shipment(ROW, DETAIL, today=TODAY)
     assert s.id == "TMS:110991" and s.source.value == "TMS" and s.reference_number == "110991"
-    assert s.customer_name.startswith("EMBAJADA") and s.agent == "Thelsa Monterrey"
-    assert s.destination == "Guadalajara, JAL, MX" and s.destination_hub is Hub.GUADALAJARA
-    assert s.origin == "McAllen, TX, US"
-    assert s.volume_m3 == 18.5 and s.weight == 1600.0
+    assert s.customer_name == "Eduardo Puentes / Marcelina Cid" and s.agent.startswith("EMBAJADA")   # payer is the agent
+    assert s.destination == "Guadalajara, Jalisco" and s.destination_hub is Hub.GUADALAJARA
+    assert s.origin == "McAllen, TX"
+    assert s.volume_m3 == 18.5 and s.weight == 1600.0        # weightNett kg beats derived actualWeight
+    assert s.extra["sale_value"] == 7504.68 and s.extra["service"] == "LCL" and s.extra["note"].startswith("Pendiente")
+    assert s.extra["destination_port"] == "Veracruz" and s.extra["payer"].startswith("EMBAJADA")
     assert s.stage is Stage.TO_BORDER and s.ready_date == dt.date(2026, 9, 1) and s.delivery_date == dt.date(2026, 9, 20)
     assert s.assignees == ["Fernanda Lopez"] and s.extra["coordinator_email"] == "fernanda@thelsa.com"
-    assert s.extra["direction"] == "import" and s.extra["items"] == 42 and s.extra["load_type"] == "LCL"
+    assert s.extra["direction"] == "import" and s.extra["items"] == 42 and s.extra["load_type"] == "Loose"
     assert "stalled" not in s.status_flags          # updated 3 days ago
     d = s.to_dict()
     assert d["milestones"]["uplift"] == "2026-09-01" and d["is_open"]
@@ -56,14 +68,22 @@ def test_stage_rules():
     assert closed.stage is Stage.CLOSED and not closed.is_open
     lost = tms.build_shipment({**ROW, "status": "L"}, None, today=TODAY)
     assert lost.stage is Stage.CLOSED
+    flagged_closed = tms.build_shipment(ROW, {**DETAIL, "isClosed": "Y"}, today=TODAY)
+    assert flagged_closed.stage is Stage.CLOSED
+    delivered2 = tms.build_shipment(ROW, {**DETAIL, "deliveryStart": {"dateTime": "2026-09-06T00:00+10:00"}, "extras": []}, today=TODAY)
+    assert delivered2.stage is Stage.DELIVERED
     bare = tms.build_shipment({**ROW, "uplift": "", "delivery": ""}, None, today=TODAY)
-    assert bare.stage is Stage.BOOKED and bare.customer_name == "EMBAJADA DE ESTADOS UNIDOS" and bare.destination == "MX"
+    assert bare.stage is Stage.BOOKED and bare.customer_name == "Eduardo Puentes / Marcelina Cid" and bare.destination == "MX"
+    assert bare.agent == "TMS"
 
 
 def test_measurements_prefer_nett_and_convert_units():
     m = tms._measurements({"measurements": [{"type": "volumeGross", "uom": "ft", "value": "706"},
                                             {"type": "weightNett", "uom": "lb", "value": "2204"}]})
     assert m["volume_m3"] == 19.99 and m["weight_kg"] == 999.7
+    m2 = tms._measurements({"measurements": [{"type": "actualWeight", "uom": "kg", "value": "5333"},
+                                             {"type": "weightGross", "uom": "kg", "value": "3400"}]})
+    assert m2["weight_kg"] == 5333.0
     assert tms._measurements({})["volume_m3"] is None
 
 

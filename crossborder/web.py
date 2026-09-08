@@ -59,19 +59,10 @@ def _refresh_worker(include_completed: bool, prog: dict):
             diag["remisiones"] = {"error": f"{type(exc).__name__}: {exc}"}
         # TMS shipments from Moveware (read-only, narrow walk). A Moveware
         # failure never drops the TIM fleet either.
-        if os.environ.get("TMS_ENABLED", "0") in ("1", "true", "yes"):
-            try:
-                if not tms.MovewareClient.have_creds():
-                    diag["tms"] = {"error": "MW_USERNAME / MW_PASSWORD / MW_COMPANY_ID not set"}
-                else:
-                    tprog = {}
-                    prog["tms"] = tprog
-                    tms_ships, tdiag = tms.fetch_tms_shipments(progress=tprog)
-                    shipments = shipments + tms_ships
-                    diag["tms"] = tdiag
-            except Exception as exc:  # noqa: BLE001
-                log.exception("tms fetch failed")
-                diag["tms"] = {"error": f"{type(exc).__name__}: {exc}"}
+        if os.environ.get("TMS_ENABLED", "1") in ("1", "true", "yes"):
+            tms_ships, tdiag = _tms_cached(prog)
+            shipments = shipments + tms_ships
+            diag["tms"] = tdiag
         with _LOCK:
             _CACHE.update(at=time.time(), shipments=shipments, diag=diag,
                           completed=include_completed, error=None)
@@ -82,6 +73,36 @@ def _refresh_worker(include_completed: bool, prog: dict):
     finally:
         with _LOCK:
             _CACHE["refreshing"] = False
+
+
+# Moveware is polled on its own, slower clock (performance guardrail: a few
+# scheduled pulls a day, never every page load). The ClickUp refresh reuses the
+# last TMS result until it is older than TMS_CACHE_TTL (default 1 h).
+_TMS_CACHE: dict = {"at": 0.0, "shipments": [], "diag": {}}
+_TMS_TTL = int(os.environ.get("TMS_CACHE_TTL", "3600") or 3600)
+
+
+def _tms_cached(prog: dict):
+    with _LOCK:
+        fresh = _TMS_CACHE["at"] and (time.time() - _TMS_CACHE["at"]) < _TMS_TTL
+        if fresh:
+            d = dict(_TMS_CACHE["diag"]); d["cache_age_s"] = int(time.time() - _TMS_CACHE["at"])
+            return list(_TMS_CACHE["shipments"]), d
+    try:
+        if not tms.MovewareClient.have_creds():
+            return [], {"error": "MW_USERNAME / MW_PASSWORD / MW_COMPANY_ID not set"}
+        tprog: dict = {}
+        prog["tms"] = tprog
+        ships, tdiag = tms.fetch_tms_shipments(progress=tprog)
+        tdiag = {k: v for k, v in tdiag.items() if k != "slices"} | {"slices": len(tdiag.get("slices", []))}
+        with _LOCK:
+            _TMS_CACHE.update(at=time.time(), shipments=ships, diag=tdiag)
+        return ships, tdiag
+    except Exception as exc:  # noqa: BLE001 — never lose the ClickUp fleet over Moveware
+        log.exception("tms fetch failed")
+        with _LOCK:
+            stale = list(_TMS_CACHE["shipments"])
+        return stale, {"error": f"{type(exc).__name__}: {exc}", "stale_count": len(stale)}
 
 
 def ensure_fresh(force: bool = False, include_completed: bool = False) -> dict:

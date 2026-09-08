@@ -39,8 +39,10 @@ BASE_URLS = {
 MX = "MX"
 # Country codes on the US side of the border that count as "cross-border with Mexico".
 US_SIDE = set((os.environ.get("TMS_US_SIDE", "US,CA") or "US").replace(" ", "").split(","))
-# Job statuses that mean the file is a live move (single-letter Moveware codes).
-ACTIVE_STATUSES = set((os.environ.get("TMS_ACTIVE_STATUSES", "W,P,N,I") or "W").replace(" ", "").upper().split(","))
+# Job statuses (GET /codes?type=Status, measured 2026-09-08): I = Inspection
+# (survey), P = Pending (quote), W = Won (booked), L = Lost, C = Cancelled.
+# Only Won jobs are shipments; P/I are sales pipeline, not freight.
+ACTIVE_STATUSES = set((os.environ.get("TMS_ACTIVE_STATUSES", "W") or "W").replace(" ", "").upper().split(","))
 DEAD_STATUSES = {"L", "C", "X", "D", "Z"}          # lost / cancelled
 CLOSED_AFTER_DAYS = int(os.environ.get("TMS_CLOSED_AFTER_DAYS", "14") or 14)
 
@@ -297,7 +299,7 @@ def fetch_tms_shipments(client: MovewareClient | None = None, *, days: int | Non
     (shipments, diag)."""
     today = today or dt.date.today()
     client = client or MovewareClient()
-    days = days or int(os.environ.get("TMS_DAYS", "180") or 180)
+    days = days or int(os.environ.get("TMS_DAYS", "150") or 150)
     slice_days = slice_days or int(os.environ.get("TMS_SLICE_DAYS", "7") or 7)
     workers = workers or int(os.environ.get("TMS_WORKERS", "3") or 3)
     max_details = max_details if max_details is not None else int(os.environ.get("TMS_MAX_DETAILS", "150") or 150)
@@ -339,7 +341,7 @@ def fetch_tms_shipments(client: MovewareClient | None = None, *, days: int | Non
         lane = f"{_country(r.get('origin')) or '?'}→{_country(r.get('destination')) or '?'}"
         diag["by_lane"][lane] = diag["by_lane"].get(lane, 0) + 1
         dn = direction(r)
-        if dn and st not in DEAD_STATUSES:
+        if dn and st in ACTIVE_STATUSES:
             xb.append(r)
             diag["by_direction"][dn] = diag["by_direction"].get(dn, 0) + 1
     diag["cross_border"] = len(xb)

@@ -183,9 +183,8 @@ def _place(v) -> str:
     if isinstance(v, dict):
         a = v.get("address") if isinstance(v.get("address"), dict) else v
         parts = [a.get(k) for k in ("city", "suburb", "town", "state") if a.get(k)]
-        if not parts and a.get("formattedAddress"):
-            return str(a["formattedAddress"]).replace("\n", ", ").strip()
         if not parts:
+            # No city/state: never surface a street address — country is enough.
             parts = [a.get("country") or a.get("countryISO2")]
         return ", ".join(str(p).strip() for p in parts if p) or _s(v)
     return _s(v)

@@ -69,6 +69,7 @@ class RemisionRow:
     lift_vans: Optional[int] = None
     u_boxes: Optional[int] = None
     volume_m3: Optional[float] = None
+    vehicles: Optional[int] = None
     flags: list[str] = field(default_factory=list)
     row_index: int = 0
 
@@ -109,42 +110,63 @@ def parse_sale(v) -> Optional[float]:
         return None
 
 
-_VOL_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*(m3|m³|cbm|cuft|cft|cu\.?\s*ft|ft3|uboxes?|u-?box(?:es)?|vans?|lift\s*vans?)?",
-                     re.IGNORECASE)
+_VOL_RE = re.compile(
+    r"(\d+\s*/\s*\d+|\d+(?:[.,]\d+)?)\s*"
+    r"(m3|m\u00b3|cbm|cdm|cuft|cuf|cft|cu\.?\s*ft|ft3|uboxes?|u-?box(?:es)?|lvs?|liftvans?|lift\s*vans?|vans?|carros?|autos?)?",
+    re.IGNORECASE)
+
+
+def _num(tok: str) -> float:
+    if "/" in tok:                                   # "1/2"
+        a, b = tok.split("/")
+        return float(a) / float(b)
+    return float(tok.replace(",", "."))
 
 
 def parse_volume(text) -> dict:
-    """'1 van' / '3 uboxes' / '423cuft' / '160 m3' / '40M3' / '450 o 520' / '250'
-    → {lift_vans, u_boxes, volume_m3}. Bare numbers are treated as cuft (the
-    sheet's dominant unit; values > 100 can't plausibly be m³ for a household)."""
-    out = {"lift_vans": None, "u_boxes": None, "volume_m3": None}
+    """'1 van' / '3 uboxes' / '1/2 LVS' / '1,5 ubox' / '423cuft' / '626 CUF' /
+    '160 m3' / '13,65cdm' / '450 o 520' / '250' / '1 carro'
+    -> {lift_vans, u_boxes, volume_m3, vehicles}. Bare numbers are treated as
+    cuft when > 60 (the sheet's dominant unit), else m\u00b3."""
+    out = {"lift_vans": None, "u_boxes": None, "volume_m3": None, "vehicles": None}
     if text in (None, ""):
         return out
-    s = str(text).lower().replace("ó", "o")
+    s = str(text).lower().replace("\u00f3", "o")
     for num, unit in _VOL_RE.findall(s):
-        n = float(num.replace(",", "."))
+        n = _num(num)
         u = (unit or "").replace(" ", "").replace(".", "")
         if u.startswith("u"):
-            out["u_boxes"] = (out["u_boxes"] or 0) + int(n)
-        elif u.startswith("van") or u.startswith("lift"):
-            out["lift_vans"] = (out["lift_vans"] or 0) + int(n)
-        elif u in ("m3", "m³", "cbm"):
+            out["u_boxes"] = (out["u_boxes"] or 0) + n
+        elif u.startswith("lv") or u.startswith("lift") or u.startswith("van"):
+            out["lift_vans"] = (out["lift_vans"] or 0) + n
+        elif u.startswith("carro") or u.startswith("auto"):
+            out["vehicles"] = (out["vehicles"] or 0) + int(n)
+        elif u in ("m3", "m\u00b3", "cbm", "cdm"):
             out["volume_m3"] = round(n, 2)
-        elif u in ("cuft", "cft", "ft3") or u.startswith("cuft") or u.startswith("cu"):
+        elif u.startswith("cu") or u in ("cft", "ft3"):
             out["volume_m3"] = round(n / CUFT_PER_M3, 2)
         elif not unit and out["volume_m3"] is None:
             # bare number: '450 o 520' keeps the first; assume cuft unless tiny
             out["volume_m3"] = round(n / CUFT_PER_M3, 2) if n > 60 else round(n, 2)
+    for k in ("lift_vans", "u_boxes"):
+        if out[k] is not None:
+            out[k] = int(out[k]) if float(out[k]).is_integer() else round(out[k], 2)
     return out
 
 
 STATUS_FLAG_RULES = [
-    ("on hold", "on_hold"), ("hold", "on_hold"),
+    ("on hold", "on_hold"), ("hold", "on_hold"), ("detenido", "on_hold"),
     ("pendiente de pago", "payment_pending"), ("saldo pendiente", "payment_pending"),
-    ("por pagar", "payment_pending"),
+    ("por pagar", "payment_pending"), ("no ha pagado", "payment_pending"),
+    ("esperando pago", "payment_pending"),
     ("almacenaje", "in_storage"), ("storage", "in_storage"),
     ("certificado", "certificate_pending"), (" cm", "certificate_pending"),
     ("visa", "visa_pending"),
+    ("espera de documentos", "docs_pending"), ("llegan documentos", "docs_pending"),
+    ("no ha estado contestando", "unresponsive"), ("sin dar respuesta", "unresponsive"),
+    ("no ha contestado", "unresponsive"),
+    ("pendiente greenlight", "awaiting_green_light"), ("pending booking", "awaiting_booking"),
+    ("no bookea", "awaiting_booking"),
 ]
 
 
@@ -250,6 +272,14 @@ def parse_text_extract(text: str) -> dict[str, list[RemisionRow]]:
     return sheets
 
 
+def parse_csv(path: str, week: str, delimiter: str = ";", encoding: str = "cp1252") -> list[RemisionRow]:
+    """One weekly sheet exported from Excel as CSV (column A included)."""
+    import csv
+    with open(path, encoding=encoding, newline="") as fh:
+        rows = list(csv.reader(fh, delimiter=delimiter))
+    return parse_sheet_rows(week, rows)
+
+
 def parse_workbook(path: str) -> dict[str, list[RemisionRow]]:
     import openpyxl
     wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
@@ -280,43 +310,63 @@ def _name_key(name: str) -> str:
 
 def match_rows_to_shipments(rows: list[RemisionRow], shipments: list[Shipment]) -> dict:
     """Return {shipment.id: RemisionRow} for the best match of each shipment,
-    plus diagnostics. Reference tokens win; otherwise fuzzy customer name."""
-    by_token: dict[str, RemisionRow] = {}
-    for r in rows:
+    plus diagnostics. Reference tokens win; otherwise fuzzy customer name.
+    Only shipment blocks (pending / confirmed) are matched — storage and
+    certificate rows never carry shipment facts. A row is given to at most one
+    shipment: when two ClickUp lists share a reference (it happens — e.g. two
+    U-Haul lists both tagged 126624) the closer customer name keeps it."""
+    cand = [r for r in rows if r.block in SHIPMENT_BLOCKS]
+    by_token: dict[str, list[RemisionRow]] = {}
+    for r in cand:
         for t in _ref_tokens(r.reference):
-            by_token.setdefault(t, r)
+            by_token.setdefault(t, []).append(r)
+
+    def name_score(s: Shipment, r: RemisionRow) -> float:
+        return difflib.SequenceMatcher(None, _name_key(s.customer_name), _name_key(r.name)).ratio()
+
+    # 1) reference candidates — resolve collisions by name similarity
+    claims: dict[int, list[tuple[float, Shipment]]] = {}
+    for s in shipments:
+        for t in _ref_tokens(s.reference_number):
+            for r in by_token.get(t, []):
+                claims.setdefault(id(r), []).append((name_score(s, r), s))
+                break
+            else:
+                continue
+            break
     matched: dict[str, RemisionRow] = {}
     how: dict[str, str] = {}
     used: set[int] = set()
+    row_by_id = {id(r): r for r in cand}
+    for rid, lst in claims.items():
+        lst.sort(key=lambda x: -x[0])
+        score, s = lst[0]
+        matched[s.id] = row_by_id[rid]
+        how[s.id] = "reference" if len(lst) == 1 else f"reference (collision, name {score:.2f})"
+        used.add(rid)
+    # 2) fuzzy name for the rest
     for s in shipments:
-        hit = None
-        for t in _ref_tokens(s.reference_number):
-            if t in by_token:
-                hit = by_token[t]
-                how[s.id] = "reference"
-                break
-        if hit is None and s.customer_name:
-            key = _name_key(s.customer_name)
-            best, score = None, 0.0
-            for r in rows:
-                if id(r) in used:
-                    continue
-                sc = difflib.SequenceMatcher(None, key, _name_key(r.name)).ratio()
-                if sc > score:
-                    best, score = r, sc
-            if best is not None and score >= 0.82:
-                hit = best
-                how[s.id] = f"name:{score:.2f}"
-        if hit is not None:
-            matched[s.id] = hit
-            used.add(id(hit))
+        if s.id in matched or not s.customer_name:
+            continue
+        best, score = None, 0.0
+        for r in cand:
+            if id(r) in used:
+                continue
+            sc = name_score(s, r)
+            if sc > score:
+                best, score = r, sc
+        if best is not None and score >= 0.82:
+            matched[s.id] = best
+            how[s.id] = f"name:{score:.2f}"
+            used.add(id(best))
     diag = {
-        "rows": len(rows), "shipments": len(shipments), "matched": len(matched),
-        "by_reference": sum(1 for v in how.values() if v == "reference"),
+        "rows": len(rows), "shipment_rows": len(cand), "shipments": len(shipments),
+        "matched": len(matched),
+        "by_reference": sum(1 for v in how.values() if v.startswith("reference")),
         "by_name": sum(1 for v in how.values() if v.startswith("name")),
+        "collisions": [f"{s}" for s, v in how.items() if "collision" in v],
         "unmatched_shipments": [f"{s.customer_name} ({s.reference_number})" for s in shipments if s.id not in matched],
-        "unmatched_rows": [f"{r.name} ({r.reference})" for r in rows if id(r) not in used
-                           and r.block in SHIPMENT_BLOCKS],
+        "unmatched_rows": [f"{r.name} ({r.reference})" for r in cand if id(r) not in used],
     }
     return {"matches": matched, "how": how, "diag": diag}
 
@@ -340,7 +390,8 @@ def enrich_shipment(s: Shipment, r: RemisionRow) -> Shipment:
         s.reference_number = r.reference
     s.status_flags = _dedupe(list(s.status_flags) + list(r.flags))
     s.extra.update({"remisiones_block": r.block, "remisiones_status": r.status,
-                    "sale_value": r.sale, "remisiones_week": r.week, "type": r.type})
+                    "sale_value": r.sale, "remisiones_week": r.week, "type": r.type,
+                    "vehicles": r.vehicles, "volume_text": r.volume_text})
     return s
 
 

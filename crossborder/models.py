@@ -59,6 +59,10 @@ TRUCK_36_LIFT_VANS = 7
 TRUCK_36_U_BOXES = 3
 # 13 lift vans ≡ 10 U-boxes on the baseline truck → one U-box takes 1.3 slots.
 U_BOX_LIFT_VAN_EQUIV = TRUCK_53_LIFT_VANS / TRUCK_53_U_BOXES
+# Usable volume of one lift van (~87" x 55" x 87" ≈ 200 cuft). Used to turn a
+# cubic-metre volume (Moveware / Remisiones "cdm") into truck slots when no
+# explicit lift-van / U-box count exists. Confirm with the team (spec §12).
+LIFT_VAN_M3 = 5.7
 CUFT_PER_M3 = 35.3147
 TIM_DELIVERY_WINDOW_DAYS = 30
 
@@ -236,6 +240,8 @@ class Shipment:
         ub = self.u_boxes or 0
         if lv or ub:
             return round(lv + ub * U_BOX_LIFT_VAN_EQUIV, 2)
+        if self.volume_m3:
+            return round(self.volume_m3 / LIFT_VAN_M3, 2)
         return 0.0
 
     @property

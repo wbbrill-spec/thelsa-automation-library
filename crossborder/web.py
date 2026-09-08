@@ -12,8 +12,9 @@ Routes:
   /crossborder/raw?completed=1     also walk the "Completed …" space.
   /crossborder/raw?discover=1      the workspace hierarchy (space/folder/list ids).
   /crossborder/raw?list=<id>,<id>  inspect specific lists in full (every task).
-  /crossborder/api/shipments       JSON: normalized shipments (cached 5 min;
-                                   ?refresh=1 to force).
+  /crossborder                     the dashboard page (dashboard.py).
+  /crossborder/api/shipments       JSON: normalized shipments + status +
+                                   diagnostics (cached 5 min; ?refresh=1 to force).
 """
 from __future__ import annotations
 
@@ -26,6 +27,7 @@ import time
 from flask import Blueprint, jsonify, redirect, request, session, url_for
 
 from . import clickup, remisiones, tim
+from .dashboard import DASHBOARD_HTML
 
 log = logging.getLogger(__name__)
 
@@ -169,11 +171,15 @@ def api_shipments():
     except Exception as exc:
         return jsonify({"error": f"{type(exc).__name__}: {exc}", "shipments": []}), 200
     return jsonify({"count": len(shipments), "status": status,
+                    "diagnostics": {"remisiones": diag.get("remisiones"), "requests_made": diag.get("requests_made"),
+                                    "errors": diag.get("errors")},
                     "shipments": [s.to_dict() for s in shipments]})
 
 
 @crossborder_bp.route("/crossborder")
+@crossborder_bp.route("/crossborder/")
 @_login_required
 def index():
-    """Placeholder until the dashboard UI lands (next step)."""
-    return redirect(url_for("crossborder.raw"))
+    """The dashboard page (renders client-side from /crossborder/api/shipments)."""
+    ensure_fresh()   # warm the cache so the page has data by the time it asks
+    return DASHBOARD_HTML

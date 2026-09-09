@@ -193,7 +193,12 @@ td a { color: #1967d2; text-decoration: none; }
 
     <div class="grid2">
       <div>
-        <div class="section">Needs attention <span class="cnt" id="cnt-alerts">0</span></div>
+        <div class="plan-head">
+          <div class="section">Needs attention <span class="cnt" id="cnt-alerts">0</span></div>
+          <span class="spacer"></span>
+          <button class="btn" id="alert-draft">✉ Draft owner alerts</button>
+        </div>
+        <div class="plan-stats" id="alert-msg" style="margin-bottom:8px"></div>
         <div class="panel alerts" id="alerts"></div>
       </div>
       <div>
@@ -303,6 +308,28 @@ $("#plan-draft").onclick = async () => {
     const r = await fetch("/crossborder/plan/draft", {method: "POST"}).then(x => x.json());
     $("#plan-msg").textContent = r.ok ? `Draft saved in ${r.folder || "Drafts"} for ${r.to.join(", ")} — review and send from Outlook.` : `Could not create draft: ${r.reason}`;
   } catch (e) { $("#plan-msg").textContent = "Could not create draft: " + e; }
+  b.disabled = false;
+};
+
+// One draft per responsible person listing their shipments that need attention.
+// Drafts only — they land in the Thelsa mailbox for a human to review and send.
+$("#alert-draft").onclick = async () => {
+  const b = $("#alert-draft"), m = $("#alert-msg");
+  b.disabled = true; m.textContent = "creating drafts…";
+  try {
+    const r = await fetch("/crossborder/alerts/draft", {method: "POST"}).then(x => x.json());
+    if (r.skipped_reason && !r.alert_count) {
+      m.textContent = r.skipped_reason;
+    } else {
+      const ok = (r.drafts || []).filter(d => d.ok);
+      const bad = (r.drafts || []).filter(d => !d.ok);
+      const unres = ok.filter(d => !d.resolved).map(d => d.owner);
+      m.textContent = `${ok.length} draft${ok.length === 1 ? "" : "s"} saved (${ok.map(d => `${d.owner}: ${d.shipments}`).join(", ")}) — review and send from Outlook.`
+        + (unres.length ? ` No email on file for ${unres.join(", ")} — those went to the fallback inbox.` : "")
+        + (bad.length ? ` ${bad.length} failed: ${bad.map(d => d.error).join("; ")}` : "")
+        + (r.reason ? ` ${r.reason}` : "");
+    }
+  } catch (e) { m.textContent = "Could not create drafts: " + e; }
   b.disabled = false;
 };
 

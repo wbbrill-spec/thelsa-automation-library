@@ -21,6 +21,11 @@ Routes:
   /crossborder/plan/draft  (POST)  create the suggested-load email as a DRAFT in
                                    the Thelsa mailbox (never sends). Also runs
                                    daily at PLAN_EMAIL_HOUR when PLAN_EMAIL_ENABLED=1.
+  /crossborder/api/alerts          JSON: per-person outstanding-item alerts as they
+                                   would be drafted (preview only — writes nothing).
+  /crossborder/alerts/draft (POST) file those alerts as DRAFTS, one per owner.
+                                   Also runs daily at CB_ALERTS_HOUR when
+                                   CB_ALERTS_ENABLED=1.
 """
 from __future__ import annotations
 
@@ -32,7 +37,7 @@ import time
 
 from flask import Blueprint, jsonify, redirect, request, session, url_for
 
-from . import clickup, engine, remisiones, tim, tms
+from . import alerts, clickup, engine, remisiones, tim, tms
 from .dashboard import DASHBOARD_HTML
 
 log = logging.getLogger(__name__)
@@ -292,34 +297,105 @@ def create_plan_draft(actor: str = "scheduler") -> dict:
 
 
 _PLAN_STATE: dict = {"last": None, "thread": None}
+_ALERT_STATE: dict = {"last": None}
 
 
-def _plan_scheduler():
-    """Once a day at PLAN_EMAIL_HOUR (server local time, default 07:00) file the
-    suggested-load draft — only when PLAN_EMAIL_ENABLED=1."""
+def create_alert_drafts(actor: str = "scheduler", respect_state: bool = True) -> dict:
+    """One DRAFT per responsible person listing their shipments that need
+    attention. Never sends; never writes to ClickUp or Moveware."""
+    shipments, diag, status = load_shipments()
+    if not shipments:
+        return {"ok": False, "reason": "no shipments loaded yet", "actor": actor}
+    try:
+        out = alerts.create_drafts(shipments, actor=actor, respect_state=respect_state)
+        out["ok"] = not any(d.get("ok") is False for d in out.get("drafts", []))
+    except Exception as exc:  # noqa: BLE001
+        log.exception("alert drafts failed")
+        out = {"ok": False, "reason": f"{type(exc).__name__}: {exc}", "actor": actor}
+    with _LOCK:
+        _ALERT_STATE["last"] = {**out, "at": time.time()}
+    return out
+
+
+def _daily_scheduler():
+    """Once a day file the suggested-load draft (PLAN_EMAIL_HOUR, default 07:00,
+    when PLAN_EMAIL_ENABLED=1) and the per-person alert drafts (CB_ALERTS_HOUR,
+    default 08:00, when CB_ALERTS_ENABLED=1). Both create drafts only."""
     import datetime as _dt
-    last_day = None
+    last_plan_day = None
+    last_alert_day = None
     while True:
         try:
+            now = _dt.datetime.now()
             if os.environ.get("PLAN_EMAIL_ENABLED") == "1":
                 hour = int(os.environ.get("PLAN_EMAIL_HOUR", "7") or 7)
-                now = _dt.datetime.now()
-                if now.hour >= hour and last_day != now.date():
+                if now.hour >= hour and last_plan_day != now.date():
                     ensure_fresh()
                     time.sleep(90)            # let the refresh land
                     create_plan_draft(actor="scheduler")
-                    last_day = now.date()
+                    last_plan_day = now.date()
         except Exception:  # noqa: BLE001
             log.exception("plan scheduler")
+        try:
+            now = _dt.datetime.now()
+            if alerts.alerts_enabled():
+                hour = int(os.environ.get("CB_ALERTS_HOUR", "8") or 8)
+                if now.hour >= hour and last_alert_day != now.date():
+                    ensure_fresh()
+                    time.sleep(90)
+                    create_alert_drafts(actor="scheduler")
+                    last_alert_day = now.date()
+        except Exception:  # noqa: BLE001
+            log.exception("alert scheduler")
         time.sleep(300)
 
 
 def ensure_plan_scheduler():
     with _LOCK:
         if _PLAN_STATE["thread"] is None:
-            t = threading.Thread(target=_plan_scheduler, daemon=True, name="crossborder-plan-scheduler")
+            t = threading.Thread(target=_daily_scheduler, daemon=True, name="crossborder-scheduler")
             t.start()
             _PLAN_STATE["thread"] = t
+
+
+@crossborder_bp.route("/crossborder/api/alerts")
+@_login_required
+def api_alerts():
+    """Preview the per-person alerts exactly as they would be drafted. Read-only."""
+    shipments, diag, status = load_shipments()
+    try:
+        built = alerts.build_alerts(shipments)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("alerts failed")
+        return jsonify({"error": f"{type(exc).__name__}: {exc}", "alerts": []}), 200
+    return jsonify({
+        "as_of": time.strftime("%Y-%m-%d"),
+        "status": status,
+        "owner_count": len(built),
+        "shipment_count": sum(a["shipment_count"] for a in built),
+        "unresolved": [a["owner"] for a in built if not a["resolved"]],
+        "alerts": built,
+    })
+
+
+@crossborder_bp.route("/crossborder/alerts/draft", methods=["POST"])
+@_login_required
+def alerts_draft():
+    # A human pressed the button, so nothing is suppressed by the repeat window.
+    return jsonify(create_alert_drafts(actor=session.get("user_email", "user"),
+                                       respect_state=False))
+
+
+@crossborder_bp.route("/crossborder/alerts/status")
+@_login_required
+def alerts_status():
+    with _LOCK:
+        last = _ALERT_STATE["last"]
+    return jsonify({"enabled": alerts.alerts_enabled(),
+                    "hour": os.environ.get("CB_ALERTS_HOUR", "8"),
+                    "repeat_hours": os.environ.get("CB_ALERT_REPEAT_HOURS", "72"),
+                    "default_owner": os.environ.get("CB_ALERT_DEFAULT_OWNER", alerts.DEFAULT_OWNER),
+                    "last": last})
 
 
 @crossborder_bp.route("/crossborder/plan/draft", methods=["POST"])

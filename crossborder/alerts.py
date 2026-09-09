@@ -14,20 +14,24 @@ DRAFTS in the Thelsa mailbox for a human to review. It never writes to ClickUp o
 Moveware, and it never emails a guessed address — an owner whose email is not
 configured is routed to the fallback inbox with a note asking a human to route it.
 
-Who owns a shipment
--------------------
-  TMS (Moveware)  extra.coordinator_email / moveManager name.
-  TIM (ClickUp)   assignees, which exist only on subtasks and are often blank.
-  Neither         the agent folder's owner (CB_ALERT_FOLDER_OWNERS), else the
-                  default owner — Bill's decision 2026-09-09: Fernanda Viana.
+Who owns a shipment (Bill's rule, 2026-09-09)
+---------------------------------------------
+Ownership follows the SOURCE SYSTEM, not the per-record assignee: every TIM
+(ClickUp) file belongs to Fernanda Mora and every TMS (Moveware) file belongs to
+Sara Reyes. ClickUp subtask assignees and Moveware's moveManager are no longer
+used to route — ClickUp assignees are mostly blank, and one owner per system is
+how the team actually works. Both addresses are built in below, so nothing needs
+configuring; CB_ALERT_TIM_OWNER / CB_ALERT_TMS_OWNER change the owner, and
+CB_ALERT_FOLDER_OWNERS can hand one agent folder to someone else.
 
 Config (all optional; nothing here is a secret)
 -----------------------------------------------
-  CB_ALERT_EMAILS          name → email map, JSON ({"Fernanda Viana":"…"}) or
-                           "Fernanda Viana:f@thelsa.com,Diana:d@thelsa.com".
-                           ClickUp usernames work as keys too.
-  CB_ALERT_FOLDER_OWNERS   agent/folder → owner name, same two formats.
-  CB_ALERT_DEFAULT_OWNER   catch-all owner name (default "Fernanda Viana").
+  CB_ALERT_EMAILS          name → email map, JSON ({"Fernanda Mora":"…"}) or
+                           "Fernanda Mora:f@thelsa.com,Sara Reyes:s@thelsa.com".
+  CB_ALERT_TIM_OWNER       who owns ClickUp files (default "Fernanda Mora").
+  CB_ALERT_TMS_OWNER       who owns Moveware files (default "Sara Reyes").
+  CB_ALERT_FOLDER_OWNERS   agent/folder → owner name, same two formats; overrides
+                           the TIM owner for that folder only.
   CB_ALERT_CC              cc address(es), comma-separated (default: none).
   CB_ALERT_FALLBACK        where alerts for an unresolved owner go
                            (default ALERT_EMAIL, else bbrill@thelsa.com).
@@ -49,7 +53,17 @@ from typing import Optional
 from .models import TIM_DELIVERY_WINDOW_DAYS, Shipment, Source, norm_text
 
 SITE = "https://thelsa.inflectionpointnow.com/crossborder"
-DEFAULT_OWNER = "Fernanda Viana"
+TIM_OWNER = "Fernanda Mora"      # every ClickUp file
+TMS_OWNER = "Sara Reyes"         # every Moveware file
+DEFAULT_OWNER = TIM_OWNER        # back-compat alias
+
+# Confirmed with Bill 2026-09-09 from the Thelsa directory. Note there is also a
+# Fernanda Viana at SIT Spain (an external agent) — not this person, and never a
+# recipient of internal shipment lists. CB_ALERT_EMAILS overrides these.
+KNOWN_EMAILS: dict[str, str] = {
+    "fernanda mora": "fernandamora@thelsa.com",
+    "sara reyes": "sarareyes@thelsa.com",
+}
 
 # Priority order — the most urgent reason a shipment appears in someone's list.
 ALERT_FLAGS = [
@@ -106,8 +120,12 @@ def _fallback_inbox() -> str:
             or "bbrill@thelsa.com").strip()
 
 
-def _default_owner() -> str:
-    return (os.environ.get("CB_ALERT_DEFAULT_OWNER") or DEFAULT_OWNER).strip()
+def owner_name_for_source(source: Source) -> str:
+    """The one person who owns every file in a source system."""
+    if source is Source.TMS:
+        return (os.environ.get("CB_ALERT_TMS_OWNER") or TMS_OWNER).strip()
+    return (os.environ.get("CB_ALERT_TIM_OWNER")
+            or os.environ.get("CB_ALERT_DEFAULT_OWNER") or TIM_OWNER).strip()
 
 
 def _repeat_hours() -> int:
@@ -126,32 +144,33 @@ def _window_risk_days() -> int:
 
 # ── ownership ────────────────────────────────────────────────────────────────
 def owner_for(s: Shipment) -> tuple[str, str, bool]:
-    """(owner name, email, resolved). Never guesses an address: an owner with no
-    configured email is routed to the fallback inbox with resolved=False."""
+    """(owner name, email, resolved).
+
+    Ownership is by source system — TIM → the TIM owner, TMS → the TMS owner —
+    with CB_ALERT_FOLDER_OWNERS able to hand one agent folder to someone else.
+    The address comes from CB_ALERT_EMAILS, or from Moveware itself when the
+    owner is the job's own move manager. An owner with no address on file is
+    routed to the fallback inbox (resolved=False) — never a guessed address.
+    """
     emails = _env_map("CB_ALERT_EMAILS")
 
-    direct = ""
-    if s.source is Source.TMS:
-        direct = str((s.extra or {}).get("coordinator_email") or "").strip()
-
     name = ""
-    for cand in (s.assignees or []):
-        cand = str(cand or "").strip()
-        if not cand:
-            continue
-        if norm_text(cand) in emails:      # a known person wins over the first name
-            name = cand
-            break
-        name = name or cand
-    if not name:
-        folder_owner = _env_map("CB_ALERT_FOLDER_OWNERS").get(norm_text(s.agent))
-        name = folder_owner or _default_owner()
+    if s.source is Source.TIM:
+        name = _env_map("CB_ALERT_FOLDER_OWNERS").get(norm_text(s.agent)) or ""
+    name = name or owner_name_for_source(s.source)
 
-    if "@" in direct:
-        return name or direct, direct, True
-    email = emails.get(norm_text(name))
+    email = emails.get(norm_text(name)) or KNOWN_EMAILS.get(norm_text(name))
     if email:
         return name, email, True
+
+    # Moveware carries each job's move manager; use that address only when it is
+    # the same person the file is assigned to.
+    if s.source is Source.TMS:
+        direct = str((s.extra or {}).get("coordinator_email") or "").strip()
+        manager = next((str(a or "").strip() for a in (s.assignees or []) if a), "")
+        if "@" in direct and norm_text(manager) == norm_text(name):
+            return name, direct, True
+
     return name, _fallback_inbox(), False
 
 
@@ -303,9 +322,10 @@ def build_alerts(shipments: list[Shipment], today: Optional[dt.date] = None) -> 
             counts[r["top_issue"]] = counts.get(r["top_issue"], 0) + 1
         head = ", ".join(f"{v} {FLAG_LABEL.get(k, (k, k))[1].lower()}"
                          for k, v in sorted(counts.items(), key=lambda kv: order.get(kv[0], 99)))
-        subject = (f"[Transfronterizo] {n} embarque{'s' if n != 1 else ''} requieren "
-                   f"atención — {b['owner']} / {n} shipment{'s' if n != 1 else ''} "
-                   f"need attention ({head})")
+        subject = (f"[Transfronterizo] {n} embarque{'s' if n != 1 else ''} "
+                   f"requiere{'n' if n != 1 else ''} atención — {b['owner']} / "
+                   f"{n} shipment{'s' if n != 1 else ''} "
+                   f"need{'' if n != 1 else 's'} attention ({head})")
         alerts.append({
             "owner": b["owner"], "to": b["to"], "cc": cc, "resolved": b["resolved"],
             "subject": subject, "body": alert_body(b["owner"], rows, b["resolved"]),

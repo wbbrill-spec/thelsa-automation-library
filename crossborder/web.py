@@ -39,6 +39,7 @@ from flask import Blueprint, jsonify, redirect, request, session, url_for
 
 from . import alerts, clickup, engine, remisiones, tim, tms
 from .dashboard import DASHBOARD_HTML
+from .models import Source
 
 log = logging.getLogger(__name__)
 
@@ -394,7 +395,8 @@ def alerts_status():
     return jsonify({"enabled": alerts.alerts_enabled(),
                     "hour": os.environ.get("CB_ALERTS_HOUR", "8"),
                     "repeat_hours": os.environ.get("CB_ALERT_REPEAT_HOURS", "72"),
-                    "default_owner": os.environ.get("CB_ALERT_DEFAULT_OWNER", alerts.DEFAULT_OWNER),
+                    "tim_owner": alerts.owner_name_for_source(Source.TIM),
+                    "tms_owner": alerts.owner_name_for_source(Source.TMS),
                     "last": last})
 
 

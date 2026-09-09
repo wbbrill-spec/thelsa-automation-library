@@ -83,6 +83,24 @@ main { max-width: 1500px; margin: 0 auto; padding: 22px 24px 60px; }
 .card .bar { height: 4px; background: #eee; border-radius: 3px; margin-top: 5px; overflow: hidden; }
 .card .bar i { display: block; height: 100%; background: #c0392b; }
 
+.loads { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 12px; }
+.load { background: #fff; border: 1px solid #e8e8e8; border-radius: 12px; padding: 12px 14px; }
+.load.light { border-color: #ffd9a8; }
+.load h4 { font-size: 13px; font-weight: 800; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.load .fillbar { height: 12px; background: #f0f1f4; border-radius: 6px; overflow: hidden; margin: 8px 0 6px; }
+.load .fillbar i { display: block; height: 100%; background: #c0392b; }
+.load .fillbar i.ok { background: #1e7e34; }
+.load .fillbar i.lt { background: #f59e0b; }
+.load .fl { font-size: 11px; color: #666; display: flex; justify-content: space-between; }
+.load .row { display: flex; gap: 8px; font-size: 12px; padding: 5px 0; border-top: 1px solid #f3f3f3; cursor: pointer; }
+.load .row .who { flex: 1; min-width: 0; }
+.load .row .m3 { white-space: nowrap; color: #333; font-weight: 600; }
+.load .adv { font-size: 12px; color: #92400e; background: #fff8ec; border-radius: 8px; padding: 8px 10px; margin-top: 8px; line-height: 1.45; }
+.load .rs { color: #999; font-size: 11px; }
+.tag.full { background: #e6f4ea; color: #1e7e34; } .tag.light { background: #fff4e5; color: #b45309; } .tag.xs { background: #1a1a2e; color: #fff; } .tag.anchor { background: #e8f0fe; color: #1967d2; } .tag.risk { background: #fce8e6; color: #c0392b; }
+.plan-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 22px 0 10px; }
+.plan-head .section { margin: 0; }
+.plan-stats { font-size: 12px; color: #666; }
 .grid2 { display: grid; grid-template-columns: 1.4fr 1fr; gap: 18px; }
 @media (max-width: 1000px) { .grid2 { grid-template-columns: 1fr; } }
 .panel { background: #fff; border: 1px solid #e8e8e8; border-radius: 12px; padding: 14px 16px; }
@@ -128,32 +146,6 @@ td a { color: #1967d2; text-decoration: none; }
 .ms .todo { color: #bbb; }
 #overlay { position: fixed; inset: 0; background: rgba(0,0,0,.2); display: none; z-index: 15; }
 #overlay.open { display: block; }
-
-/* consolidation planner */
-.plan-sum { display: flex; gap: 22px; flex-wrap: wrap; background: #fff; border: 1px solid #e8e8e8; border-radius: 12px; padding: 14px 18px; margin-bottom: 16px; }
-.plan-sum .m { font-size: 12px; color: #777; }
-.plan-sum .m b { display: block; font-size: 22px; font-weight: 800; color: #1a1a2e; line-height: 1.1; }
-.plan-hub { margin-bottom: 18px; }
-.plan-hub-h { font-size: 13px; font-weight: 800; color: #1a1a2e; margin: 0 0 9px; display: flex; align-items: center; gap: 8px; }
-.plan-hub-h .cnt { background: #e8e8e8; color: #555; border-radius: 10px; padding: 1px 8px; font-size: 11px; font-weight: 700; }
-.plan-trucks { display: grid; grid-template-columns: repeat(auto-fill, minmax(265px, 1fr)); gap: 12px; }
-.ptruck { background: #fff; border: 1px solid #e8e8e8; border-radius: 12px; padding: 12px 14px; border-top: 3px solid #c0392b; }
-.ptruck.ready { border-top-color: #1e7e34; }
-.pt-h { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px; }
-.pt-t { font-weight: 800; font-size: 13px; }
-.pt-fill { font-size: 11px; color: #666; font-variant-numeric: tabular-nums; }
-.pgauge { height: 8px; background: #f0f1f4; border-radius: 5px; overflow: hidden; margin-bottom: 9px; }
-.pgauge i { display: block; height: 100%; background: #c0392b; }
-.pgauge i.ok { background: #1e7e34; }
-.pt-items { display: flex; flex-direction: column; gap: 4px; margin-bottom: 9px; }
-.pt-item { font-size: 12px; padding: 3px 7px; border-radius: 6px; background: #fafafa; cursor: pointer; display: flex; align-items: center; gap: 7px; }
-.pt-item:hover { background: #f0f1f4; }
-.pt-item .psrc { font-size: 9px; font-weight: 800; color: #fff; border-radius: 8px; padding: 0 5px; letter-spacing: .3px; }
-.pt-item .psrc.tim { background: #1967d2; } .pt-item .psrc.tms { background: #c0392b; }
-.pt-item .pnm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.pt-item .pt-v { margin-left: auto; color: #555; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.pt-foot { font-size: 11px; font-weight: 700; color: #b45309; }
-.ptruck.ready .pt-foot { color: #1e7e34; }
 </style>
 </head>
 <body>
@@ -179,7 +171,6 @@ td a { color: #1967d2; text-decoration: none; }
     <span class="spacer"></span>
     <label style="font-size:12px;color:#666;display:flex;align-items:center;gap:6px;white-space:nowrap"><input type="checkbox" id="f-closed"> include completed</label>
     <button class="btn" id="view-board">Board</button>
-    <button class="btn" id="view-plan">Plan loads</button>
     <button class="btn" id="view-table">Table</button>
     <button class="btn primary" id="refresh">↻ Refresh</button>
   </div>
@@ -190,13 +181,23 @@ td a { color: #1967d2; text-decoration: none; }
     <div class="section">Pipeline <span class="cnt" id="cnt-board">0</span></div>
     <div class="board" id="board"></div>
 
+    <div class="plan-head">
+      <div class="section">Suggested loads <span class="cnt" id="cnt-loads">0</span></div>
+      <span class="plan-stats" id="plan-stats"></span>
+      <span class="spacer"></span>
+      <button class="btn" id="plan-draft">✉ Draft today's load email</button>
+      <span class="plan-stats" id="plan-msg"></span>
+    </div>
+    <div class="loads" id="loads"></div>
+    <div id="coming" class="note" style="display:none"></div>
+
     <div class="grid2">
       <div>
         <div class="section">Needs attention <span class="cnt" id="cnt-alerts">0</span></div>
         <div class="panel alerts" id="alerts"></div>
       </div>
       <div>
-        <div class="section">Hub load (open shipments)</div>
+        <div class="section">Hub load (open imports, m³ vs one 53' trailer)</div>
         <div class="panel hubs" id="hubs"></div>
       </div>
     </div>
@@ -205,11 +206,6 @@ td a { color: #1967d2; text-decoration: none; }
   <div id="table-view" style="display:none">
     <div class="section">All shipments <span class="cnt" id="cnt-table">0</span></div>
     <div class="tblwrap"><table id="tbl"><thead></thead><tbody></tbody></table></div>
-  </div>
-
-  <div id="plan-view" style="display:none">
-    <div class="section">Suggested consolidated loads <span class="cnt" id="cnt-plan">0</span></div>
-    <div id="plan"></div>
   </div>
 </main>
 
@@ -232,6 +228,8 @@ const FLAG_ICON = {stalled:"⏳", docs_incomplete:"📄", on_hold:"⛔", payment
 const ALERT_FLAGS = ["on_hold","payment_pending","window_risk","unresponsive","docs_incomplete","docs_pending","certificate_pending","visa_pending","stalled"];
 const HUBS = ["Monterrey","Mexico City","Guadalajara","Querétaro","Mérida","Torreón","Unknown"];
 const TRUCK_LV = 13;
+const TRUCK_M3 = 88;   // 53' trailer ≈ 20,000 lb HHG at 6.5 lb/cuft ≈ 3,077 cuft ≈ 88 m³ (Bill, 2026-09-09)
+const pm3 = s => s.planning_m3 || 0;
 
 let ALL = [], STATUS = {}, DIAG = {}, view = "board", sortKey = "customer_name", sortDir = 1, kpiSel = null;
 const $ = s => document.querySelector(s);
@@ -261,7 +259,52 @@ async function load(force) {
   if (rem.error) { $("#src-rem").textContent = "Remisiones · no access"; $("#src-rem").className = "pill warn"; $("#src-rem").title = rem.error; }
   else if (rem.matched != null) { $("#src-rem").textContent = `Remisiones · ${rem.matched} matched (${rem.week || "latest"})`; $("#src-rem").className = "pill ok"; }
   buildFilters(); render();
+  loadPlan();
 }
+
+let PLAN = null;
+async function loadPlan() {
+  try { PLAN = await fetch(`/crossborder/api/plan?v=${Date.now()}`).then(r => r.json()); } catch (e) { PLAN = {error: String(e), loads: []}; }
+  renderPlan();
+}
+
+function renderPlan() {
+  const p = PLAN; if (!p) return;
+  const src = $("#f-source").value;
+  const loads = (p.loads || []).filter(l => !src || l.sources[src]);
+  $("#cnt-loads").textContent = loads.length;
+  const s = p.summary || {};
+  $("#plan-stats").textContent = p.error ? p.error : `53' trailer = ${p.truck_m3} m³ · ${p.ready} ready · ${p.coming} coming · ${p.unsized || 0} without volume · avg fill ${s.avg_fill_pct || 0}% · ${s.light || 0} light · ${s.cross_silo || 0} TIM+TMS`;
+  const oppByLane = Object.fromEntries((p.opportunities || []).map(o => [o.lane, o]));
+  $("#loads").innerHTML = loads.length ? loads.map((l, n) => {
+    const pct = Math.min(100, l.fill_pct);
+    const cls = l.fill_pct >= 85 ? "ok" : (l.light ? "lt" : "");
+    const opp = oppByLane[l.lane];
+    return `<div class="load ${l.light ? "light" : ""}">
+      <h4>${esc(l.lane)} ${l.fill_pct >= 85 ? '<span class="tag full">Full</span>' : ""}${l.light ? '<span class="tag light">Running light</span>' : ""}${l.cross_silo ? '<span class="tag xs">TIM + TMS</span>' : ""}${l.window_risk.length ? `<span class="tag risk">${l.window_risk.length} window risk</span>` : ""}${l.anchors > 1 ? '<span class="tag anchor">2 FTL jobs share</span>' : ""}</h4>
+      <div class="fillbar"><i class="${cls}" style="width:${pct}%"></i></div>
+      <div class="fl"><span>${l.m3} / ${l.truck_m3} m³ · ${l.fill_pct}%${l.kg ? ` · ${fmtN(l.kg)} kg` : ""}</span><span>${l.depart_by ? "depart by " + fmtD(l.depart_by) : ""}</span></div>
+      ${l.shipments.map(it => `<div class="row" data-id="${esc(it.id)}"><div class="who"><b>${esc(it.customer)}</b>${it.anchor ? ' <span class="tag anchor">anchor</span>' : ""}${l.window_risk.includes(it.id) ? ' <span class="tag risk">by ' + fmtD(it.deadline) + '</span>' : ""}<br><span class="rs">${esc(it.source)} · ${esc(it.agent || "")}${it.reference ? " · " + esc(it.reference) : ""} · → ${esc(it.destination || "?")}${it.service ? " · " + esc(it.service) : ""}</span></div><div class="m3">${it.m3} m³</div></div>`).join("")}
+      ${opp && opp.advice ? `<div class="adv">${esc(opp.advice)}</div>` : ""}
+    </div>`; }).join("") : `<div class="empty">${p.error ? "" : "No consolidatable shipments are ready right now."}</div>`;
+  document.querySelectorAll("#loads .row").forEach(el => el.onclick = () => openDrawer(el.dataset.id));
+  const cb = p.coming_by_lane || {}; const lanes = Object.keys(cb).filter(k => !src || cb[k].some(i => i.source === src));
+  const ub = p.unsized_by_lane || {}; const ulanes = Object.keys(ub).filter(k => !src || ub[k].some(i => i.source === src));
+  const parts = [];
+  if (lanes.length) parts.push("<b>Coming (not yet ready):</b> " + lanes.map(k => `${esc(k)}: ` + cb[k].filter(i => !src || i.source === src).map(i => `${esc(i.customer)} (${i.m3} m³${i.ready_date ? ", " + fmtD(i.ready_date) : ""})`).join(", ")).join(" · "));
+  if (ulanes.length) parts.push(`<b>Not plannable — no volume on record (${p.unsized}):</b> ` + ulanes.map(k => `${esc(k)}: ` + ub[k].filter(i => !src || i.source === src).map(i => esc(i.customer)).join(", ")).join(" · "));
+  $("#coming").style.display = parts.length ? "" : "none";
+  $("#coming").innerHTML = parts.join("<br><br>");
+}
+
+$("#plan-draft").onclick = async () => {
+  const b = $("#plan-draft"); b.disabled = true; $("#plan-msg").textContent = "creating draft…";
+  try {
+    const r = await fetch("/crossborder/plan/draft", {method: "POST"}).then(x => x.json());
+    $("#plan-msg").textContent = r.ok ? `Draft saved in ${r.folder || "Drafts"} for ${r.to.join(", ")} — review and send from Outlook.` : `Could not create draft: ${r.reason}`;
+  } catch (e) { $("#plan-msg").textContent = "Could not create draft: " + e; }
+  b.disabled = false;
+};
 
 function buildFilters() {
   const keep = id => $(id).value;
@@ -290,103 +333,18 @@ function render() {
   const rows = filtered();
   renderKpis();
   if (view === "board") { renderBoard(rows); renderAlerts(rows); renderHubs(rows); }
-  else if (view === "plan") renderPlan(rows);
   else renderTable(rows);
   $("#board-view").style.display = view === "board" ? "" : "none";
-  $("#plan-view").style.display = view === "plan" ? "" : "none";
   $("#table-view").style.display = view === "table" ? "" : "none";
   $("#view-board").className = "btn" + (view === "board" ? " active" : "");
-  $("#view-plan").className = "btn" + (view === "plan" ? " active" : "");
   $("#view-table").className = "btn" + (view === "table" ? " active" : "");
-}
-
-// ── Consolidation planner ──────────────────────────────────────────────
-// Bins open shipments (with a known hub + volume) into 13-LVE trucks per hub,
-// first-fit-decreasing. A prototype of the load planner in the spec: the real
-// engine will also weigh ready/clearance dates and the 30-day window. Works
-// across both silos (TIM + TMS) since it reads the unified shipment feed.
-function windowRisk(s) {
-  if (!s.delivery_date) return false;
-  const d = (new Date(s.delivery_date) - new Date()) / 86400000;
-  return d <= 7;
-}
-function planTrucks(rows) {
-  const open = rows.filter(s => s.is_open && (s.lift_van_equivalents || 0) > 0
-    && s.destination_hub && s.destination_hub !== "Unknown");
-  const byHub = {};
-  open.forEach(s => (byHub[s.destination_hub] = byHub[s.destination_hub] || []).push(s));
-  const trucks = [];
-  Object.keys(byHub).forEach(hub => {
-    const items = byHub[hub].slice().sort((a, b) => (b.lift_van_equivalents || 0) - (a.lift_van_equivalents || 0));
-    const hubTrucks = [];
-    items.forEach(s => {
-      const lv = s.lift_van_equivalents || 0;
-      let t = hubTrucks.find(t => t.lve + lv <= TRUCK_LV + 1e-9);
-      if (!t) { t = { hub, lve: 0, items: [] }; hubTrucks.push(t); }
-      t.lve += lv; t.items.push(s);
-    });
-    hubTrucks.forEach((t, i) => { t.n = i + 1; t.of = hubTrucks.length; });
-    trucks.push(...hubTrucks);
-  });
-  return trucks;
-}
-function truckHtml(t) {
-  const pct = Math.min(100, Math.round(100 * t.lve / TRUCK_LV));
-  const ready = t.lve >= 0.85 * TRUCK_LV;
-  const room = TRUCK_LV - t.lve;
-  const items = t.items.map(s => {
-    const v = s.lift_vans ? `${s.lift_vans} LV` : s.u_boxes ? `${s.u_boxes} UB` : `${fmtN(s.lift_van_equivalents)} LV`;
-    return `<div class="pt-item" data-id="${esc(s.id)}"><span class="psrc ${s.source === "TMS" ? "tms" : "tim"}">${esc(s.source)}</span><span class="pnm">${esc(s.customer_name)}</span>${windowRisk(s) ? ' <span class="tag window_risk" title="delivery within 7 days">⚠️</span>' : ""}<span class="pt-v">${v}</span></div>`;
-  }).join("");
-  return `<div class="ptruck ${ready ? "ready" : ""}">
-    <div class="pt-h"><span class="pt-t">Truck ${t.n}/${t.of}</span><span class="pt-fill">${fmtN(t.lve)} / ${TRUCK_LV} LV · ${pct}%</span></div>
-    <div class="pgauge"><i class="${ready ? "ok" : ""}" style="width:${pct}%"></i></div>
-    <div class="pt-items">${items}</div>
-    <div class="pt-foot">${ready ? "✓ Ready to dispatch" : `Gathering — room for ${fmtN(room)} more LV`}</div>
-  </div>`;
-}
-function renderPlan(rows) {
-  const trucks = planTrucks(rows);
-  const open = rows.filter(s => s.is_open);
-  const noVol = open.filter(s => !((s.lift_van_equivalents || 0) > 0));
-  const unkHub = open.filter(s => (s.lift_van_equivalents || 0) > 0 && (!s.destination_hub || s.destination_hub === "Unknown"));
-  const totLve = trucks.reduce((t, x) => t + x.lve, 0);
-  const readyN = trucks.filter(t => t.lve >= 0.85 * TRUCK_LV).length;
-  const avgFill = trucks.length ? Math.round(100 * totLve / (trucks.length * TRUCK_LV)) : 0;
-  $("#cnt-plan").textContent = trucks.length;
-
-  const byHub = {};
-  trucks.forEach(t => (byHub[t.hub] = byHub[t.hub] || []).push(t));
-  const hubHtml = HUBS.filter(h => byHub[h]).map(h => {
-    const ts = byHub[h];
-    return `<div class="plan-hub"><div class="plan-hub-h">${esc(h)} <span class="cnt">${ts.length} truck${ts.length > 1 ? "s" : ""}</span></div>
-      <div class="plan-trucks">${ts.map(truckHtml).join("")}</div></div>`;
-  }).join("");
-
-  const summary = `<div class="plan-sum">
-    <div class="m"><b>${trucks.length}</b>trucks suggested</div>
-    <div class="m"><b>${fmtN(totLve)}</b>lift-van equiv. planned</div>
-    <div class="m"><b>${readyN}</b>ready to dispatch (≥85%)</div>
-    <div class="m"><b>${avgFill}%</b>average fill</div>
-  </div>`;
-
-  const notes = [];
-  if (noVol.length) notes.push(`${noVol.length} open shipment${noVol.length > 1 ? "s" : ""} without a parsed volume — not yet plannable (volume comes from the Remisiones workbook / source).`);
-  if (unkHub.length) notes.push(`${unkHub.length} open shipment${unkHub.length > 1 ? "s" : ""} with volume but no mapped hub — extend the destination → hub table.`);
-  notes.push("Prototype: first-fit binning per hub against a 13-LV truck. Fill % is against a 53 ft truck; the real engine adds ready/clearance dates and the 30-day window. Includes both TIM and TMS open shipments.");
-  const noteHtml = `<div class="note">${notes.map(esc).join("<br>")}</div>`;
-
-  $("#plan").innerHTML = trucks.length
-    ? summary + hubHtml + noteHtml
-    : `<div class="empty">No plannable shipments yet — open shipments need a volume and a mapped destination hub.</div>` + noteHtml;
-  document.querySelectorAll("#plan .pt-item").forEach(el => el.onclick = () => openDrawer(el.dataset.id));
 }
 
 function renderKpis() {
   const open = ALL.filter(s => s.is_open);
   const cnt = fn => open.filter(fn).length;
-  const lv = open.reduce((t, s) => t + (s.lift_van_equivalents || 0), 0);
-  const withVol = open.filter(s => s.lift_van_equivalents || s.volume_m3).length;
+  const lv = open.reduce((t, s) => t + pm3(s), 0);
+  const withVol = open.filter(s => pm3(s) > 0).length;
   const tiles = [
     ["open", "", open.length, "Open shipments", "", s => s.is_open],
     ["red", "red", cnt(s => s.status_flags.includes("on_hold") || s.status_flags.includes("payment_pending")), "On hold / payment", "", s => s.status_flags.includes("on_hold") || s.status_flags.includes("payment_pending")],
@@ -394,7 +352,7 @@ function renderKpis() {
     ["stalled", "amber", cnt(s => s.status_flags.includes("stalled")), "Stalled ≥ 7 days", "no checklist progress", s => s.status_flags.includes("stalled")],
     ["border", "", cnt(s => ["in_transit_to_border","customs_clearance"].includes(s.stage)), "At / crossing border", "", s => ["in_transit_to_border","customs_clearance"].includes(s.stage)],
     ["mx", "green", cnt(s => ["at_hub","onward_leg","out_for_delivery"].includes(s.stage)), "In Mexico, delivering", "", s => ["at_hub","onward_leg","out_for_delivery"].includes(s.stage)],
-    ["lv", "", fmtN(lv), "Lift-van equiv. open", withVol ? `${withVol} with volume · ${fmtN(lv/TRUCK_LV)} trucks` : "needs Remisiones sheet", null],
+    ["lv", "", fmtN(lv), "m³ open", withVol ? `${withVol} with volume · ${fmtN(lv/TRUCK_M3)} trailers of ${TRUCK_M3} m³` : "needs Remisiones sheet", null],
   ];
   $("#kpis").innerHTML = tiles.map(t => `<div class="kpi ${t[1]} ${kpiSel && kpiSel.__k === t[0] ? "sel" : ""}" data-k="${t[0]}"><div class="v">${t[2]}</div><div class="l">${t[3]}</div>${t[4] ? `<div class="s">${t[4]}</div>` : ""}</div>`).join("");
   document.querySelectorAll(".kpi").forEach((el, i) => el.onclick = () => {
@@ -424,8 +382,8 @@ function renderBoard(rows) {
   const cols = STAGES.filter(st => (st[0] !== "closed" || showClosed) && (st[0] !== "unknown" || rows.some(s => s.stage === "unknown")));
   $("#board").innerHTML = cols.map(st => {
     const items = rows.filter(s => s.stage === st[0]);
-    const lv = items.reduce((t, s) => t + (s.lift_van_equivalents || 0), 0);
-    return `<div class="col"><h3>${st[1]} <span class="n">${items.length}</span></h3>${lv ? `<div class="lv">${fmtN(lv)} LV equiv.</div>` : ""}${items.map(cardHtml).join("") || '<div style="font-size:11px;color:#aaa;text-align:center;padding:10px">—</div>'}</div>`;
+    const lv = items.reduce((t, s) => t + pm3(s), 0);
+    return `<div class="col"><h3>${st[1]} <span class="n">${items.length}</span></h3>${lv ? `<div class="lv">${fmtN(lv)} m³</div>` : ""}${items.map(cardHtml).join("") || '<div style="font-size:11px;color:#aaa;text-align:center;padding:10px">—</div>'}</div>`;
   }).join("");
   $("#cnt-board").textContent = rows.length;
   document.querySelectorAll("#board .card").forEach(el => el.onclick = () => openDrawer(el.dataset.id));
@@ -457,16 +415,16 @@ function renderHubs(rows) {
   const known = open.filter(s => s.destination_hub && s.destination_hub !== "Unknown");
   const html = HUBS.filter(h => h !== "Unknown").map(h => {
     const items = open.filter(s => s.destination_hub === h);
-    const lv = items.reduce((t, s) => t + (s.lift_van_equivalents || 0), 0);
-    const pct = Math.min(100, Math.round(100 * lv / TRUCK_LV));
-    return `<div class="hub"><div class="hn">${h}</div><div class="hb"><i class="${pct >= 85 ? "ok" : ""}" style="width:${pct}%"></i></div><div class="hv">${items.length} shpt · ${fmtN(lv)} / ${TRUCK_LV} LV</div></div>`;
+    const lv = items.reduce((t, s) => t + pm3(s), 0);
+    const pct = Math.min(100, Math.round(100 * lv / TRUCK_M3));
+    return `<div class="hub"><div class="hn">${h}</div><div class="hb"><i class="${pct >= 85 ? "ok" : ""}" style="width:${pct}%"></i></div><div class="hv">${items.length} shpt · ${fmtN(lv)} / ${TRUCK_M3} m³</div></div>`;
   }).join("");
   const unk = open.length - known.length;
   const rem = DIAG.remisiones || {};
   $("#hubs").innerHTML = html + (unk ? `<div class="note">${unk} open shipment${unk > 1 ? "s" : ""} without a destination hub.${rem.error ? " Destinations and volumes come from the Remisiones workbook — waiting on Files.Read.All access for the Graph app." : " Extend the destination → hub table for the unmapped cities."}</div>` : "");
 }
 
-const COLS = [["customer_name","Customer"],["source","Src"],["agent","Agent"],["reference_number","Reference"],["stage","Stage"],["current_step","Current step"],["days_since_progress","Days idle"],["destination","Destination"],["destination_hub","Hub"],["lift_van_equivalents","LV eq."],["status_flags","Flags"],["assignees","Assigned"],["milestones.green_light","Green light"],["milestones.crossed","Crossed"],["milestones.delivered","Delivered"]];
+const COLS = [["customer_name","Customer"],["source","Src"],["agent","Agent"],["reference_number","Reference"],["stage","Stage"],["current_step","Current step"],["days_since_progress","Days idle"],["destination","Destination"],["destination_hub","Hub"],["planning_m3","m³"],["status_flags","Flags"],["assignees","Assigned"],["milestones.green_light","Green light"],["milestones.crossed","Crossed"],["milestones.delivered","Delivered"]];
 const get = (s, k) => k.includes(".") ? k.split(".").reduce((o, p) => o && o[p], s) : s[k];
 function renderTable(rows) {
   rows = [...rows].sort((a, b) => { let x = get(a, sortKey), y = get(b, sortKey); if (Array.isArray(x)) x = x.join(","); if (Array.isArray(y)) y = y.join(",");
@@ -478,7 +436,7 @@ function renderTable(rows) {
     else if (c[0] === "status_flags") v = (v || []).map(f => `<span class="tag ${f}">${esc(FLAG_LABEL[f] || f)}</span>`).join(" ");
     else if (c[0] === "assignees") v = esc((v || []).join(", "));
     else if (c[0].startsWith("milestones")) v = fmtD(v);
-    else if (c[0] === "lift_van_equivalents") v = v ? fmtN(v) : "—";
+    else if (c[0] === "planning_m3") v = v ? fmtN(v) : "—";
     else if (c[0] === "customer_name") v = s.url ? `<a href="${esc(s.url)}" target="_blank" onclick="event.stopPropagation()">${esc(v)}</a>` : esc(v);
     else v = esc(v ?? "—");
     return `<td>${v}</td>`; }).join("") + "</tr>").join("");
@@ -511,12 +469,11 @@ function openDrawer(id) {
 }
 function closeDrawer() { $("#drawer").classList.remove("open"); $("#overlay").classList.remove("open"); }
 
-["#f-source","#f-agent","#f-flag","#f-hub","#f-stage"].forEach(id => $(id).onchange = render);
+["#f-source","#f-agent","#f-flag","#f-hub","#f-stage"].forEach(id => $(id).onchange = () => { render(); renderPlan(); });
 $("#f-q").oninput = render;
 $("#f-closed").onchange = () => load(false);
 $("#clear").onclick = () => { ["#f-source","#f-agent","#f-flag","#f-hub","#f-stage"].forEach(id => $(id).value = ""); $("#f-q").value = ""; kpiSel = null; render(); };
 $("#view-board").onclick = () => { view = "board"; render(); };
-$("#view-plan").onclick = () => { view = "plan"; render(); };
 $("#view-table").onclick = () => { view = "table"; render(); };
 $("#refresh").onclick = () => load(true);
 $("#dclose").onclick = closeDrawer; $("#overlay").onclick = closeDrawer;

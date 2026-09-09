@@ -12,6 +12,7 @@ TODAY = dt.date(2026, 9, 9)
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
     for k in ("CB_ALERT_EMAILS", "CB_ALERT_FOLDER_OWNERS", "CB_ALERT_DEFAULT_OWNER",
+              "CB_ALERT_TIM_OWNER", "CB_ALERT_TMS_OWNER",
               "CB_ALERT_CC", "CB_ALERT_FALLBACK", "ALERT_EMAIL", "CB_ALERTS_ENABLED",
               "CB_ALERT_REPEAT_HOURS", "PLAN_WINDOW_RISK_DAYS", "DRY_RUN"):
         monkeypatch.delenv(k, raising=False)
@@ -56,56 +57,80 @@ def test_tms_window_risk_uses_the_delivery_date():
 
 
 # ── ownership ────────────────────────────────────────────────────────────────
-def test_unassigned_tim_falls_back_to_folder_owner_then_default(monkeypatch):
-    name, to, resolved = alerts.owner_for(tim(7, "Sin dueño", flags=["stalled"]))
-    assert (name, resolved) == ("Fernanda Viana", False)
-    assert to == "bbrill@thelsa.com"           # never a guessed address
-
-    monkeypatch.setenv("CB_ALERT_FOLDER_OWNERS", "UHaul:Diana")
-    monkeypatch.setenv("CB_ALERT_EMAILS", "Diana:diana@thelsa.com")
-    assert alerts.owner_for(tim(8, "x", agent="UHaul")) == ("Diana", "diana@thelsa.com", True)
+def test_ownership_follows_the_source_system():
+    """Bill's rule: every ClickUp file is Fernanda Mora's, every Moveware file is
+    Sara's — regardless of who is assigned on the record."""
+    assert alerts.owner_for(tim(7, "Sin dueño", flags=["stalled"])) == (
+        "Fernanda Mora", "fernandamora@thelsa.com", True)
+    assert alerts.owner_for(tms(8, "x")) == ("Sara Reyes", "sarareyes@thelsa.com", True)
 
 
-def test_assignee_and_moveware_email_win(monkeypatch):
+def test_record_assignees_no_longer_route(monkeypatch):
     monkeypatch.setenv("CB_ALERT_EMAILS", '{"Erica":"erica@thelsa.com"}')
-    assert alerts.owner_for(tim(9, "x", assignees=["Erica"])) == ("Erica", "erica@thelsa.com", True)
-    # a known assignee is preferred over the first one alphabetically
-    assert alerts.owner_for(tim(10, "x", assignees=["aaa_unknown", "Erica"]))[0] == "Erica"
-    # Moveware carries the coordinator's own address
-    assert alerts.owner_for(tms(11, "x", manager="Sara Reyes", email="sara@thelsa.com")) == (
-        "Sara Reyes", "sara@thelsa.com", True)
+    # a ClickUp assignee does not take the file away from the TIM owner
+    assert alerts.owner_for(tim(9, "x", assignees=["Erica"]))[0] == "Fernanda Mora"
+    # nor does a Moveware move manager who is not the TMS owner
+    assert alerts.owner_for(tms(10, "x", manager="Erica", email="erica@thelsa.com"))[0] == "Sara Reyes"
 
 
-def test_fallback_inbox_is_configurable(monkeypatch):
+def test_moveware_supplies_the_address_when_the_manager_is_the_owner(monkeypatch):
+    monkeypatch.setenv("CB_ALERT_TMS_OWNER", "Elizabeth Hernandez")
+    assert alerts.owner_for(tms(11, "x", manager="Elizabeth Hernandez",
+                                email="elizabethhernandez@thelsa.com")) == (
+        "Elizabeth Hernandez", "elizabethhernandez@thelsa.com", True)
+
+
+def test_owners_and_folder_overrides_are_configurable(monkeypatch):
+    monkeypatch.setenv("CB_ALERT_TIM_OWNER", "Diana Aguirre")
+    monkeypatch.setenv("CB_ALERT_EMAILS", "Diana Aguirre:dianaaguirre@thelsa.com")
+    assert alerts.owner_for(tim(12, "x")) == ("Diana Aguirre", "dianaaguirre@thelsa.com", True)
+    monkeypatch.setenv("CB_ALERT_FOLDER_OWNERS", "UHaul:Gustavo")
+    assert alerts.owner_for(tim(13, "x", agent="UHaul"))[0] == "Gustavo"
+    assert alerts.owner_for(tim(14, "x", agent="Logicstics"))[0] == "Diana Aguirre"
+
+
+def test_unknown_owner_goes_to_the_fallback_inbox_never_a_guess(monkeypatch):
+    monkeypatch.setenv("CB_ALERT_TIM_OWNER", "Somebody New")
+    assert alerts.owner_for(tim(15, "x")) == ("Somebody New", "bbrill@thelsa.com", False)
     monkeypatch.setenv("CB_ALERT_FALLBACK", "gustavo@thelsa.com")
-    assert alerts.owner_for(tim(12, "x"))[1] == "gustavo@thelsa.com"
+    assert alerts.owner_for(tim(16, "x"))[1] == "gustavo@thelsa.com"
 
 
 # ── grouping and the email ───────────────────────────────────────────────────
-def test_build_alerts_groups_by_owner_and_sorts_by_urgency(monkeypatch):
-    monkeypatch.setenv("CB_ALERT_EMAILS", "Diana:diana@thelsa.com,Erica:erica@thelsa.com")
+def test_build_alerts_groups_by_owner_and_sorts_by_urgency():
     ships = [
         tim(20, "Stalled one", flags=["stalled"], assignees=["Diana"], days_since=9),
-        tim(21, "On hold", flags=["on_hold"], assignees=["Diana"]),
-        tim(22, "Clean", assignees=["Diana"]),
+        tim(21, "On hold", flags=["on_hold"]),
+        tim(22, "Clean"),
         tms(23, "Late", manager="Erica", delivery=dt.date(2026, 9, 10)),
     ]
     out = alerts.build_alerts(ships, TODAY)
-    assert [a["owner"] for a in out] == ["Diana", "Erica"]      # busiest first
-    diana = out[0]
-    assert diana["to"] == "diana@thelsa.com" and diana["resolved"]
-    assert diana["shipment_count"] == 2                          # the clean one is out
-    assert [r["customer"] for r in diana["shipments"]] == ["On hold", "Stalled one"]
-    assert "On hold" in diana["subject"].lower() or "on hold" in diana["subject"]
-    body = diana["body"]
-    assert body.index("Hola Diana") < body.index("Hi Diana")     # Spanish first
+    assert [a["owner"] for a in out] == ["Fernanda Mora", "Sara Reyes"]   # busiest first
+    fer = out[0]
+    assert fer["to"] == "fernandamora@thelsa.com" and fer["resolved"]
+    assert fer["shipment_count"] == 2                             # the clean one is out
+    assert [r["customer"] for r in fer["shipments"]] == ["On hold", "Stalled one"]
+    assert "on hold" in fer["subject"].lower()
+    body = fer["body"]
+    assert body.index("Hola Fernanda Mora") < body.index("Hi Fernanda Mora")   # Spanish first
     assert "En espera / detenido" in body and "On hold" in body
     assert "9 días sin avance" in body and "9 days without progress" in body
     assert "https://app.clickup.com/x/v/li/20" in body
-    assert "CB_ALERT_EMAILS" not in body                         # resolved → no routing note
+    assert "CB_ALERT_EMAILS" not in body                          # resolved → no routing note
+    # the Moveware file went to Sara even though Erica is its move manager
+    assert out[1]["to"] == "sarareyes@thelsa.com"
 
 
-def test_unresolved_owner_gets_a_routing_note_and_the_fallback_inbox():
+def test_subject_agrees_in_number():
+    one = alerts.build_alerts([tim(24, "Uno", flags=["on_hold"])], TODAY)[0]["subject"]
+    assert "1 embarque requiere atención" in one and "1 shipment needs attention" in one
+    two = alerts.build_alerts([tim(25, "Uno", flags=["on_hold"]),
+                               tim(26, "Dos", flags=["on_hold"])], TODAY)[0]["subject"]
+    assert "2 embarques requieren atención" in two and "2 shipments need attention" in two
+
+
+def test_unresolved_owner_gets_a_routing_note_and_the_fallback_inbox(monkeypatch):
+    monkeypatch.setenv("CB_ALERT_TIM_OWNER", "Somebody New")
     a = alerts.build_alerts([tim(30, "Nadie", flags=["on_hold"])], TODAY)[0]
     assert a["to"] == "bbrill@thelsa.com" and not a["resolved"]
     assert "CB_ALERT_EMAILS" in a["body"]
@@ -176,12 +201,11 @@ def test_create_drafts_uses_the_mailer_and_only_ever_drafts(monkeypatch):
     monkeypatch.setitem(sys.modules, "engine.mailer", mod)
     monkeypatch.setattr(alerts, "_load_state", lambda: {})
     monkeypatch.setattr(alerts, "_save_state", lambda s: None)
-    monkeypatch.setenv("CB_ALERT_EMAILS", "Diana:diana@thelsa.com")
 
     out = alerts.create_drafts([tim(51, "Ana", flags=["on_hold"], assignees=["Diana"])],
                                actor="bill", today=TODAY)
     assert out["alert_count"] == 1 and out["drafts"][0]["ok"] and out["mode"] == "draft"
-    assert made and made[0]["to"] == "diana@thelsa.com"
+    assert made and made[0]["to"] == "fernandamora@thelsa.com"
 
 
 def test_alerts_enabled_switch(monkeypatch):

@@ -274,14 +274,14 @@ function renderPlan() {
   const loads = (p.loads || []).filter(l => !src || l.sources[src]);
   $("#cnt-loads").textContent = loads.length;
   const s = p.summary || {};
-  $("#plan-stats").textContent = p.error ? p.error : `53' trailer = ${p.truck_m3} m³ · ${p.ready} ready · ${p.coming} coming · avg fill ${s.avg_fill_pct || 0}% · ${s.light || 0} light · ${s.cross_silo || 0} TIM+TMS`;
+  $("#plan-stats").textContent = p.error ? p.error : `53' trailer = ${p.truck_m3} m³ · ${p.ready} ready · ${p.coming} coming · ${p.unsized || 0} without volume · avg fill ${s.avg_fill_pct || 0}% · ${s.light || 0} light · ${s.cross_silo || 0} TIM+TMS`;
   const oppByLane = Object.fromEntries((p.opportunities || []).map(o => [o.lane, o]));
   $("#loads").innerHTML = loads.length ? loads.map((l, n) => {
     const pct = Math.min(100, l.fill_pct);
     const cls = l.fill_pct >= 85 ? "ok" : (l.light ? "lt" : "");
     const opp = oppByLane[l.lane];
     return `<div class="load ${l.light ? "light" : ""}">
-      <h4>${esc(l.lane)} ${l.fill_pct >= 85 ? '<span class="tag full">Full</span>' : ""}${l.light ? '<span class="tag light">Running light</span>' : ""}${l.cross_silo ? '<span class="tag xs">TIM + TMS</span>' : ""}${l.window_risk.length ? `<span class="tag risk">${l.window_risk.length} window risk</span>` : ""}</h4>
+      <h4>${esc(l.lane)} ${l.fill_pct >= 85 ? '<span class="tag full">Full</span>' : ""}${l.light ? '<span class="tag light">Running light</span>' : ""}${l.cross_silo ? '<span class="tag xs">TIM + TMS</span>' : ""}${l.window_risk.length ? `<span class="tag risk">${l.window_risk.length} window risk</span>` : ""}${l.anchors > 1 ? '<span class="tag anchor">2 FTL jobs share</span>' : ""}</h4>
       <div class="fillbar"><i class="${cls}" style="width:${pct}%"></i></div>
       <div class="fl"><span>${l.m3} / ${l.truck_m3} m³ · ${l.fill_pct}%${l.kg ? ` · ${fmtN(l.kg)} kg` : ""}</span><span>${l.depart_by ? "depart by " + fmtD(l.depart_by) : ""}</span></div>
       ${l.shipments.map(it => `<div class="row" data-id="${esc(it.id)}"><div class="who"><b>${esc(it.customer)}</b>${it.anchor ? ' <span class="tag anchor">anchor</span>' : ""}${l.window_risk.includes(it.id) ? ' <span class="tag risk">by ' + fmtD(it.deadline) + '</span>' : ""}<br><span class="rs">${esc(it.source)} · ${esc(it.agent || "")}${it.reference ? " · " + esc(it.reference) : ""} · → ${esc(it.destination || "?")}${it.service ? " · " + esc(it.service) : ""}</span></div><div class="m3">${it.m3} m³</div></div>`).join("")}
@@ -289,8 +289,12 @@ function renderPlan() {
     </div>`; }).join("") : `<div class="empty">${p.error ? "" : "No consolidatable shipments are ready right now."}</div>`;
   document.querySelectorAll("#loads .row").forEach(el => el.onclick = () => openDrawer(el.dataset.id));
   const cb = p.coming_by_lane || {}; const lanes = Object.keys(cb).filter(k => !src || cb[k].some(i => i.source === src));
-  $("#coming").style.display = lanes.length ? "" : "none";
-  $("#coming").innerHTML = lanes.length ? "<b>Coming (not yet ready):</b> " + lanes.map(k => `${esc(k)}: ` + cb[k].filter(i => !src || i.source === src).map(i => `${esc(i.customer)} (${i.m3} m³${i.ready_date ? ", " + fmtD(i.ready_date) : ""})`).join(", ")).join(" · ") : "";
+  const ub = p.unsized_by_lane || {}; const ulanes = Object.keys(ub).filter(k => !src || ub[k].some(i => i.source === src));
+  const parts = [];
+  if (lanes.length) parts.push("<b>Coming (not yet ready):</b> " + lanes.map(k => `${esc(k)}: ` + cb[k].filter(i => !src || i.source === src).map(i => `${esc(i.customer)} (${i.m3} m³${i.ready_date ? ", " + fmtD(i.ready_date) : ""})`).join(", ")).join(" · "));
+  if (ulanes.length) parts.push(`<b>Not plannable — no volume on record (${p.unsized}):</b> ` + ulanes.map(k => `${esc(k)}: ` + ub[k].filter(i => !src || i.source === src).map(i => esc(i.customer)).join(", ")).join(" · "));
+  $("#coming").style.display = parts.length ? "" : "none";
+  $("#coming").innerHTML = parts.join("<br><br>");
 }
 
 $("#plan-draft").onclick = async () => {

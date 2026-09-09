@@ -49,6 +49,24 @@ WINDOW_RISK_DAYS = int(os.environ.get("PLAN_WINDOW_RISK_DAYS", "7") or 7)
 TRUCK_METHODS = {"", "ROAD", "TRUCK", "LAND", "GROUND"}
 FULL_SERVICES = {"FTL"}
 NON_TRUCK_SERVICES = {"FCL 20", "FCL 40", "FCL 40HC", "AIR"}
+# Anything above this in "m³" cannot be household goods on one truck — it was
+# almost certainly typed in cubic feet. We convert and say so.
+IMPLAUSIBLE_M3 = float(os.environ.get("PLAN_IMPLAUSIBLE_M3", "150") or 150)
+CUFT_PER_M3 = 35.3147
+
+US_STATES = {"alabama", "alaska", "arizona", "arkansas", "california", "colorado", "connecticut", "delaware", "florida",
+             "georgia", "hawaii", "idaho", "illinois", "indiana", "iowa", "kansas", "kentucky", "louisiana", "maine",
+             "maryland", "massachusetts", "michigan", "minnesota", "mississippi", "missouri", "montana", "nebraska",
+             "nevada", "new hampshire", "new jersey", "new mexico", "new york", "north carolina", "north dakota", "ohio",
+             "oklahoma", "oregon", "pennsylvania", "rhode island", "south carolina", "south dakota", "tennessee", "texas",
+             "utah", "vermont", "virginia", "washington", "west virginia", "wisconsin", "wyoming", "district of columbia"}
+US_STATE_ABBR = {"tx": "texas", "ca": "california", "fl": "florida", "az": "arizona", "nm": "new mexico", "nc": "north carolina",
+                 "sc": "south carolina", "ny": "new york", "nj": "new jersey", "il": "illinois", "oh": "ohio", "mi": "michigan",
+                 "wi": "wisconsin", "tn": "tennessee", "ga": "georgia", "va": "virginia", "wa": "washington", "co": "colorado",
+                 "nv": "nevada", "ut": "utah", "or": "oregon", "pa": "pennsylvania", "ma": "massachusetts", "md": "maryland",
+                 "mn": "minnesota", "mo": "missouri", "la": "louisiana", "ok": "oklahoma", "ks": "kansas", "in": "indiana"}
+CA_PROVINCES = {"ontario", "quebec", "british columbia", "alberta", "manitoba", "saskatchewan", "nova scotia",
+                "new brunswick", "newfoundland", "prince edward island"}
 
 
 @dataclass
@@ -61,6 +79,7 @@ class Item:
     deadline: dt.date | None          # latest sensible departure (delivery window)
     anchor: bool = False
     reasons: list[str] = field(default_factory=list)
+    sized: bool = True
 
     @property
     def id(self) -> str:
@@ -112,6 +131,7 @@ class Load:
             "truck_m3": TRUCK_53_M3, "m3": self.m3, "kg": self.kg, "fill_pct": round(self.fill * 100),
             "spare_m3": self.spare_m3, "light": self.fill < MIN_FILL_TO_SUGGEST,
             "anchor": self.anchor.id if self.anchor else None,
+            "anchors": sum(1 for i in self.items if i.anchor),
             "sources": srcs, "cross_silo": all(srcs.get(k) for k in ("TIM", "TMS")),
             "ready_by": self.ready_by.isoformat() if self.ready_by else None,
             "depart_by": self.depart_by.isoformat() if self.depart_by else None,
@@ -151,11 +171,28 @@ def lane_for(s: Shipment) -> tuple[str, str]:
     if dirn == "import":
         hub = s.destination_hub.value if s.destination_hub is not Hub.UNKNOWN else "Unassigned hub"
         return f"Import → {hub}", hub
-    # exports: group by destination state/province (last token of "City, State")
-    dest = s.destination or ""
-    region = dest.split(",")[-1].strip() if "," in dest else dest.strip()
-    region = region or (s.extra or {}).get("destination_country") or "?"
+    region = export_region(s)
     return f"Export → {region}", region
+
+
+def export_region(s: Shipment) -> str:
+    """Normalize an export destination to a state/province: 'Brownsville, Texas',
+    'TEXAS', 'United States Charlotte North Carolina' and 'TX' all → 'Texas'."""
+    dest = (s.destination or "").strip()
+    low = dest.lower().replace(".", "")
+    for name in sorted(US_STATES | CA_PROVINCES, key=len, reverse=True):
+        if name in low:
+            return name.title()
+    tokens = [t.strip() for t in dest.replace("/", ",").split(",") if t.strip()]
+    last = tokens[-1].lower() if tokens else ""
+    if last in US_STATE_ABBR:
+        return US_STATE_ABBR[last].title()
+    for t in reversed(tokens):
+        tl = t.lower()
+        if tl not in ("united states", "usa", "us", "canada", "estados unidos", "eeuu"):
+            return t.title()
+    country = (s.extra or {}).get("destination_country") or ""
+    return {"US": "United States", "CA": "Canada"}.get(country, country or "?")
 
 
 def make_item(s: Shipment, today: dt.date) -> Item | None:
@@ -168,8 +205,11 @@ def make_item(s: Shipment, today: dt.date) -> Item | None:
         return None                      # already at hub / delivering / closed
     m3 = s.planning_m3
     reasons: list[str] = []
+    if m3 > IMPLAUSIBLE_M3:
+        reasons.append(f"{m3} m³ on record is not possible for one truck — read as cubic feet ({round(m3 / CUFT_PER_M3, 2)} m³); fix in the source")
+        m3 = round(m3 / CUFT_PER_M3, 2)
     if m3 <= 0:
-        reasons.append("no volume on record — counted as 0 m³, confirm before loading")
+        reasons.append("no volume on record — cannot be planned until a volume is entered")
     kg = float(s.weight or 0.0)
     if s.source is Source.TIM:
         ready = s.stage in READY_STAGES
@@ -190,8 +230,10 @@ def make_item(s: Shipment, today: dt.date) -> Item | None:
     if anchor:
         reasons.append("full-truck job — anchors its own trailer" if _service(s) in FULL_SERVICES
                        else f"{m3} m³ is ≥ {int(ANCHOR_FRACTION * 100)}% of a trailer — anchors its own trailer")
-    return Item(shipment=s, m3=m3, kg=kg, ready=ready, ready_date=ready_date, deadline=deadline,
-                anchor=anchor, reasons=reasons)
+    it = Item(shipment=s, m3=m3, kg=kg, ready=ready, ready_date=ready_date, deadline=deadline,
+              anchor=anchor, reasons=reasons)
+    it.sized = m3 > 0
+    return it
 
 
 # ── packing ──────────────────────────────────────────────────────────────────
@@ -205,9 +247,16 @@ def pack_lane(lane: str, direction: str, hub: str, items: list[Item], today: dt.
     """Anchors first (each gets its own trailer), then first-fit-decreasing
     by urgency for the rest; a new trailer opens only when nothing fits."""
     loads: list[Load] = []
-    for a in sorted([i for i in items if i.anchor], key=lambda i: _urgency(i, today)):
-        ld = Load(lane=lane, direction=direction, hub=hub, items=[a], anchor=a)
-        loads.append(ld)
+    # Anchors (FTL / half-trailer jobs) open trailers — but two anchors that fit
+    # together share one: that is exactly the "trailer running light" case Bill
+    # wants surfaced (two 35 m³ FTL exports on the same lane = one 70 m³ truck).
+    for a in sorted([i for i in items if i.anchor], key=lambda i: (_urgency(i, today), -i.m3)):
+        target = next((ld for ld in sorted(loads, key=lambda l: -l.m3) if ld.fits(a)), None)
+        if target is None:
+            loads.append(Load(lane=lane, direction=direction, hub=hub, items=[a], anchor=a))
+        else:
+            target.items.append(a)
+            a.reasons.append("shares a trailer with another full-truck job — confirm both customers accept a shared trailer")
     rest = sorted([i for i in items if not i.anchor], key=lambda i: _urgency(i, today))
     for it in rest:
         target = None
@@ -228,8 +277,9 @@ def plan(shipments: list[Shipment], today: dt.date | None = None) -> dict:
     """Build the suggested loads. Returns a JSON-ready dict."""
     today = today or dt.date.today()
     items = [it for it in (make_item(s, today) for s in shipments) if it]
-    ready = [i for i in items if i.ready]
-    coming = [i for i in items if not i.ready]
+    unsized = [i for i in items if not i.sized]
+    ready = [i for i in items if i.ready and i.sized]
+    coming = [i for i in items if not i.ready and i.sized]
     by_lane: dict[str, list[Item]] = {}
     meta: dict[str, tuple[str, str]] = {}
     for it in ready:
@@ -272,8 +322,9 @@ def plan(shipments: list[Shipment], today: dt.date | None = None) -> dict:
     return {
         "as_of": today.isoformat(), "truck_m3": TRUCK_53_M3, "truck_kg": TRUCK_53_KG,
         "min_fill_pct": round(MIN_FILL_TO_SUGGEST * 100), "horizon_days": HORIZON_DAYS,
-        "eligible": len(items), "ready": len(ready), "coming": len(coming),
+        "eligible": len(items), "ready": len(ready), "coming": len(coming), "unsized": len(unsized),
         "excluded": len([s for s in shipments if s.is_open]) - len(items),
+        "unsized_by_lane": _group_ids(unsized),
         "loads": out_loads,
         "opportunities": sorted(opportunities, key=lambda o: -o["spare_m3"]),
         "coming_by_lane": {k: [{"id": i.id, "customer": i.shipment.customer_name, "source": i.shipment.source.value,
@@ -289,6 +340,14 @@ def plan(shipments: list[Shipment], today: dt.date | None = None) -> dict:
             "planned_m3": round(sum(l["m3"] for l in out_loads), 1),
         },
     }
+
+
+def _group_ids(items: list[Item]) -> dict:
+    out: dict = {}
+    for i in items:
+        out.setdefault(lane_for(i.shipment)[0], []).append({"id": i.id, "customer": i.shipment.customer_name,
+                                                             "source": i.shipment.source.value, "stage": i.shipment.stage.value})
+    return out
 
 
 def _advice(ld: Load, addable: list[Item], add_m3: float, today: dt.date) -> str:
@@ -334,6 +393,11 @@ def email_body(p: dict, site: str = "https://thelsa.inflectionpointnow.com/cross
         L.append("COMING (not yet ready — documents pending or uplift ahead)")
         for lane, its in p["coming_by_lane"].items():
             L.append(f"- {lane}: " + ", ".join(f"{i['customer']} ({i['m3']} m³{', ' + i['ready_date'] if i['ready_date'] else ''})" for i in its))
+        L.append("")
+    if p.get("unsized"):
+        L.append(f"NOT PLANNABLE — {p['unsized']} shipments have no volume on record (enter a volume in ClickUp / the Remisiones sheet / Moveware):")
+        for lane, its in p["unsized_by_lane"].items():
+            L.append(f"- {lane}: " + ", ".join(f"[{i['source']}] {i['customer']}" for i in its))
         L.append("")
     L.append(f"Live board: {site}")
     L.append("Reply with changes; a coordinator confirms every load before anything is booked.")

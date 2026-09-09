@@ -8,6 +8,7 @@ the dashboard and the consolidation engine treat the two silos identically.
 from __future__ import annotations
 
 import datetime as dt
+import os
 import re
 import unicodedata
 from dataclasses import asdict, dataclass, field
@@ -63,8 +64,21 @@ U_BOX_LIFT_VAN_EQUIV = TRUCK_53_LIFT_VANS / TRUCK_53_U_BOXES
 # cubic-metre volume (Moveware / Remisiones "cdm") into truck slots when no
 # explicit lift-van / U-box count exists. Confirm with the team (spec §12).
 LIFT_VAN_M3 = 5.7
+# A U-box (~95" x 56" x 83" outside) holds roughly 257 cuft ≈ 7.3 m³.
+U_BOX_M3 = 7.3
 CUFT_PER_M3 = 35.3147
 TIM_DELIVERY_WINDOW_DAYS = 30
+
+# Bill's rule (2026-09-09): a 53 ft freight trailer carries about 20,000 lb of
+# household goods; at a density factor of 6.5 lb/cuft that is ~3,077 cuft ≈ 88 m³
+# of usable space. The consolidation engine plans in m³ against this number and
+# flags any trailer running below it as a candidate to take another load.
+TRUCK_53_LBS = 20000
+HHG_DENSITY_LB_PER_CUFT = 6.5
+TRUCK_53_CUFT = round(TRUCK_53_LBS / HHG_DENSITY_LB_PER_CUFT)          # 3077
+TRUCK_53_M3 = round(TRUCK_53_CUFT / CUFT_PER_M3)                        # 87 → use 88
+TRUCK_53_M3 = int(os.environ.get("TRUCK_53_M3", "88") or 88)
+TRUCK_53_KG = round(TRUCK_53_LBS * 0.4536)                              # 9072
 
 
 # ── Destination → hub lookup (DRAFT — open item §12) ────────────────────────────
@@ -248,6 +262,14 @@ class Shipment:
     def is_open(self) -> bool:
         return self.stage in OPEN_STAGES or self.stage is Stage.UNKNOWN
 
+    @property
+    def planning_m3(self) -> float:
+        """Volume the consolidation engine plans with: measured m³ first, else
+        lift-van / U-box counts converted, else 0 (unknown)."""
+        if self.volume_m3:
+            return round(float(self.volume_m3), 2)
+        return round((self.lift_vans or 0) * LIFT_VAN_M3 + (self.u_boxes or 0) * U_BOX_M3, 2)
+
     def days_to_delivery(self, today: Optional[dt.date] = None) -> Optional[int]:
         if not self.delivery_date:
             return None
@@ -262,5 +284,6 @@ class Shipment:
             d[k] = d[k].isoformat() if d[k] else None
         d["milestones"] = {k: (v.isoformat() if v else None) for k, v in self.milestones.items()}
         d["lift_van_equivalents"] = self.lift_van_equivalents
+        d["planning_m3"] = self.planning_m3
         d["is_open"] = self.is_open
         return d

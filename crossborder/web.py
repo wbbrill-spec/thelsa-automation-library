@@ -17,6 +17,10 @@ Routes:
   /crossborder                     the dashboard page (dashboard.py).
   /crossborder/api/shipments       JSON: normalized shipments + status +
                                    diagnostics (cached 5 min; ?refresh=1 to force).
+  /crossborder/api/plan            JSON: the consolidation engine's suggested loads.
+  /crossborder/plan/draft  (POST)  create the suggested-load email as a DRAFT in
+                                   the Thelsa mailbox (never sends). Also runs
+                                   daily at PLAN_EMAIL_HOUR when PLAN_EMAIL_ENABLED=1.
 """
 from __future__ import annotations
 
@@ -28,7 +32,7 @@ import time
 
 from flask import Blueprint, jsonify, redirect, request, session, url_for
 
-from . import clickup, remisiones, tim, tms
+from . import clickup, engine, remisiones, tim, tms
 from .dashboard import DASHBOARD_HTML
 
 log = logging.getLogger(__name__)
@@ -246,10 +250,98 @@ def api_shipments():
                     "shipments": [s.to_dict() for s in shipments]})
 
 
+@crossborder_bp.route("/crossborder/api/plan")
+@_login_required
+def api_plan():
+    shipments, diag, status = load_shipments()
+    try:
+        p = engine.plan(shipments)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("plan failed")
+        return jsonify({"error": f"{type(exc).__name__}: {exc}", "loads": []}), 200
+    p["status"] = status
+    return jsonify(p)
+
+
+def _plan_recipients() -> list[str]:
+    raw = os.environ.get("PLAN_EMAIL_TO", "") or ""
+    return [x.strip() for x in raw.replace(";", ",").split(",") if x.strip()]
+
+
+def create_plan_draft(actor: str = "scheduler") -> dict:
+    """Build today's plan and file it as a DRAFT email (Graph). Never sends."""
+    shipments, diag, status = load_shipments()
+    if not shipments:
+        return {"ok": False, "reason": "no shipments loaded yet"}
+    p = engine.plan(shipments)
+    subject, body = engine.email_body(p)
+    to = _plan_recipients() or [os.environ.get("GRAPH_SENDER", "bbrill@thelsa.com")]
+    try:
+        from engine.mailer import GraphMailer   # the library's app-only Graph adapter (draft-only use here)
+        mailer = GraphMailer()
+        d = mailer.create_draft(to[0], subject, body, cc=to[1:],
+                                folder=os.environ.get("PLAN_EMAIL_DRAFT_FOLDER") or None)
+        out = {"ok": True, "to": to, "subject": subject, "draft_id": d.get("id"), "folder": d.get("folder"),
+               "webLink": d.get("webLink"), "actor": actor, "trailers": p["summary"]["trailers"]}
+    except Exception as exc:  # noqa: BLE001
+        log.exception("plan draft failed")
+        out = {"ok": False, "reason": f"{type(exc).__name__}: {exc}", "to": to, "subject": subject}
+    with _LOCK:
+        _PLAN_STATE["last"] = {**out, "at": time.time()}
+    return out
+
+
+_PLAN_STATE: dict = {"last": None, "thread": None}
+
+
+def _plan_scheduler():
+    """Once a day at PLAN_EMAIL_HOUR (server local time, default 07:00) file the
+    suggested-load draft — only when PLAN_EMAIL_ENABLED=1."""
+    import datetime as _dt
+    last_day = None
+    while True:
+        try:
+            if os.environ.get("PLAN_EMAIL_ENABLED") == "1":
+                hour = int(os.environ.get("PLAN_EMAIL_HOUR", "7") or 7)
+                now = _dt.datetime.now()
+                if now.hour >= hour and last_day != now.date():
+                    ensure_fresh()
+                    time.sleep(90)            # let the refresh land
+                    create_plan_draft(actor="scheduler")
+                    last_day = now.date()
+        except Exception:  # noqa: BLE001
+            log.exception("plan scheduler")
+        time.sleep(300)
+
+
+def ensure_plan_scheduler():
+    with _LOCK:
+        if _PLAN_STATE["thread"] is None:
+            t = threading.Thread(target=_plan_scheduler, daemon=True, name="crossborder-plan-scheduler")
+            t.start()
+            _PLAN_STATE["thread"] = t
+
+
+@crossborder_bp.route("/crossborder/plan/draft", methods=["POST"])
+@_login_required
+def plan_draft():
+    return jsonify(create_plan_draft(actor=session.get("user_email", "user")))
+
+
+@crossborder_bp.route("/crossborder/plan/status")
+@_login_required
+def plan_status():
+    with _LOCK:
+        last = _PLAN_STATE["last"]
+    return jsonify({"enabled": os.environ.get("PLAN_EMAIL_ENABLED") == "1",
+                    "hour": os.environ.get("PLAN_EMAIL_HOUR", "7"), "to": _plan_recipients(), "last": last})
+
+
 @crossborder_bp.route("/crossborder")
 @crossborder_bp.route("/crossborder/")
 @_login_required
 def index():
     """The dashboard page (renders client-side from /crossborder/api/shipments)."""
     ensure_fresh()   # warm the cache so the page has data by the time it asks
+    ensure_plan_scheduler()
     return DASHBOARD_HTML

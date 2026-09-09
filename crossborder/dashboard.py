@@ -146,6 +146,9 @@ td a { color: #1967d2; text-decoration: none; }
 .ms .todo { color: #bbb; }
 #overlay { position: fixed; inset: 0; background: rgba(0,0,0,.2); display: none; z-index: 15; }
 #overlay.open { display: block; }
+.langtog { display: inline-flex; border: 1px solid #d9dbe0; border-radius: 7px; overflow: hidden; }
+.langtog button { background: #fff; color: #666; border: 0; padding: 3px 9px; font: inherit; font-size: 11px; font-weight: 700; cursor: pointer; }
+.langtog button.on { background: #c0392b; color: #fff; }
 </style>
 </head>
 <body>
@@ -156,7 +159,8 @@ td a { color: #1967d2; text-decoration: none; }
     <span id="src-rem" class="pill">Remisiones · —</span>
     <span id="src-tms" class="pill">Moveware · pending</span>
     <span id="asof">—</span>
-    <a href="/">← Library</a>
+    <span class="langtog"><button id="lang-en" class="on">EN</button><button id="lang-es">ES</button></span>
+    <a href="/" id="lib-link">← Library</a>
   </div>
 </header>
 <main>
@@ -178,11 +182,11 @@ td a { color: #1967d2; text-decoration: none; }
   <div class="kpis" id="kpis"></div>
 
   <div id="board-view">
-    <div class="section">Pipeline <span class="cnt" id="cnt-board">0</span></div>
+    <div class="section"><span data-i18n="Pipeline">Pipeline</span> <span class="cnt" id="cnt-board">0</span></div>
     <div class="board" id="board"></div>
 
     <div class="plan-head">
-      <div class="section">Suggested loads <span class="cnt" id="cnt-loads">0</span></div>
+      <div class="section"><span data-i18n="Suggested loads">Suggested loads</span> <span class="cnt" id="cnt-loads">0</span></div>
       <span class="plan-stats" id="plan-stats"></span>
       <span class="spacer"></span>
       <button class="btn" id="plan-draft">✉ Draft today's load email</button>
@@ -194,7 +198,7 @@ td a { color: #1967d2; text-decoration: none; }
     <div class="grid2">
       <div>
         <div class="plan-head">
-          <div class="section">Needs attention <span class="cnt" id="cnt-alerts">0</span></div>
+          <div class="section"><span data-i18n="Needs attention">Needs attention</span> <span class="cnt" id="cnt-alerts">0</span></div>
           <span class="spacer"></span>
           <button class="btn" id="alert-draft">✉ Draft owner alerts</button>
         </div>
@@ -202,14 +206,14 @@ td a { color: #1967d2; text-decoration: none; }
         <div class="panel alerts" id="alerts"></div>
       </div>
       <div>
-        <div class="section">Hub load (open imports, m³ vs one 53' trailer)</div>
+        <div class="section" data-i18n="Hub load (open imports, m³ vs one 53' trailer)">Hub load (open imports, m³ vs one 53' trailer)</div>
         <div class="panel hubs" id="hubs"></div>
       </div>
     </div>
   </div>
 
   <div id="table-view" style="display:none">
-    <div class="section">All shipments <span class="cnt" id="cnt-table">0</span></div>
+    <div class="section"><span data-i18n="All shipments">All shipments</span> <span class="cnt" id="cnt-table">0</span></div>
     <div class="tblwrap"><table id="tbl"><thead></thead><tbody></tbody></table></div>
   </div>
 </main>
@@ -242,6 +246,87 @@ const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;
 const fmtN = n => n == null ? "—" : (Math.round(n*10)/10).toLocaleString();
 const fmtD = s => s ? s.slice(5).replace("-", "/") : "—";
 const money = n => n == null ? "—" : "$" + Math.round(n).toLocaleString();
+
+// ── i18n: English → Spanish. Keys are the English UI strings; tr() returns the
+// active-language text (falls back to the key, so any unlisted string stays EN).
+const ES = {
+  "Cross-Border": "Transfronterizo", "Shipments": "Envíos",
+  "← Library": "← Biblioteca",
+  "TIM + TMS": "TIM + TMS", "TIM (ClickUp)": "TIM (ClickUp)", "TMS (Moveware)": "TMS (Moveware)",
+  "All agents": "Todos los agentes", "All flags": "Todas las alertas", "All hubs": "Todos los hubs",
+  "All stages": "Todas las etapas",
+  "Search customer / reference / destination…": "Buscar cliente / referencia / destino…",
+  "Clear": "Limpiar", "include completed": "incluir completados",
+  "Board": "Tablero", "Table": "Tabla", "↻ Refresh": "↻ Actualizar",
+  "Pipeline": "Flujo", "Suggested loads": "Cargas sugeridas",
+  "✉ Draft today's load email": "✉ Borrador del correo de cargas de hoy",
+  "Needs attention": "Requiere atención",
+  "Hub load (open imports, m³ vs one 53' trailer)": "Carga por hub (importaciones abiertas, m³ vs. un tráiler de 53')",
+  "All shipments": "Todos los envíos",
+  // stages
+  "Booked": "Reservado", "Docs pending": "Docs pendientes", "Green light": "Luz verde",
+  "To border": "A la frontera", "Customs": "Aduana", "At hub": "En hub", "Onward leg": "Tramo siguiente",
+  "Out for delivery": "En reparto", "Delivered": "Entregado", "Closed": "Cerrado", "Unmapped": "Sin mapear",
+  // flags
+  "Stalled ≥7 days": "Estancado ≥7 días", "Docs incomplete": "Docs incompletos", "On hold": "En espera",
+  "Payment pending": "Pago pendiente", "In storage": "En almacenaje", "Certificate pending": "Certificado pendiente",
+  "In progress": "En progreso", "Delivery window at risk": "Ventana de entrega en riesgo",
+  "Waiting on documents": "Esperando documentos", "Visa pending": "Visa pendiente",
+  "Customer unresponsive": "Cliente sin responder", "Awaiting green light": "Esperando luz verde",
+  "Awaiting booking": "Esperando reserva",
+  // KPIs
+  "Open shipments": "Envíos abiertos", "On hold / payment": "En espera / pago",
+  "Stalled ≥ 7 days": "Estancado ≥ 7 días", "no checklist progress": "sin avance en la lista",
+  "At / crossing border": "En / cruzando frontera", "In Mexico, delivering": "En México, entregando",
+  "m³ open": "m³ abiertos", "needs Remisiones sheet": "requiere hoja de Remisiones",
+  // alerts / hubs
+  "Documents": "Documentos", "Nothing needs attention 🎉": "Nada requiere atención 🎉",
+  "Extend the destination → hub table for the unmapped cities.": "Amplía la tabla destino → hub para las ciudades sin mapear.",
+  "Destinations and volumes come from the Remisiones workbook — waiting on Files.Read.All access for the Graph app.": "Los destinos y volúmenes vienen del libro de Remisiones — esperando acceso Files.Read.All para la app de Graph.",
+  // plan
+  "No consolidatable shipments are ready right now.": "No hay envíos consolidables listos en este momento.",
+  "Full": "Lleno", "Running light": "Va ligero", "anchor": "ancla", "creating draft…": "creando borrador…",
+  "Could not create draft: ": "No se pudo crear el borrador: ",
+  // table headers
+  "Customer": "Cliente", "Src": "Fuente", "Agent": "Agente", "Reference": "Referencia", "Stage": "Etapa",
+  "Current step": "Paso actual", "Days idle": "Días inactivo", "Destination": "Destino", "Hub": "Hub",
+  "Flags": "Alertas", "Assigned": "Asignado", "Crossed": "Cruzado",
+  // drawer
+  "Last progress": "Último avance", "Origin → Dest.": "Origen → Destino", "Volume": "Volumen",
+  "Sale value": "Valor de venta", "Weight": "Peso", "Milestones": "Hitos", "not on the sheet": "no está en la hoja",
+  "open in ClickUp ↗": "abrir en ClickUp ↗", "Moveware job": "servicio Moveware",
+  "loading…": "cargando…", "refreshing…": "actualizando…",
+  "with volume": "con volumen", "trailers of": "tráilers de", "window risk": "en riesgo de ventana",
+  "depart by": "salir antes del", "shpt": "env", "2 FTL jobs share": "2 servicios FTL comparten",
+  "Coming (not yet ready):": "Próximos (aún no listos):", "days without progress": "días sin avance",
+  "open shipments without a destination hub": "envíos abiertos sin hub de destino",
+  "Could not create draft: ": "No se pudo crear el borrador: ",
+  "✉ Draft owner alerts": "✉ Borrador de alertas por responsable",
+};
+let LANG = (function(){ try { return localStorage.getItem("cb_lang") || "en"; } catch(e){ return "en"; } })();
+function tr(s){ if (LANG !== "es" || s == null) return s; return (s in ES) ? ES[s] : s; }
+function applyStaticLang(){
+  document.documentElement.lang = LANG;
+  $("#lang-en").classList.toggle("on", LANG === "en");
+  $("#lang-es").classList.toggle("on", LANG === "es");
+  const H = $(".brand h1"); if (H) H.innerHTML = LANG === "es" ? 'Envíos <span>Transfronterizos</span>' : 'Cross-Border <span>Shipments</span>';
+  const lib = $("#lib-link"); if (lib) lib.textContent = tr("← Library");
+  $("#f-agent").querySelector('option[value=""]') && ($("#f-agent").querySelector('option[value=""]').textContent = tr("All agents"));
+  $("#f-flag").querySelector('option[value=""]') && ($("#f-flag").querySelector('option[value=""]').textContent = tr("All flags"));
+  $("#f-hub").querySelector('option[value=""]') && ($("#f-hub").querySelector('option[value=""]').textContent = tr("All hubs"));
+  $("#f-stage").querySelector('option[value=""]') && ($("#f-stage").querySelector('option[value=""]').textContent = tr("All stages"));
+  $("#f-q").placeholder = tr("Search customer / reference / destination…");
+  $("#clear").textContent = tr("Clear");
+  const inc = document.querySelector('label input#f-closed'); if (inc && inc.parentNode) inc.parentNode.lastChild.textContent = " " + tr("include completed");
+  $("#view-board").textContent = tr("Board"); $("#view-table").textContent = tr("Table");
+  $("#refresh").textContent = tr("↻ Refresh");
+  $("#plan-draft").textContent = tr("✉ Draft today's load email");
+  if ($("#alert-draft")) $("#alert-draft").textContent = tr("✉ Draft owner alerts");
+  document.querySelectorAll("[data-i18n]").forEach(el => el.textContent = tr(el.getAttribute("data-i18n")));
+}
+function setLang(l){ LANG = l; try { localStorage.setItem("cb_lang", l); } catch(e){}
+  applyStaticLang(); buildFilters(); render(); renderPlan(); }
+
 
 async function load(force) {
   $("#asof").innerHTML = '<span class="spin"></span>loading…';
@@ -286,24 +371,24 @@ function renderPlan() {
     const cls = l.fill_pct >= 85 ? "ok" : (l.light ? "lt" : "");
     const opp = oppByLane[l.lane];
     return `<div class="load ${l.light ? "light" : ""}">
-      <h4>${esc(l.lane)} ${l.fill_pct >= 85 ? '<span class="tag full">Full</span>' : ""}${l.light ? '<span class="tag light">Running light</span>' : ""}${l.cross_silo ? '<span class="tag xs">TIM + TMS</span>' : ""}${l.window_risk.length ? `<span class="tag risk">${l.window_risk.length} window risk</span>` : ""}${l.anchors > 1 ? '<span class="tag anchor">2 FTL jobs share</span>' : ""}</h4>
+      <h4>${esc(l.lane)} ${l.fill_pct >= 85 ? `<span class="tag full">${tr("Full")}</span>` : ""}${l.light ? `<span class="tag light">${tr("Running light")}</span>` : ""}${l.cross_silo ? '<span class="tag xs">TIM + TMS</span>' : ""}${l.window_risk.length ? `<span class="tag risk">${l.window_risk.length} ${tr("window risk")}</span>` : ""}${l.anchors > 1 ? `<span class="tag anchor">${tr("2 FTL jobs share")}</span>` : ""}</h4>
       <div class="fillbar"><i class="${cls}" style="width:${pct}%"></i></div>
-      <div class="fl"><span>${l.m3} / ${l.truck_m3} m³ · ${l.fill_pct}%${l.kg ? ` · ${fmtN(l.kg)} kg` : ""}</span><span>${l.depart_by ? "depart by " + fmtD(l.depart_by) : ""}</span></div>
+      <div class="fl"><span>${l.m3} / ${l.truck_m3} m³ · ${l.fill_pct}%${l.kg ? ` · ${fmtN(l.kg)} kg` : ""}</span><span>${l.depart_by ? tr("depart by") + " " + fmtD(l.depart_by) : ""}</span></div>
       ${l.shipments.map(it => `<div class="row" data-id="${esc(it.id)}"><div class="who"><b>${esc(it.customer)}</b>${it.anchor ? ' <span class="tag anchor">anchor</span>' : ""}${l.window_risk.includes(it.id) ? ' <span class="tag risk">by ' + fmtD(it.deadline) + '</span>' : ""}<br><span class="rs">${esc(it.source)} · ${esc(it.agent || "")}${it.reference ? " · " + esc(it.reference) : ""} · → ${esc(it.destination || "?")}${it.service ? " · " + esc(it.service) : ""}</span></div><div class="m3">${it.m3} m³</div></div>`).join("")}
       ${opp && opp.advice ? `<div class="adv">${esc(opp.advice)}</div>` : ""}
-    </div>`; }).join("") : `<div class="empty">${p.error ? "" : "No consolidatable shipments are ready right now."}</div>`;
+    </div>`; }).join("") : `<div class="empty">${p.error ? "" : tr("No consolidatable shipments are ready right now.")}</div>`;
   document.querySelectorAll("#loads .row").forEach(el => el.onclick = () => openDrawer(el.dataset.id));
   const cb = p.coming_by_lane || {}; const lanes = Object.keys(cb).filter(k => !src || cb[k].some(i => i.source === src));
   const ub = p.unsized_by_lane || {}; const ulanes = Object.keys(ub).filter(k => !src || ub[k].some(i => i.source === src));
   const parts = [];
-  if (lanes.length) parts.push("<b>Coming (not yet ready):</b> " + lanes.map(k => `${esc(k)}: ` + cb[k].filter(i => !src || i.source === src).map(i => `${esc(i.customer)} (${i.m3} m³${i.ready_date ? ", " + fmtD(i.ready_date) : ""})`).join(", ")).join(" · "));
+  if (lanes.length) parts.push(("<b>" + tr("Coming (not yet ready):") + "</b> ") + lanes.map(k => `${esc(k)}: ` + cb[k].filter(i => !src || i.source === src).map(i => `${esc(i.customer)} (${i.m3} m³${i.ready_date ? ", " + fmtD(i.ready_date) : ""})`).join(", ")).join(" · "));
   if (ulanes.length) parts.push(`<b>Not plannable — no volume on record (${p.unsized}):</b> ` + ulanes.map(k => `${esc(k)}: ` + ub[k].filter(i => !src || i.source === src).map(i => esc(i.customer)).join(", ")).join(" · "));
   $("#coming").style.display = parts.length ? "" : "none";
   $("#coming").innerHTML = parts.join("<br><br>");
 }
 
 $("#plan-draft").onclick = async () => {
-  const b = $("#plan-draft"); b.disabled = true; $("#plan-msg").textContent = "creating draft…";
+  const b = $("#plan-draft"); b.disabled = true; $("#plan-msg").textContent = tr("creating draft…");
   try {
     const r = await fetch("/crossborder/plan/draft", {method: "POST"}).then(x => x.json());
     $("#plan-msg").textContent = r.ok ? `Draft saved in ${r.folder || "Drafts"} for ${r.to.join(", ")} — review and send from Outlook.` : `Could not create draft: ${r.reason}`;
@@ -339,12 +424,12 @@ function buildFilters() {
     el.innerHTML = `<option value="">${label}</option>` + vals.map(v => `<option value="${esc(v[0])}">${esc(v[1])}</option>`).join("");
     el.value = cur; };
   const agents = [...new Set(ALL.map(s => s.agent || "?"))].sort();
-  fill("#f-agent", agents.map(a => [a, a]), "All agents");
+  fill("#f-agent", agents.map(a => [a, a]), tr("All agents"));
   const flags = [...new Set(ALL.flatMap(s => s.status_flags))].sort();
-  fill("#f-flag", flags.map(f => [f, FLAG_LABEL[f] || f]), "All flags");
+  fill("#f-flag", flags.map(f => [f, tr(FLAG_LABEL[f] || f)]), tr("All flags"));
   const hubs = HUBS.filter(h => ALL.some(s => s.destination_hub === h));
-  fill("#f-hub", hubs.map(h => [h, h]), "All hubs");
-  fill("#f-stage", STAGES.filter(st => ALL.some(s => s.stage === st[0])), "All stages");
+  fill("#f-hub", hubs.map(h => [h, h]), tr("All hubs"));
+  fill("#f-stage", STAGES.filter(st => ALL.some(s => s.stage === st[0])).map(st => [st[0], tr(st[1])]), tr("All stages"));
 }
 
 function filtered() {
@@ -373,13 +458,13 @@ function renderKpis() {
   const lv = open.reduce((t, s) => t + pm3(s), 0);
   const withVol = open.filter(s => pm3(s) > 0).length;
   const tiles = [
-    ["open", "", open.length, "Open shipments", "", s => s.is_open],
-    ["red", "red", cnt(s => s.status_flags.includes("on_hold") || s.status_flags.includes("payment_pending")), "On hold / payment", "", s => s.status_flags.includes("on_hold") || s.status_flags.includes("payment_pending")],
-    ["docs", "blue", cnt(s => s.status_flags.includes("docs_incomplete")), "Docs incomplete", "", s => s.status_flags.includes("docs_incomplete")],
-    ["stalled", "amber", cnt(s => s.status_flags.includes("stalled")), "Stalled ≥ 7 days", "no checklist progress", s => s.status_flags.includes("stalled")],
-    ["border", "", cnt(s => ["in_transit_to_border","customs_clearance"].includes(s.stage)), "At / crossing border", "", s => ["in_transit_to_border","customs_clearance"].includes(s.stage)],
-    ["mx", "green", cnt(s => ["at_hub","onward_leg","out_for_delivery"].includes(s.stage)), "In Mexico, delivering", "", s => ["at_hub","onward_leg","out_for_delivery"].includes(s.stage)],
-    ["lv", "", fmtN(lv), "m³ open", withVol ? `${withVol} with volume · ${fmtN(lv/TRUCK_M3)} trailers of ${TRUCK_M3} m³` : "needs Remisiones sheet", null],
+    ["open", "", open.length, tr("Open shipments"), "", s => s.is_open],
+    ["red", "red", cnt(s => s.status_flags.includes("on_hold") || s.status_flags.includes("payment_pending")), tr("On hold / payment"), "", s => s.status_flags.includes("on_hold") || s.status_flags.includes("payment_pending")],
+    ["docs", "blue", cnt(s => s.status_flags.includes("docs_incomplete")), tr("Docs incomplete"), "", s => s.status_flags.includes("docs_incomplete")],
+    ["stalled", "amber", cnt(s => s.status_flags.includes("stalled")), tr("Stalled ≥ 7 days"), tr("no checklist progress"), s => s.status_flags.includes("stalled")],
+    ["border", "", cnt(s => ["in_transit_to_border","customs_clearance"].includes(s.stage)), tr("At / crossing border"), "", s => ["in_transit_to_border","customs_clearance"].includes(s.stage)],
+    ["mx", "green", cnt(s => ["at_hub","onward_leg","out_for_delivery"].includes(s.stage)), tr("In Mexico, delivering"), "", s => ["at_hub","onward_leg","out_for_delivery"].includes(s.stage)],
+    ["lv", "", fmtN(lv), tr("m³ open"), withVol ? `${withVol} ${tr("with volume")} · ${fmtN(lv/TRUCK_M3)} ${tr("trailers of")} ${TRUCK_M3} m³` : tr("needs Remisiones sheet"), null],
   ];
   $("#kpis").innerHTML = tiles.map(t => `<div class="kpi ${t[1]} ${kpiSel && kpiSel.__k === t[0] ? "sel" : ""}" data-k="${t[0]}"><div class="v">${t[2]}</div><div class="l">${t[3]}</div>${t[4] ? `<div class="s">${t[4]}</div>` : ""}</div>`).join("");
   document.querySelectorAll(".kpi").forEach((el, i) => el.onclick = () => {
@@ -398,7 +483,7 @@ function cardHtml(s) {
     <div class="nm">${esc(s.customer_name)}${s.source === "TMS" ? ' <span class="src">TMS</span>' : ""}</div>
     <div class="ag">${esc(s.agent || "?")}${s.reference_number ? " · " + esc(s.reference_number) : ""}</div>
     ${s.destination ? `<div class="dest">→ ${esc(s.destination)}${s.destination_hub && s.destination_hub !== "Unknown" ? ` <span style="color:#999">(${esc(s.destination_hub)})</span>` : ""}</div>` : ""}
-    <div class="meta">${vol ? `<span class="tag vol">${esc(vol)}</span>` : ""}${flags.map(f => `<span class="tag ${f}">${esc(FLAG_LABEL[f] || f)}</span>`).join("")}</div>
+    <div class="meta">${vol ? `<span class="tag vol">${esc(vol)}</span>` : ""}${flags.map(f => `<span class="tag ${f}">${esc(tr(FLAG_LABEL[f] || f))}</span>`).join("")}</div>
     ${s.current_step ? `<div class="step">${esc(s.current_step)}${s.days_since_progress != null ? ` · ${s.days_since_progress}d` : ""}</div>` : ""}
     ${s.steps_total ? `<div class="bar"><i style="width:${pct}%"></i></div>` : ""}
   </div>`;
@@ -410,7 +495,7 @@ function renderBoard(rows) {
   $("#board").innerHTML = cols.map(st => {
     const items = rows.filter(s => s.stage === st[0]);
     const lv = items.reduce((t, s) => t + pm3(s), 0);
-    return `<div class="col"><h3>${st[1]} <span class="n">${items.length}</span></h3>${lv ? `<div class="lv">${fmtN(lv)} m³</div>` : ""}${items.map(cardHtml).join("") || '<div style="font-size:11px;color:#aaa;text-align:center;padding:10px">—</div>'}</div>`;
+    return `<div class="col"><h3>${tr(st[1])} <span class="n">${items.length}</span></h3>${lv ? `<div class="lv">${fmtN(lv)} m³</div>` : ""}${items.map(cardHtml).join("") || '<div style="font-size:11px;color:#aaa;text-align:center;padding:10px">—</div>'}</div>`;
   }).join("");
   $("#cnt-board").textContent = rows.length;
   document.querySelectorAll("#board .card").forEach(el => el.onclick = () => openDrawer(el.dataset.id));
@@ -422,8 +507,8 @@ function renderAlerts(rows) {
     const f = ALERT_FLAGS.find(x => s.status_flags.includes(x));
     if (!f) return;
     let detail = "";
-    if (f === "stalled") detail = `${s.days_since_progress} days without progress · ${s.current_step || STAGE_LABEL[s.stage]}`;
-    else if (f === "docs_incomplete") detail = `${s.current_step || "Documents"} · ${s.days_since_progress ?? "?"}d`;
+    if (f === "stalled") detail = `${s.days_since_progress} ${tr("days without progress")} · ${s.current_step || STAGE_LABEL[s.stage]}`;
+    else if (f === "docs_incomplete") detail = `${s.current_step || tr("Documents")} · ${s.days_since_progress ?? "?"}d`;
     else detail = (s.extra && s.extra.remisiones_status) || s.current_step || STAGE_LABEL[s.stage];
     items.push({s, f, detail, rank: ALERT_FLAGS.indexOf(f), days: s.days_since_progress || 0});
   });
@@ -431,9 +516,9 @@ function renderAlerts(rows) {
   $("#cnt-alerts").textContent = items.length;
   $("#alerts").innerHTML = items.length ? items.map(it => `<div class="row" data-id="${esc(it.s.id)}">
       <div class="ico ${it.f}">${FLAG_ICON[it.f]}</div>
-      <div><div class="t">${esc(it.s.customer_name)} <span style="color:#888;font-weight:500">· ${esc(it.s.agent || "?")}</span></div><div class="d">${esc(FLAG_LABEL[it.f])} — ${esc(it.detail)}</div></div>
+      <div><div class="t">${esc(it.s.customer_name)} <span style="color:#888;font-weight:500">· ${esc(it.s.agent || "?")}</span></div><div class="d">${esc(tr(FLAG_LABEL[it.f]))} — ${esc(it.detail)}</div></div>
       <div class="who">${esc((it.s.assignees || []).join(", "))}</div></div>`).join("")
-    : '<div class="empty">Nothing needs attention 🎉</div>';
+    : `<div class="empty">${tr("Nothing needs attention 🎉")}</div>`;
   document.querySelectorAll("#alerts .row").forEach(el => el.onclick = () => openDrawer(el.dataset.id));
 }
 
@@ -444,11 +529,11 @@ function renderHubs(rows) {
     const items = open.filter(s => s.destination_hub === h);
     const lv = items.reduce((t, s) => t + pm3(s), 0);
     const pct = Math.min(100, Math.round(100 * lv / TRUCK_M3));
-    return `<div class="hub"><div class="hn">${h}</div><div class="hb"><i class="${pct >= 85 ? "ok" : ""}" style="width:${pct}%"></i></div><div class="hv">${items.length} shpt · ${fmtN(lv)} / ${TRUCK_M3} m³</div></div>`;
+    return `<div class="hub"><div class="hn">${h}</div><div class="hb"><i class="${pct >= 85 ? "ok" : ""}" style="width:${pct}%"></i></div><div class="hv">${items.length} ${tr("shpt")} · ${fmtN(lv)} / ${TRUCK_M3} m³</div></div>`;
   }).join("");
   const unk = open.length - known.length;
   const rem = DIAG.remisiones || {};
-  $("#hubs").innerHTML = html + (unk ? `<div class="note">${unk} open shipment${unk > 1 ? "s" : ""} without a destination hub.${rem.error ? " Destinations and volumes come from the Remisiones workbook — waiting on Files.Read.All access for the Graph app." : " Extend the destination → hub table for the unmapped cities."}</div>` : "");
+  $("#hubs").innerHTML = html + (unk ? `<div class="note">${unk} ${tr("open shipments without a destination hub")}${rem.error ? (" " + tr("Destinations and volumes come from the Remisiones workbook — waiting on Files.Read.All access for the Graph app.")) : (" " + tr("Extend the destination → hub table for the unmapped cities."))}</div>` : "");
 }
 
 const COLS = [["customer_name","Customer"],["source","Src"],["agent","Agent"],["reference_number","Reference"],["stage","Stage"],["current_step","Current step"],["days_since_progress","Days idle"],["destination","Destination"],["destination_hub","Hub"],["planning_m3","m³"],["status_flags","Flags"],["assignees","Assigned"],["milestones.green_light","Green light"],["milestones.crossed","Crossed"],["milestones.delivered","Delivered"]];
@@ -456,11 +541,11 @@ const get = (s, k) => k.includes(".") ? k.split(".").reduce((o, p) => o && o[p],
 function renderTable(rows) {
   rows = [...rows].sort((a, b) => { let x = get(a, sortKey), y = get(b, sortKey); if (Array.isArray(x)) x = x.join(","); if (Array.isArray(y)) y = y.join(",");
     if (x == null) return 1; if (y == null) return -1; return (x > y ? 1 : x < y ? -1 : 0) * sortDir; });
-  $("#tbl thead").innerHTML = "<tr>" + COLS.map(c => `<th data-k="${c[0]}" class="${sortKey === c[0] ? "sorted" : ""}">${c[1]}${sortKey === c[0] ? (sortDir > 0 ? " ▲" : " ▼") : ""}</th>`).join("") + "</tr>";
+  $("#tbl thead").innerHTML = "<tr>" + COLS.map(c => `<th data-k="${c[0]}" class="${sortKey === c[0] ? "sorted" : ""}">${tr(c[1])}${sortKey === c[0] ? (sortDir > 0 ? " ▲" : " ▼") : ""}</th>`).join("") + "</tr>";
   $("#tbl tbody").innerHTML = rows.map(s => "<tr data-id=\"" + esc(s.id) + "\">" + COLS.map(c => {
     let v = get(s, c[0]);
-    if (c[0] === "stage") v = STAGE_LABEL[v] || v;
-    else if (c[0] === "status_flags") v = (v || []).map(f => `<span class="tag ${f}">${esc(FLAG_LABEL[f] || f)}</span>`).join(" ");
+    if (c[0] === "stage") v = tr(STAGE_LABEL[v] || v);
+    else if (c[0] === "status_flags") v = (v || []).map(f => `<span class="tag ${f}">${esc(tr(FLAG_LABEL[f] || f))}</span>`).join(" ");
     else if (c[0] === "assignees") v = esc((v || []).join(", "));
     else if (c[0].startsWith("milestones")) v = fmtD(v);
     else if (c[0] === "planning_m3") v = v ? fmtN(v) : "—";
@@ -477,20 +562,20 @@ function openDrawer(id) {
   const ms = s.source === "TMS" ? ["booked","uplift","delivered","closed"] : ["booked","docs_complete","green_light","at_border_warehouse","docs_to_broker","crossed","at_hub","delivery_scheduled","delivered","closed"];
   const ex = s.extra || {};
   $("#dbody").innerHTML = `<h2>${esc(s.customer_name)}</h2>
-    <div class="sub">${s.source === "TMS" ? '<span class="src">TMS</span> ' : ""}${esc(s.agent || "?")}${s.reference_number ? " · " + esc(s.reference_number) : ""}${s.url ? ` · <a href="${esc(s.url)}" target="_blank" style="color:#1967d2">open in ClickUp ↗</a>` : " · Moveware job"}</div>
-    <div class="meta" style="margin-bottom:14px">${s.status_flags.map(f => `<span class="tag ${f}">${esc(FLAG_LABEL[f] || f)}</span>`).join(" ")}</div>
+    <div class="sub">${s.source === "TMS" ? '<span class="src">TMS</span> ' : ""}${esc(s.agent || "?")}${s.reference_number ? " · " + esc(s.reference_number) : ""}${s.url ? ` · <a href="${esc(s.url)}" target="_blank" style="color:#1967d2">${tr("open in ClickUp ↗")}</a>` : " · " + tr("Moveware job")}</div>
+    <div class="meta" style="margin-bottom:14px">${s.status_flags.map(f => `<span class="tag ${f}">${esc(tr(FLAG_LABEL[f] || f))}</span>`).join(" ")}</div>
     <div class="kv">
-      <b>Stage</b><span>${esc(STAGE_LABEL[s.stage] || s.stage)}</span>
-      <b>Current step</b><span>${s.steps_total ? `${esc(s.current_step || "—")} (${s.steps_done}/${s.steps_total}, ${s.process_format || "?"})` : esc(s.source_status || "—") + (ex.direction ? ` · ${esc(ex.direction)}` : "") + (ex.method ? ` · ${esc(ex.method)}` : "")}</span>
-      <b>Last progress</b><span>${s.last_progress_at ? esc(s.last_progress_at) + ` · ${s.days_since_progress} days ago` : "—"}</span>
-      <b>Assigned</b><span>${esc((s.assignees || []).join(", ") || "—")}</span>
-      <b>Origin → Dest.</b><span>${esc(s.origin || "?")} → ${esc(s.destination || "?")}${s.destination_hub !== "Unknown" ? ` (${esc(s.destination_hub)} hub)` : ""}</span>
-      <b>Volume</b><span>${s.lift_vans ? s.lift_vans + " lift van(s) · " : ""}${s.u_boxes ? s.u_boxes + " U-Box(es) · " : ""}${s.volume_m3 ? s.volume_m3 + " m³ · " : ""}${esc(ex.volume_text || "")}${!(s.lift_vans || s.u_boxes || s.volume_m3 || ex.volume_text) ? "—" : ""}</span>
-      <b>Sale value</b><span>${money(ex.sale_value)}</span>
-      ${s.weight ? `<b>Weight</b><span>${s.weight} kg</span>` : ""}
-      ${s.source === "TMS" ? "" : `<b>Remisiones</b><span>${ex.remisiones_block ? esc(ex.remisiones_block) + (ex.remisiones_week ? " · " + esc(ex.remisiones_week) : "") + (ex.remisiones_status ? "<br>" + esc(ex.remisiones_status) : "") : "not on the sheet"}</span>`}
+      <b>${tr("Stage")}</b><span>${esc(STAGE_LABEL[s.stage] || s.stage)}</span>
+      <b>${tr("Current step")}</b><span>${s.steps_total ? `${esc(s.current_step || "—")} (${s.steps_done}/${s.steps_total}, ${s.process_format || "?"})` : esc(s.source_status || "—") + (ex.direction ? ` · ${esc(ex.direction)}` : "") + (ex.method ? ` · ${esc(ex.method)}` : "")}</span>
+      <b>${tr("Last progress")}</b><span>${s.last_progress_at ? esc(s.last_progress_at) + ` · ${s.days_since_progress} days ago` : "—"}</span>
+      <b>${tr("Assigned")}</b><span>${esc((s.assignees || []).join(", ") || "—")}</span>
+      <b>${tr("Origin → Dest.")}</b><span>${esc(s.origin || "?")} → ${esc(s.destination || "?")}${s.destination_hub !== "Unknown" ? ` (${esc(s.destination_hub)} hub)` : ""}</span>
+      <b>${tr("Volume")}</b><span>${s.lift_vans ? s.lift_vans + " lift van(s) · " : ""}${s.u_boxes ? s.u_boxes + " U-Box(es) · " : ""}${s.volume_m3 ? s.volume_m3 + " m³ · " : ""}${esc(ex.volume_text || "")}${!(s.lift_vans || s.u_boxes || s.volume_m3 || ex.volume_text) ? "—" : ""}</span>
+      <b>${tr("Sale value")}</b><span>${money(ex.sale_value)}</span>
+      ${s.weight ? `<b>${tr("Weight")}</b><span>${s.weight} kg</span>` : ""}
+      ${s.source === "TMS" ? "" : `<b>Remisiones</b><span>${ex.remisiones_block ? esc(ex.remisiones_block) + (ex.remisiones_week ? " · " + esc(ex.remisiones_week) : "") + (ex.remisiones_status ? "<br>" + esc(ex.remisiones_status) : "") : tr("not on the sheet")}</span>`}
     </div>
-    <div class="section" style="margin-top:0">Milestones</div>
+    <div class="section" style="margin-top:0">${tr("Milestones")}</div>
     <div class="ms">${ms.map(m => `<div class="${s.milestones && s.milestones[m] ? "done" : "todo"}"><span>${m.replace(/_/g, " ")}</span><span>${s.milestones && s.milestones[m] ? esc(s.milestones[m]) : "—"}</span></div>`).join("")}</div>`;
   $("#drawer").classList.add("open"); $("#overlay").classList.add("open");
 }
@@ -504,8 +589,9 @@ $("#view-board").onclick = () => { view = "board"; render(); };
 $("#view-table").onclick = () => { view = "table"; render(); };
 $("#refresh").onclick = () => load(true);
 $("#dclose").onclick = closeDrawer; $("#overlay").onclick = closeDrawer;
+$("#lang-en").onclick = () => setLang("en"); $("#lang-es").onclick = () => setLang("es");
 document.addEventListener("keydown", e => { if (e.key === "Escape") closeDrawer(); });
-load(false);
+applyStaticLang(); load(false);
 setInterval(() => load(false), 5 * 60 * 1000);
 </script>
 </body>

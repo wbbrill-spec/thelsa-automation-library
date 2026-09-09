@@ -70,3 +70,24 @@ def test_plan_packs_anchor_then_fills_and_flags_light_trailers():
     subject, body = engine.email_body(p)
     assert "4 trailers" in subject and "TRAILER 1" in body and "WINDOW RISK" in body and "OPPORTUNITIES" in body
     assert "Coming C" in body
+
+
+def test_real_world_fixes_shared_ftl_regions_cuft_unsized():
+    ships = [
+        tms(1, "FTL A", "Brownsville, Texas", Hub.UNKNOWN, 35, direction="export", service="FTL"),
+        tms(2, "FTL B", "TEXAS", Hub.UNKNOWN, 35, direction="export", service="FTL"),
+        tms(3, "FTL C", "United States Charlotte North Carolina", Hub.UNKNOWN, 10, direction="export", service="FTL"),
+        tms(4, "Cuft typo", "Nashville, TN", Hub.UNKNOWN, 2009, direction="export"),
+        tim(5, "No volume", Hub.UNKNOWN),                                  # 0 m³ → unsized
+    ]
+    assert engine.export_region(ships[1]) == "Texas" and engine.export_region(ships[2]) == "North Carolina"
+    assert engine.export_region(ships[3]) == "Tennessee"
+    p = engine.plan(ships, today=TODAY)
+    tx = [l for l in p["loads"] if l["lane"] == "Export → Texas"]
+    assert len(tx) == 1 and tx[0]["m3"] == 70.0 and tx[0]["anchors"] == 2
+    tn = [l for l in p["loads"] if l["lane"] == "Export → Tennessee"][0]
+    assert tn["m3"] == 56.89 and "cubic feet" in tn["shipments"][0]["reasons"][0]
+    assert p["unsized"] == 1 and "Import → Unassigned hub" in p["unsized_by_lane"]
+    assert all(l["m3"] > 0 for l in p["loads"]) and p["summary"]["avg_fill_pct"] < 100
+    _, body = engine.email_body(p)
+    assert "NOT PLANNABLE" in body and "No volume" in body

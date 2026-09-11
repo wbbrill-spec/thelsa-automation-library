@@ -21,6 +21,7 @@ from typing import Optional
 class Source(str, Enum):
     TIM = "TIM"   # ClickUp
     TMS = "TMS"   # Moveware
+    TRS = "TRS"   # SIT / "Plan de Viajes" — domestic Mexico line hauls
 
 
 class Stage(str, Enum):

@@ -37,7 +37,7 @@ import time
 
 from flask import Blueprint, jsonify, redirect, request, session, url_for
 
-from . import alerts, clickup, engine, remisiones, tim, tms
+from . import alerts, clickup, demo, engine, remisiones, tim, tms
 from .dashboard import DASHBOARD_HTML
 from .models import Source
 
@@ -225,6 +225,31 @@ def load_shipments(force: bool = False, include_completed: bool = False):
         return list(_CACHE["shipments"] or []), dict(_CACHE["diag"] or {}), status
 
 
+def _with_demo(shipments: list, diag: dict, args=None):
+    """Mix the simulated fleet in for THIS REQUEST only.
+
+    Demo rows are added at the edge and never written back into _CACHE, so
+    nothing that can reach a mailbox — the alert drafter, the suggested-load
+    email, the daily scheduler — can ever see one. See demo.py.
+    """
+    mode = demo.demo_mode(args)
+    if mode == "off":
+        return shipments, diag
+    fake = demo.demo_shipments()
+    out = list(fake) if mode == "only" else list(shipments) + list(fake)
+    return out, {**diag, "demo": {**demo.diagnostics(fake), "mode": mode}}
+
+
+def _demo_blocks_drafting() -> "str | None":
+    """Drafting is refused outright while the environment is in demo mode —
+    simulated shipments must never turn into an email a coordinator acts on."""
+    if demo.demo_mode(None) != "off":
+        return ("Demo mode is on (CROSSBORDER_DEMO). Email drafting is disabled "
+                "so simulated shipments can never reach an inbox — unset it to "
+                "draft against live data.")
+    return None
+
+
 @crossborder_bp.route("/crossborder/raw")
 @_login_required
 def raw():
@@ -273,6 +298,7 @@ def raw():
             return jsonify(out)
         shipments, diag, status = load_shipments(force=bool(request.args.get("refresh")),
                                                  include_completed=bool(request.args.get("completed")))
+        shipments, diag = _with_demo(shipments, diag, request.args)
         out["status"] = status
         if status["refreshing"] and not shipments:
             out["next_step"] = "First pull is running in the background — reload this page in ~15 s."
@@ -308,9 +334,10 @@ def api_shipments():
                                                  include_completed=bool(request.args.get("completed")))
     except Exception as exc:
         return jsonify({"error": f"{type(exc).__name__}: {exc}", "shipments": []}), 200
+    shipments, diag = _with_demo(shipments, diag, request.args)
     return jsonify({"count": len(shipments), "status": status,
                     "diagnostics": {"remisiones": diag.get("remisiones"), "requests_made": diag.get("requests_made"),
-                                    "errors": diag.get("errors"),
+                                    "errors": diag.get("errors"), "demo": diag.get("demo"),
                                     "tms": {k: v for k, v in (diag.get("tms") or {}).items()
                                             if k in ("env", "count", "error", "rows_seen", "cross_border", "by_direction",
                                                      "details_fetched", "requests_made", "by_stage",
@@ -323,12 +350,14 @@ def api_shipments():
 @_login_required
 def api_plan():
     shipments, diag, status = load_shipments()
+    shipments, diag = _with_demo(shipments, diag, request.args)
     try:
         p = engine.plan(shipments)
     except Exception as exc:  # noqa: BLE001
         log.exception("plan failed")
         return jsonify({"error": f"{type(exc).__name__}: {exc}", "loads": []}), 200
     p["status"] = status
+    p["demo"] = diag.get("demo")
     return jsonify(p)
 
 
@@ -339,6 +368,9 @@ def _plan_recipients() -> list[str]:
 
 def create_plan_draft(actor: str = "scheduler") -> dict:
     """Build today's plan and file it as a DRAFT email (Graph). Never sends."""
+    blocked = _demo_blocks_drafting()
+    if blocked:
+        return {"ok": False, "reason": blocked, "actor": actor}
     shipments, diag, status = load_shipments()
     if not shipments:
         return {"ok": False, "reason": "no shipments loaded yet"}
@@ -367,6 +399,9 @@ _ALERT_STATE: dict = {"last": None}
 def create_alert_drafts(actor: str = "scheduler", respect_state: bool = True) -> dict:
     """One DRAFT per responsible person listing their shipments that need
     attention. Never sends; never writes to ClickUp or Moveware."""
+    blocked = _demo_blocks_drafting()
+    if blocked:
+        return {"ok": False, "reason": blocked, "skipped_reason": blocked, "actor": actor}
     shipments, diag, status = load_shipments()
     if not shipments:
         return {"ok": False, "reason": "no shipments loaded yet", "actor": actor}

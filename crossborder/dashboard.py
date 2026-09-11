@@ -149,6 +149,13 @@ td a { color: #1967d2; text-decoration: none; }
 .langtog { display: inline-flex; border: 1px solid #d9dbe0; border-radius: 7px; overflow: hidden; }
 .langtog button { background: #fff; color: #666; border: 0; padding: 3px 9px; font: inherit; font-size: 11px; font-weight: 700; cursor: pointer; }
 .langtog button.on { background: #c0392b; color: #fff; }
+/* demo mode — simulated data must be impossible to mistake for the real board */
+#demobar { display: none; background: repeating-linear-gradient(135deg,#7c2d12,#7c2d12 14px,#9a3412 14px,#9a3412 28px); color: #fff; font-size: 12.5px; font-weight: 700; letter-spacing: .3px; padding: 9px 28px; display: none; align-items: center; gap: 12px; }
+#demobar.on { display: flex; }
+#demobar .x { margin-left: auto; color: #fff; text-decoration: underline; font-weight: 600; }
+.tag.demo, .src.demo { background: #7c2d12; color: #fff; }
+.card.demo { border-left-color: #9a3412 !important; }
+body.demo header { border-bottom-color: #7c2d12; }
 </style>
 </head>
 <body>
@@ -157,15 +164,17 @@ td a { color: #1967d2; text-decoration: none; }
   <div class="hdr-right">
     <span id="src-tim" class="pill">ClickUp · —</span>
     <span id="src-rem" class="pill">Remisiones · —</span>
-    <span id="src-tms" class="pill">Moveware · pending</span>
+    <span id="src-tms" class="pill">Moveware · —</span>
+    <span id="src-trs" class="pill" style="display:none">SIT/TRS · —</span>
     <span id="asof">—</span>
     <span class="langtog"><button id="lang-en" class="on">EN</button><button id="lang-es">ES</button></span>
     <a href="/" id="lib-link">← Library</a>
   </div>
 </header>
+<div id="demobar"><span id="demotext"></span><a class="x" id="demo-off" href="?demo=0">turn demo data off</a></div>
 <main>
   <div class="toolbar">
-    <select id="f-source"><option value="">TIM + TMS</option><option value="TIM">TIM (ClickUp)</option><option value="TMS">TMS (Moveware)</option></select>
+    <select id="f-source"><option value="">All sources</option><option value="TIM">TIM (ClickUp)</option><option value="TMS">TMS (Moveware)</option><option value="TRS">TRS (SIT domestic)</option></select>
     <select id="f-agent"><option value="">All agents</option></select>
     <select id="f-flag"><option value="">All flags</option></select>
     <select id="f-hub"><option value="">All hubs</option></select>
@@ -325,13 +334,19 @@ function applyStaticLang(){
   document.querySelectorAll("[data-i18n]").forEach(el => el.textContent = tr(el.getAttribute("data-i18n")));
 }
 function setLang(l){ LANG = l; try { localStorage.setItem("cb_lang", l); } catch(e){}
-  applyStaticLang(); buildFilters(); render(); renderPlan(); }
+  applyStaticLang(); buildFilters(); render(); renderPlan(); renderDemoBar(DIAG.demo); }
 
+
+// Demo data is opt-in per request: whatever ?demo= the page was opened with is
+// forwarded to every API call, so the board and the plan agree about it and a
+// bookmark of the live board can never pick it up by accident.
+const DEMOQ = (function(){ const v = new URLSearchParams(location.search).get("demo");
+  return v == null ? "" : "&demo=" + encodeURIComponent(v); })();
 
 async function load(force) {
   $("#asof").innerHTML = '<span class="spin"></span>loading…';
   const closed = $("#f-closed").checked ? "&completed=1" : "";
-  const r = await fetch(`/crossborder/api/shipments?v=${Date.now()}${force ? "&refresh=1" : ""}${closed}`);
+  const r = await fetch(`/crossborder/api/shipments?v=${Date.now()}${force ? "&refresh=1" : ""}${closed}${DEMOQ}`);
   const j = await r.json();
   ALL = j.shipments || []; STATUS = j.status || {}; DIAG = j.diagnostics || {};
   if (STATUS.refreshing && !ALL.length) { $("#asof").innerHTML = '<span class="spin"></span>first pull running (~40 s)…'; setTimeout(() => load(false), 8000); return; }
@@ -354,16 +369,39 @@ async function load(force) {
   else if (t.error) { $("#src-tms").textContent = "Moveware · error"; $("#src-tms").className = "pill warn"; $("#src-tms").title = t.error; }
   else if (t.count != null) { $("#src-tms").textContent = `Moveware · ${tmsN}${t.env && t.env !== "prod" ? " (" + t.env + ")" : ""}`; $("#src-tms").className = "pill ok"; $("#src-tms").title = `${t.rows_seen} jobs updated in window · ${t.cross_border} cross-border · ${t.requests_made} calls`; }
   else { $("#src-tms").textContent = "Moveware · pending"; $("#src-tms").className = "pill"; }
+  const trsN = ALL.filter(s => s.source === "TRS").length;
+  if (trsN) { $("#src-trs").style.display = ""; $("#src-trs").textContent = `SIT/TRS · ${trsN}`; $("#src-trs").className = "pill ok"; }
+  else $("#src-trs").style.display = "none";
   const rem = DIAG.remisiones || {};
   if (rem.error) { $("#src-rem").textContent = "Remisiones · no access"; $("#src-rem").className = "pill warn"; $("#src-rem").title = rem.error; }
   else if (rem.matched != null) { $("#src-rem").textContent = `Remisiones · ${rem.matched} matched (${rem.week || "latest"})`; $("#src-rem").className = "pill ok"; }
+  renderDemoBar(DIAG.demo);
   buildFilters(); render();
   loadPlan();
 }
 
+// A standing, unmissable banner whenever any row on the page is simulated.
+// Nothing about demo mode is subtle on purpose: this board is shown to the
+// people who run the business, and a fake shipment must never read as a real one.
+function renderDemoBar(dg) {
+  const on = !!(dg && dg.demo);
+  document.body.classList.toggle("demo", on);
+  $("#demobar").classList.toggle("on", on);
+  // The two buttons that can put words in a coordinator's inbox stay off while
+  // any of the board is simulated — the server refuses them too.
+  ["#plan-draft", "#alert-draft"].forEach(id => { const b = $(id); if (!b) return;
+    b.disabled = on; b.title = on ? "Disabled while demo data is showing" : ""; b.style.opacity = on ? .45 : 1; });
+  if (!on) return;
+  const real = ALL.length - (dg.count || 0);
+  $("#demotext").textContent = LANG === "es"
+    ? `⚠ DATOS DE DEMOSTRACIÓN — ${dg.count} envíos simulados (${dg.tms} TMS, ${dg.trs} TRS domésticos)${dg.mode === "only" ? "; los datos reales están ocultos" : ` junto a ${real} reales`}. No son de ClickUp, Moveware ni SIT. Los borradores de correo están desactivados.`
+    : `⚠ DEMO DATA — ${dg.count} simulated shipments (${dg.tms} TMS, ${dg.trs} domestic TRS)${dg.mode === "only" ? "; live data hidden" : `, alongside ${real} real ones`}. Not from ClickUp, Moveware or SIT. Email drafting is disabled.`;
+}
+const isDemo = s => !!(s.extra && s.extra.demo);
+
 let PLAN = null;
 async function loadPlan() {
-  try { PLAN = await fetch(`/crossborder/api/plan?v=${Date.now()}`).then(r => r.json()); } catch (e) { PLAN = {error: String(e), loads: []}; }
+  try { PLAN = await fetch(`/crossborder/api/plan?v=${Date.now()}${DEMOQ}`).then(r => r.json()); } catch (e) { PLAN = {error: String(e), loads: []}; }
   renderPlan();
 }
 
@@ -488,8 +526,8 @@ function cardHtml(s) {
   const prim = ALERT_FLAGS.find(f => s.status_flags.includes(f)) || (s.status_flags.includes("in_progress") ? "in_progress" : "");
   const vol = s.lift_vans ? `${s.lift_vans} LV` : s.u_boxes ? `${s.u_boxes} U-Box` : s.volume_m3 ? `${s.volume_m3} m³` : "";
   const pct = s.steps_total ? Math.round(100 * s.steps_done / s.steps_total) : 0;
-  return `<div class="card f-${prim}" data-id="${esc(s.id)}">
-    <div class="nm">${esc(s.customer_name)}${s.source === "TMS" ? ' <span class="src">TMS</span>' : ""}</div>
+  return `<div class="card f-${prim}${isDemo(s) ? " demo" : ""}" data-id="${esc(s.id)}">
+    <div class="nm">${esc(s.customer_name)}${s.source !== "TIM" ? ` <span class="src">${esc(s.source)}</span>` : ""}${isDemo(s) ? ' <span class="src demo">DEMO</span>' : ""}</div>
     <div class="ag">${esc(s.agent || "?")}${s.reference_number ? " · " + esc(s.reference_number) : ""}</div>
     ${s.destination ? `<div class="dest">→ ${esc(s.destination)}${s.destination_hub && s.destination_hub !== "Unknown" ? ` <span style="color:#999">(${esc(s.destination_hub)})</span>` : ""}</div>` : ""}
     <div class="meta">${vol ? `<span class="tag vol">${esc(vol)}</span>` : ""}${flags.map(f => `<span class="tag ${f}">${esc(tr(FLAG_LABEL[f] || f))}</span>`).join("")}</div>
@@ -568,10 +606,10 @@ function renderTable(rows) {
 
 function openDrawer(id) {
   const s = ALL.find(x => x.id === id); if (!s) return;
-  const ms = s.source === "TMS" ? ["booked","uplift","delivered","closed"] : ["booked","docs_complete","green_light","at_border_warehouse","docs_to_broker","crossed","at_hub","delivery_scheduled","delivered","closed"];
+  const ms = s.source !== "TIM" ? ["booked","uplift","delivered","closed"] : ["booked","docs_complete","green_light","at_border_warehouse","docs_to_broker","crossed","at_hub","delivery_scheduled","delivered","closed"];
   const ex = s.extra || {};
-  $("#dbody").innerHTML = `<h2>${esc(s.customer_name)}</h2>
-    <div class="sub">${s.source === "TMS" ? '<span class="src">TMS</span> ' : ""}${esc(s.agent || "?")}${s.reference_number ? " · " + esc(s.reference_number) : ""}${s.url ? ` · <a href="${esc(s.url)}" target="_blank" style="color:#1967d2">${tr("open in ClickUp ↗")}</a>` : " · " + tr("Moveware job")}</div>
+  $("#dbody").innerHTML = `<h2>${esc(s.customer_name)}${isDemo(s) ? ' <span class="src demo">DEMO</span>' : ""}</h2>
+    <div class="sub">${s.source !== "TIM" ? `<span class="src">${esc(s.source)}</span> ` : ""}${esc(s.agent || "?")}${s.reference_number ? " · " + esc(s.reference_number) : ""}${s.url ? ` · <a href="${esc(s.url)}" target="_blank" style="color:#1967d2">${tr("open in ClickUp ↗")}</a>` : " · " + tr("Moveware job")}</div>
     <div class="meta" style="margin-bottom:14px">${s.status_flags.map(f => `<span class="tag ${f}">${esc(tr(FLAG_LABEL[f] || f))}</span>`).join(" ")}</div>
     <div class="kv">
       <b>${tr("Stage")}</b><span>${esc(STAGE_LABEL[s.stage] || s.stage)}</span>
@@ -582,7 +620,7 @@ function openDrawer(id) {
       <b>${tr("Volume")}</b><span>${s.lift_vans ? s.lift_vans + " lift van(s) · " : ""}${s.u_boxes ? s.u_boxes + " U-Box(es) · " : ""}${s.volume_m3 ? s.volume_m3 + " m³ · " : ""}${esc(ex.volume_text || "")}${!(s.lift_vans || s.u_boxes || s.volume_m3 || ex.volume_text) ? "—" : ""}</span>
       <b>${tr("Sale value")}</b><span>${money(ex.sale_value)}</span>
       ${s.weight ? `<b>${tr("Weight")}</b><span>${s.weight} kg</span>` : ""}
-      ${s.source === "TMS" ? "" : `<b>Remisiones</b><span>${ex.remisiones_block ? esc(ex.remisiones_block) + (ex.remisiones_week ? " · " + esc(ex.remisiones_week) : "") + (ex.remisiones_status ? "<br>" + esc(ex.remisiones_status) : "") : tr("not on the sheet")}</span>`}
+      ${s.source !== "TIM" ? "" : `<b>Remisiones</b><span>${ex.remisiones_block ? esc(ex.remisiones_block) + (ex.remisiones_week ? " · " + esc(ex.remisiones_week) : "") + (ex.remisiones_status ? "<br>" + esc(ex.remisiones_status) : "") : tr("not on the sheet")}</span>`}
     </div>
     <div class="section" style="margin-top:0">${tr("Milestones")}</div>
     <div class="ms">${ms.map(m => `<div class="${s.milestones && s.milestones[m] ? "done" : "todo"}"><span>${m.replace(/_/g, " ")}</span><span>${s.milestones && s.milestones[m] ? esc(s.milestones[m]) : "—"}</span></div>`).join("")}</div>`;

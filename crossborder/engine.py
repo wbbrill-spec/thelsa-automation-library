@@ -168,9 +168,12 @@ def _direction(s: Shipment) -> str:
 def lane_for(s: Shipment) -> tuple[str, str]:
     """(lane label, hub/region label)."""
     dirn = _direction(s)
-    if dirn == "import":
+    if dirn in ("import", "domestic"):
         hub = s.destination_hub.value if s.destination_hub is not Hub.UNKNOWN else "Unassigned hub"
-        return f"Import → {hub}", hub
+        # Domestic (SIT / TRS) trips consolidate into the same hub lanes as the
+        # imports do, but never share a trailer with a cross-border load.
+        label = "Import" if dirn == "import" else "Domestic"
+        return f"{label} → {hub}", hub
     region = export_region(s)
     return f"Export → {region}", region
 

@@ -146,17 +146,23 @@ def _tms_cached(prog: dict):
         ships, tdiag = tms.fetch_tms_shipments(progress=tprog)
         tdiag = _compact_tms_diag(tdiag)
 
-        # An empty walk is only believable if the last good one was empty too.
-        # Moveware answering 503 on every slice returns zero rows without
-        # raising, which is exactly how the board lost all 45 TMS shipments on
-        # 2026-09-11 without a single error on the page.
-        if not ships and cached:
-            why = (f"Moveware returned no jobs ({tdiag.get('slice_errors', 0)} of "
+        # An empty walk is only believable if the last good one was empty too and
+        # no slice errored. Moveware answering 503 on every slice returns zero
+        # rows without raising, which is exactly how the board lost all 45 TMS
+        # shipments on 2026-09-11 without a single error on the page.
+        slice_errs = tdiag.get("slice_errors", 0)
+        if not ships and (cached or slice_errs):
+            why = (f"Moveware returned no jobs ({slice_errs} of "
                    f"{tdiag.get('slices', 0)} slices failed)")
-            log.warning("tms walk returned 0 rows; keeping %d cached shipments", len(cached))
+            log.warning("tms walk returned 0 rows (%d slice errors); keeping %d cached",
+                        slice_errs, len(cached))
             with _LOCK:
                 _TMS_CACHE.update(degraded=True, reason=why, diag={**tdiag, "degraded": True})
-            return _tms_stale(cached, tdiag, now, why)
+            if cached:
+                return _tms_stale(cached, tdiag, now, why)
+            # Nothing to fall back on — a restart during an outage starts cold.
+            # Say so loudly rather than reporting a confident zero.
+            return [], {**tdiag, "error": why, "degraded": True}
 
         with _LOCK:
             _TMS_CACHE.update(at=now, shipments=ships, diag=tdiag, degraded=False,

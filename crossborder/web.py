@@ -88,31 +88,86 @@ def _refresh_worker(include_completed: bool, prog: dict):
 # Moveware is polled on its own, slower clock (performance guardrail: a few
 # scheduled pulls a day, never every page load). The ClickUp refresh reuses the
 # last TMS result until it is older than TMS_CACHE_TTL (default 1 h).
-_TMS_CACHE: dict = {"at": 0.0, "shipments": [], "diag": {}}
+_TMS_CACHE: dict = {"at": 0.0, "shipments": [], "diag": {}, "good_at": 0.0,
+                    "attempt_at": 0.0, "degraded": False, "reason": None}
 _TMS_TTL = int(os.environ.get("TMS_CACHE_TTL", "3600") or 3600)
+# While Moveware is refusing, retry on this slower clock instead of on every
+# 5-minute ClickUp refresh — a walk is ~20 requests and the provider's
+# performance guardrail is explicit.
+_TMS_RETRY_S = int(os.environ.get("TMS_RETRY_TTL", "900") or 900)
+
+
+def _compact_tms_diag(tdiag: dict) -> dict:
+    """Drop the per-slice detail but keep how many slices failed and why —
+    without this a Moveware outage looks identical to a quiet week."""
+    slices = tdiag.get("slices", []) or []
+    errs = [s.get("error") for s in slices if isinstance(s, dict) and s.get("error")]
+    out = {k: v for k, v in tdiag.items() if k != "slices"}
+    out["slices"] = len(slices)
+    out["slice_errors"] = len(errs)
+    if errs:
+        out["slice_error_sample"] = errs[0][:160]
+    return out
+
+
+def _tms_stale(cached: list, cdiag: dict, now: float, reason: str) -> tuple[list, dict]:
+    with _LOCK:
+        good_at = _TMS_CACHE["good_at"] or _TMS_CACHE["at"]
+    return cached, {**cdiag, "stale": True, "count": len(cached),
+                    "stale_reason": reason,
+                    "stale_since": good_at or None,
+                    "stale_age_s": int(now - good_at) if good_at else None}
 
 
 def _tms_cached(prog: dict):
+    """Moveware on its own, slower clock. A failed walk — or one that suddenly
+    returns nothing where the last good walk had jobs — keeps serving the last
+    good fleet rather than silently emptying half the board."""
+    now = time.time()
     with _LOCK:
-        fresh = _TMS_CACHE["at"] and (time.time() - _TMS_CACHE["at"]) < _TMS_TTL
-        if fresh:
-            d = dict(_TMS_CACHE["diag"]); d["cache_age_s"] = int(time.time() - _TMS_CACHE["at"])
-            return list(_TMS_CACHE["shipments"]), d
+        age = (now - _TMS_CACHE["at"]) if _TMS_CACHE["at"] else None
+        degraded = _TMS_CACHE["degraded"]
+        since_attempt = now - (_TMS_CACHE["attempt_at"] or 0.0)
+        cached = list(_TMS_CACHE["shipments"])
+        cdiag = dict(_TMS_CACHE["diag"])
+        reason = _TMS_CACHE["reason"]
+    if age is not None and age < _TMS_TTL and not degraded:
+        return cached, {**cdiag, "cache_age_s": int(age)}
+    if degraded and since_attempt < _TMS_RETRY_S:
+        return _tms_stale(cached, cdiag, now, reason or "Moveware unavailable")
+
+    with _LOCK:
+        _TMS_CACHE["attempt_at"] = now
     try:
         if not tms.MovewareClient.have_creds():
             return [], {"error": "MW_USERNAME / MW_PASSWORD / MW_COMPANY_ID not set"}
         tprog: dict = {}
         prog["tms"] = tprog
         ships, tdiag = tms.fetch_tms_shipments(progress=tprog)
-        tdiag = {k: v for k, v in tdiag.items() if k != "slices"} | {"slices": len(tdiag.get("slices", []))}
+        tdiag = _compact_tms_diag(tdiag)
+
+        # An empty walk is only believable if the last good one was empty too.
+        # Moveware answering 503 on every slice returns zero rows without
+        # raising, which is exactly how the board lost all 45 TMS shipments on
+        # 2026-09-11 without a single error on the page.
+        if not ships and cached:
+            why = (f"Moveware returned no jobs ({tdiag.get('slice_errors', 0)} of "
+                   f"{tdiag.get('slices', 0)} slices failed)")
+            log.warning("tms walk returned 0 rows; keeping %d cached shipments", len(cached))
+            with _LOCK:
+                _TMS_CACHE.update(degraded=True, reason=why, diag={**tdiag, "degraded": True})
+            return _tms_stale(cached, tdiag, now, why)
+
         with _LOCK:
-            _TMS_CACHE.update(at=time.time(), shipments=ships, diag=tdiag)
+            _TMS_CACHE.update(at=now, shipments=ships, diag=tdiag, degraded=False,
+                              reason=None, good_at=now if ships else _TMS_CACHE["good_at"])
         return ships, tdiag
     except Exception as exc:  # noqa: BLE001 — never lose the ClickUp fleet over Moveware
         log.exception("tms fetch failed")
+        why = f"{type(exc).__name__}: {exc}"
         with _LOCK:
-            stale = list(_TMS_CACHE["shipments"])
-        return stale, {"error": f"{type(exc).__name__}: {exc}", "stale_count": len(stale)}
+            _TMS_CACHE.update(degraded=True, reason=why)
+        return _tms_stale(cached, cdiag, now, why)
 
 
 def ensure_fresh(force: bool = False, include_completed: bool = False) -> dict:
@@ -252,7 +307,9 @@ def api_shipments():
                                     "errors": diag.get("errors"),
                                     "tms": {k: v for k, v in (diag.get("tms") or {}).items()
                                             if k in ("env", "count", "error", "rows_seen", "cross_border", "by_direction",
-                                                     "details_fetched", "requests_made", "by_stage")}},
+                                                     "details_fetched", "requests_made", "by_stage",
+                                                     "stale", "stale_reason", "stale_since", "stale_age_s",
+                                                     "slice_errors", "slice_error_sample", "cache_age_s")}},
                     "shipments": [s.to_dict() for s in shipments]})
 
 

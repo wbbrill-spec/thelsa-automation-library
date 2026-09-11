@@ -342,7 +342,16 @@ async function load(force) {
   $("#src-tim").textContent = `ClickUp · ${timN}`; $("#src-tim").className = "pill ok";
   const t = DIAG.tms || {};
   const tmsN = ALL.filter(s => s.source === "TMS").length;
-  if (t.error) { $("#src-tms").textContent = "Moveware · error"; $("#src-tms").className = "pill warn"; $("#src-tms").title = t.error; }
+  if (t.stale) {
+    // Moveware is refusing; the board is showing the last good pull so the TMS
+    // half does not silently vanish. Say so, and say how old it is.
+    const mins = t.stale_age_s == null ? null : Math.round(t.stale_age_s / 60);
+    const when = t.stale_since ? new Date(t.stale_since * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"}) : null;
+    $("#src-tms").textContent = `Moveware · unreachable — ${tmsN} from ${when || (mins + " min ago")}`;
+    $("#src-tms").className = "pill warn";
+    $("#src-tms").title = `${t.stale_reason || "Moveware unavailable"}\nShowing the last successful pull${mins != null ? " (" + mins + " min old)" : ""}. Retrying periodically.`;
+  }
+  else if (t.error) { $("#src-tms").textContent = "Moveware · error"; $("#src-tms").className = "pill warn"; $("#src-tms").title = t.error; }
   else if (t.count != null) { $("#src-tms").textContent = `Moveware · ${tmsN}${t.env && t.env !== "prod" ? " (" + t.env + ")" : ""}`; $("#src-tms").className = "pill ok"; $("#src-tms").title = `${t.rows_seen} jobs updated in window · ${t.cross_border} cross-border · ${t.requests_made} calls`; }
   else { $("#src-tms").textContent = "Moveware · pending"; $("#src-tms").className = "pill"; }
   const rem = DIAG.remisiones || {};

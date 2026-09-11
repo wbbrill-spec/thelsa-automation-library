@@ -61,11 +61,22 @@ def test_a_zero_row_walk_keeps_the_last_good_fleet(monkeypatch):
 
 
 def test_a_genuinely_empty_first_walk_is_accepted(monkeypatch):
-    """Zero rows is only suspicious when we previously had some."""
+    """Zero rows is only believable when no slice errored."""
     _walk(monkeypatch, [])
     ships, diag = web._tms_cached({})
-    assert ships == [] and not diag.get("stale")
+    assert ships == [] and not diag.get("stale") and not diag.get("error")
     assert web._TMS_CACHE["degraded"] is False
+
+
+def test_a_cold_start_during_an_outage_reports_an_error_not_a_zero(monkeypatch):
+    """A Render restart mid-outage leaves no cache to fall back on. The board
+    must still say Moveware is unreachable rather than showing a confident 0."""
+    _walk(monkeypatch, [], slices=[{"error": "HTTP Error 503"}, {"error": "HTTP Error 503"}])
+    ships, diag = web._tms_cached({})
+    assert ships == []
+    assert "no jobs" in diag["error"], "a 503 storm must not read as an empty business"
+    assert diag["slice_errors"] == 2
+    assert web._TMS_CACHE["degraded"] is True
 
 
 def test_while_degraded_moveware_is_not_hammered(monkeypatch):

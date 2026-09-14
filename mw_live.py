@@ -52,9 +52,9 @@ _MAX_JOBS = 3     # cap the deep-load sample — each job makes sub-calls
                   # further bounded by _LOAD_BUDGET.
  
 # Env-driven base URL; defaults to PRODUCTION. Override with MOVEWARE_URL to
-# point at UAT (https://rest.moveconnect.com/movewareUAT/v1) for testing.
+# point at UAT (https://rest.moveware-test.app/08800/api) for testing.
 BASE_URL = os.environ.get(
-    "MOVEWARE_URL", "https://rest.moveconnect.com/Moveware/v1"
+    "MOVEWARE_URL", "https://rest.moveware-test.app/64000/api"
 ).rstrip("/")
  
  

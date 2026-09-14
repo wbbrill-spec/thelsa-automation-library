@@ -375,17 +375,27 @@ def fetch_tms_shipments(client: MovewareClient | None = None, *, days: int | Non
     # V2 ignores every date filter we tried (createdAfter/createdFrom/
     # modifiedSince/updatedAfter/dateFrom and six more — measured 2026-09-14,
     # all returned the identical first page). It honours exactly three params:
-    #   limit   rows per page
+    #   limit   rows per page — honoured up to 18, silently capped above that
     #   page    1-indexed page number   (`offset` is ignored — that was v1)
     #   status  job status, W = Won
     # With status=W the feed is ordered NEWEST FIRST (page 1 = today, page 60 ≈
     # 11 months back), so a date window needs no filter at all: page forward and
     # stop once the rows fall out of it. That is also far cheaper than v1's
     # date-slice walk, which is what the performance guardrail cares about.
+    #
+    # DO NOT re-add a "short page means the end" check. Page sizes come back
+    # erratic — limit=10 returned 10, then 8, then 8; limit=15 returned 15, then
+    # 3, then 15 — so a short page says nothing about whether more jobs exist.
+    # An earlier version broke on `len(rows) < page_limit` and therefore stopped
+    # after page 1 every single time, silently capping the board at one page.
+    # The walk ends on an empty page, on reaching the date window, on a page
+    # budget, or when pages stop yielding anything new.
     seen: dict[str, dict] = {}
     cutoff = today - dt.timedelta(days=days)
     max_pages = int(os.environ.get("TMS_MAX_PAGES", "40") or 40)
+    page_limit = min(page_limit, int(os.environ.get("TMS_PAGE_LIMIT", "18") or 18))
     stopped = "page budget"
+    barren = 0
     for page in range(1, max_pages + 1):
         try:
             rows = client.jobs(page=page, limit=page_limit,
@@ -399,14 +409,16 @@ def fetch_tms_shipments(client: MovewareClient | None = None, *, days: int | Non
             diag["slices"].append({"page": page, "rows": 0})
             break
         oldest = None
+        fresh = 0
         for r in rows:
             rid = str(r.get("id") or "")
             if rid and rid not in seen:
                 seen[rid] = r
+                fresh += 1
             c = _created(r)
             if c and (oldest is None or c < oldest):
                 oldest = c
-        diag["slices"].append({"page": page, "rows": len(rows),
+        diag["slices"].append({"page": page, "rows": len(rows), "new": fresh,
                                "oldest": oldest.isoformat() if oldest else None})
         prog["slices_done"] = len(diag["slices"])
         # The feed is newest-first, so once a whole page predates the window
@@ -414,8 +426,11 @@ def fetch_tms_shipments(client: MovewareClient | None = None, *, days: int | Non
         if oldest and oldest < cutoff:
             stopped = "reached the window"
             break
-        if len(rows) < page_limit:
-            stopped = "short page"
+        # If `page` ever stops working the way `offset` already did, every page
+        # is the same page. Notice that instead of re-reading it 40 times.
+        barren = barren + 1 if fresh == 0 else 0
+        if barren >= 3:
+            stopped = "pages stopped yielding new jobs"
             break
 
     diag["pages_walked"] = len(diag["slices"])

@@ -51,27 +51,48 @@ _MAX_JOBS = 3     # cap the deep-load sample — each job makes sub-calls
                   # inside the proxy/worker timeout; result is cached (TTL) and
                   # further bounded by _LOAD_BUDGET.
  
-# Env-driven base URL; defaults to PRODUCTION. Override with MOVEWARE_URL to
-# point at UAT (https://rest.moveware-test.app/08800/api) for testing.
-BASE_URL = os.environ.get(
-    "MOVEWARE_URL", "https://rest.moveware-test.app/64000/api"
-).rstrip("/")
- 
- 
+# ── Moveware V2 endpoint (2026-09-14) ────────────────────────────────────────
+# V2 replaces the v1 host (rest.moveconnect.com/Moveware/v1) and moves the
+# company id OUT of the mw-company-id header and INTO the URL path.
+#
+# READ THIS BEFORE "FIXING" THE URL: the LIVE endpoint is served from a host
+# literally named `rest.moveware-test.app`. That is correct and deliberate on
+# the vendor's side — the hostname does NOT indicate the test database. What
+# selects live vs test is the company segment in the path:
+#
+#     64000 → Thelsa LIVE          08800 → Thelsa TEST
+#
+# So MW_COMPANY_SEGMENT is the switch, not the hostname. Set it to 08800 to
+# point everything at the test DB; leave it unset for live.
+MW_HOST = os.environ.get("MOVEWARE_HOST", "https://rest.moveware-test.app").rstrip("/")
+MW_COMPANY_SEGMENT = os.environ.get("MW_COMPANY_SEGMENT", "64000").strip().strip("/")
+# MOVEWARE_URL still wins outright when set, so a full custom base URL (or a
+# rollback to v1) needs no code change.
+BASE_URL = (os.environ.get("MOVEWARE_URL")
+            or f"{MW_HOST}/{MW_COMPANY_SEGMENT}/api").rstrip("/")
+
+
 def have_creds() -> bool:
-    return all(os.environ.get(k) for k in ("MW_USERNAME", "MW_PASSWORD", "MW_COMPANY_ID"))
- 
- 
+    """V2 authenticates on username + password alone; the company id is in the
+    path. MW_COMPANY_ID is no longer required for the client to activate."""
+    return all(os.environ.get(k) for k in ("MW_USERNAME", "MW_PASSWORD"))
+
+
 def _headers() -> dict:
-    return {
+    h = {
         "mw-username": os.environ.get("MW_USERNAME", ""),
         "mw-password": os.environ.get("MW_PASSWORD", ""),
-        "mw-company-id": os.environ.get("MW_COMPANY_ID", ""),
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
- 
- 
+    # V2 does not list mw-company-id. Send it only if it is still configured, so
+    # leaving the old Render var in place cannot break anything and removing it
+    # cannot either.
+    if os.environ.get("MW_COMPANY_ID"):
+        h["mw-company-id"] = os.environ["MW_COMPANY_ID"]
+    return h
+
+
 # Per-request timeout for every Moveware call. Kept SHORT on purpose: the /audit
 # page makes many sequential calls (deep-load = several jobs × sub-calls each,
 # plus the feed count), and if any one call is allowed to hang the cumulative time

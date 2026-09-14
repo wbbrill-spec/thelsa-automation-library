@@ -140,7 +140,7 @@ def _tms_cached(prog: dict):
         _TMS_CACHE["attempt_at"] = now
     try:
         if not tms.MovewareClient.have_creds():
-            return [], {"error": "MW_USERNAME / MW_PASSWORD / MW_COMPANY_ID not set"}
+            return [], {"error": "MW_USERNAME / MW_PASSWORD not set"}
         tprog: dict = {}
         prog["tms"] = tprog
         ships, tdiag = tms.fetch_tms_shipments(progress=tprog)
@@ -214,7 +214,8 @@ def _config_status() -> dict:
         "CLICKUP_TEAM_ID": os.environ.get("CLICKUP_TEAM_ID", "") or None,
         "CLICKUP_ACTIVE_SPACE": os.environ.get("CLICKUP_ACTIVE_SPACE", "Logistics Coordination"),
         "CLICKUP_WEBHOOK_SECRET": bool(os.environ.get("CLICKUP_WEBHOOK_SECRET")),
-        "MW_CREDS": all(os.environ.get(k) for k in ("MW_USERNAME", "MW_PASSWORD", "MW_COMPANY_ID")),
+        "MW_CREDS": all(os.environ.get(k) for k in ("MW_USERNAME", "MW_PASSWORD")),
+        "MW_BASE_URL": tms.BASE_URLS.get(os.environ.get("TMS_MW_ENV", "prod").lower(), ""),
     }
 
 

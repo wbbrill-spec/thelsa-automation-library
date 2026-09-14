@@ -7,7 +7,10 @@ call per cross-border job, run in the background a few times an hour and cached.
 Nothing here ever writes to Moveware.
 
 What we know about the instance (moveware-api-integration-guide.md, mw_live.py):
-  • header auth (mw-username / mw-password / mw-company-id), ~2 s per call
+  • V2 (from 2026-09-14): header auth is mw-username / mw-password only and the
+    company id moved into the URL path (…/64000/api = LIVE, …/08800/api = TEST).
+    The live host is literally named rest.moveware-test.app — vendor naming, not
+    the test DB. ~2 s per call.
   • `offset` on /jobs is a 1-indexed PAGE number, feed is oldest-first
   • filtered lists silently cap at ~50–150 rows → walk small date slices;
     `updatedAfter` returns 400 on Thelsa's instance, `createdAfter/Before` work
@@ -31,10 +34,16 @@ from .models import (
 
 log = logging.getLogger(__name__)
 
+# Moveware V2 (2026-09-14). The company id lives in the PATH, not a header.
+# The live endpoint is served from a host named `rest.moveware-test.app` — that
+# is the vendor's naming, not a mistake, and it is NOT the test database. The
+# company segment is what picks the database: 64000 = LIVE, 08800 = TEST.
+_MW_HOST = os.environ.get("MOVEWARE_HOST", "https://rest.moveware-test.app").rstrip("/")
 BASE_URLS = {
-    "prod": "https://rest.moveconnect.com/Moveware/v1",
-    "test": "https://rest.moveconnect.com/MovewareREST-test/v1",
-    "uat": "https://rest.moveconnect.com/movewareUAT/v1",
+    "prod": f"{_MW_HOST}/{os.environ.get('MW_COMPANY_SEGMENT', '64000').strip().strip('/')}/api",
+    "test": f"{_MW_HOST}/08800/api",
+    # v1, kept only as a named rollback target (TMS_MW_ENV=v1).
+    "v1": "https://rest.moveconnect.com/Moveware/v1",
 }
 MX = "MX"
 # Country codes on the US side of the border that count as "cross-border with Mexico".
@@ -66,7 +75,8 @@ class MovewareClient:
 
     @staticmethod
     def have_creds() -> bool:
-        return all(os.environ.get(k) for k in ("MW_USERNAME", "MW_PASSWORD", "MW_COMPANY_ID"))
+        # V2: username + password only — the company id is in the base URL path.
+        return all(os.environ.get(k) for k in ("MW_USERNAME", "MW_PASSWORD"))
 
     def get(self, path: str, timeout: int = 12):
         self.requests_made += 1

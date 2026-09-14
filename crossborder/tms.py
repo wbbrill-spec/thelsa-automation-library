@@ -91,7 +91,12 @@ class MovewareClient:
 
     def jobs(self, page: int = 1, limit: int = 50, **filters) -> list[dict]:
         q = "&".join(f"{k}={v}" for k, v in filters.items() if v not in (None, ""))
-        body = self.get(f"/jobs?limit={limit}&offset={page}" + (f"&{q}" if q else ""))
+        # Both spellings of "1-indexed page number": V2 reads `page` and ignores
+        # `offset`; v1 read `offset`. Sending both keeps the TMS_MW_ENV=v1
+        # rollback working. Dropping `page` here is what made the V2 walk re-read
+        # page 1 forever even after the walk itself had been fixed.
+        body = self.get(f"/jobs?limit={limit}&page={page}&offset={page}"
+                        + (f"&{q}" if q else ""))
         if isinstance(body, dict):
             rows = body.get("jobs") or body.get("data") or []
         else:

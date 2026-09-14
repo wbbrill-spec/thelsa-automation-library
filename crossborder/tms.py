@@ -29,7 +29,8 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 
 from .models import (
-    CUFT_PER_M3, Hub, Shipment, Source, Stage, hub_for_destination, parse_date, to_number,
+    CUFT_PER_M3, Hub, Shipment, Source, Stage, hub_for_destination, norm_text, parse_date,
+    to_number,
 )
 
 log = logging.getLogger(__name__)
@@ -112,20 +113,71 @@ def _s(v) -> str:
     return str(v or "").strip()
 
 
+# V2 list rows spell the country out in full ("United States", "Mexico") where
+# v1 sent a 2-letter code. Truncating a name to its first two letters turned
+# "United States" into "UN" and "Mexico" into "ME", so NOTHING matched US_SIDE
+# or MX and every job looked domestic — the dashboard reported 0 cross-border
+# jobs on a feed that was full of them. Names are mapped explicitly; anything
+# unrecognized stays whatever 2-letter code it already was.
+_COUNTRY_NAMES = {
+    "united states": "US", "united states of america": "US", "usa": "US",
+    "us": "US", "estados unidos": "US", "eeuu": "US",
+    "mexico": "MX", "estados unidos mexicanos": "MX",
+    "canada": "CA", "united kingdom": "GB", "great britain": "GB",
+    "germany": "DE", "france": "FR", "spain": "ES", "brazil": "BR",
+    "brasil": "BR", "chile": "CL", "colombia": "CO", "argentina": "AR",
+    "peru": "PE", "japan": "JP", "china": "CN", "india": "IN",
+    "australia": "AU", "netherlands": "NL", "belgium": "BE", "italy": "IT",
+    "switzerland": "CH", "kuwait": "KW", "qatar": "QA",
+    "united arab emirates": "AE", "saudi arabia": "SA", "south korea": "KR",
+    "singapore": "SG", "guatemala": "GT", "costa rica": "CR", "panama": "PA",
+}
+
+
 def _country(v) -> str:
-    """List rows carry 2-letter codes; detail may carry an address object."""
+    """A 2-letter ISO code from a code, a full country name, or an address dict."""
     if isinstance(v, dict):
         for k in ("country", "countryCode", "code"):
             if v.get(k):
-                return str(v[k]).strip().upper()[:2]
+                v = v[k]
+                break
+        else:
+            return ""
+    s = str(v or "").strip()
+    if not s:
         return ""
-    s = str(v or "").strip().upper()
-    return s if len(s) == 2 else s[:2] if s else ""
+    named = _COUNTRY_NAMES.get(norm_text(s))
+    if named:
+        return named
+    s = s.upper()
+    return s if len(s) == 2 else s[:2]
+
+
+def _created(row: dict):
+    """The job's created date, however this API version nests it."""
+    ad = row.get("activityDates")
+    if isinstance(ad, dict):
+        c = ad.get("created")
+        if isinstance(c, dict):
+            return parse_date(c.get("date"))
+        if c:
+            return parse_date(c)
+    return parse_date(row.get("created") or row.get("createdDate"))
+
+
+def _endpoints(row: dict) -> tuple:
+    """(origin, destination) however this API version nests them: V2 puts them
+    under addresses{}, v1 had them at the top level."""
+    addr = row.get("addresses")
+    if isinstance(addr, dict) and (addr.get("origin") or addr.get("destination")):
+        return addr.get("origin"), addr.get("destination")
+    return row.get("origin"), row.get("destination")
 
 
 def direction(row: dict) -> str | None:
     """'import' (US side → MX), 'export' (MX → US side) or None (not cross-border)."""
-    o, d = _country(row.get("origin")), _country(row.get("destination"))
+    _o, _d = _endpoints(row)
+    o, d = _country(_o), _country(_d)
     if d == MX and o in US_SIDE:
         return "import"
     if o == MX and d in US_SIDE:
@@ -256,7 +308,9 @@ def build_shipment(row: dict, detail: dict | None, *, today: dt.date | None = No
     origin = _place(oloc) if oloc else (_place(d.get("origin")) or _country(row.get("origin")))
     destination = _place(dloc) if dloc else (_place(d.get("destination")) or _country(row.get("destination")))
     hub = hub_for_destination(destination) if dirn == "import" else Hub.UNKNOWN
-    updated = _mw_date(row.get("lastUpdated")) or _mw_date(d.get("lastUpdated"))
+    # V2 names this dateModified; v1 sent lastUpdated. Read both.
+    updated = (_mw_date(row.get("dateModified")) or _mw_date(row.get("lastUpdated"))
+               or _mw_date(d.get("dateModified")) or _mw_date(d.get("lastUpdated")))
     last_progress = max([x for x in (dates["ops_complete"], dates["delivery"] if dates["delivery"] and dates["delivery"] <= today else None,
                                     dates["uplift"] if dates["uplift"] and dates["uplift"] <= today else None, updated) if x], default=None)
     days = (today - last_progress).days if last_progress else None
@@ -317,37 +371,66 @@ def fetch_tms_shipments(client: MovewareClient | None = None, *, days: int | Non
                   "rows_seen": 0, "cross_border": 0, "by_direction": {}, "by_status": {},
                   "by_lane": {}, "details_fetched": 0, "detail_errors": [], "errors": client.errors}
 
+    # ── the walk (V2) ────────────────────────────────────────────────────────
+    # V2 ignores every date filter we tried (createdAfter/createdFrom/
+    # modifiedSince/updatedAfter/dateFrom and six more — measured 2026-09-14,
+    # all returned the identical first page). It honours exactly three params:
+    #   limit   rows per page
+    #   page    1-indexed page number   (`offset` is ignored — that was v1)
+    #   status  job status, W = Won
+    # With status=W the feed is ordered NEWEST FIRST (page 1 = today, page 60 ≈
+    # 11 months back), so a date window needs no filter at all: page forward and
+    # stop once the rows fall out of it. That is also far cheaper than v1's
+    # date-slice walk, which is what the performance guardrail cares about.
     seen: dict[str, dict] = {}
-    end = today
-    start_limit = today - dt.timedelta(days=days)
-    while end > start_limit:
-        begin = max(start_limit, end - dt.timedelta(days=slice_days))
-        got = 0
-        for page in range(1, max_pages_per_slice + 1):
-            try:
-                rows = client.jobs(page=page, limit=page_limit,
-                                   createdAfter=begin.isoformat(), createdBefore=end.isoformat())
-            except MovewareError as exc:
-                diag["slices"].append({"from": begin.isoformat(), "to": end.isoformat(), "error": str(exc)})
-                rows = []
-                break
-            for r in rows:
-                rid = str(r.get("id") or "")
-                if rid and rid not in seen:
-                    seen[rid] = r
-            got += len(rows)
-            if len(rows) < page_limit:
-                break
-        diag["slices"].append({"from": begin.isoformat(), "to": end.isoformat(), "rows": got})
+    cutoff = today - dt.timedelta(days=days)
+    max_pages = int(os.environ.get("TMS_MAX_PAGES", "40") or 40)
+    stopped = "page budget"
+    for page in range(1, max_pages + 1):
+        try:
+            rows = client.jobs(page=page, limit=page_limit,
+                               status=",".join(sorted(ACTIVE_STATUSES)))
+        except MovewareError as exc:
+            diag["slices"].append({"page": page, "error": str(exc)})
+            stopped = "error"
+            break
+        if not rows:
+            stopped = "end of feed"
+            diag["slices"].append({"page": page, "rows": 0})
+            break
+        oldest = None
+        for r in rows:
+            rid = str(r.get("id") or "")
+            if rid and rid not in seen:
+                seen[rid] = r
+            c = _created(r)
+            if c and (oldest is None or c < oldest):
+                oldest = c
+        diag["slices"].append({"page": page, "rows": len(rows),
+                               "oldest": oldest.isoformat() if oldest else None})
         prog["slices_done"] = len(diag["slices"])
-        end = begin - dt.timedelta(days=1)
+        # The feed is newest-first, so once a whole page predates the window
+        # every later page does too.
+        if oldest and oldest < cutoff:
+            stopped = "reached the window"
+            break
+        if len(rows) < page_limit:
+            stopped = "short page"
+            break
 
+    diag["pages_walked"] = len(diag["slices"])
+    diag["stopped_because"] = stopped
+    # Drop anything older than the window — the last page straddles the cutoff.
+    for rid in [k for k, r in seen.items()
+                if (_created(r) or today) < cutoff]:
+        seen.pop(rid, None)
     diag["rows_seen"] = len(seen)
     xb = []
     for r in seen.values():
         st = _s(r.get("status")).upper()[:1] or "?"
         diag["by_status"][st] = diag["by_status"].get(st, 0) + 1
-        lane = f"{_country(r.get('origin')) or '?'}→{_country(r.get('destination')) or '?'}"
+        _o, _d = _endpoints(r)
+        lane = f"{_country(_o) or '?'}→{_country(_d) or '?'}"
         diag["by_lane"][lane] = diag["by_lane"].get(lane, 0) + 1
         dn = direction(r)
         if dn and st in ACTIVE_STATUSES:
@@ -355,7 +438,9 @@ def fetch_tms_shipments(client: MovewareClient | None = None, *, days: int | Non
             diag["by_direction"][dn] = diag["by_direction"].get(dn, 0) + 1
     diag["cross_border"] = len(xb)
     diag["by_lane"] = dict(sorted(diag["by_lane"].items(), key=lambda kv: -kv[1])[:12])
-    xb.sort(key=lambda r: str(r.get("lastUpdated") or ""), reverse=True)
+    # V2: dateModified. v1: lastUpdated. Sorting on a key that no longer exists
+    # would have quietly handed max_details the wrong jobs.
+    xb.sort(key=lambda r: str(r.get("dateModified") or r.get("lastUpdated") or ""), reverse=True)
 
     detail_map: dict[str, dict] = {}
     if details and xb:

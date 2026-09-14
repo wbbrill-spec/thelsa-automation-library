@@ -375,9 +375,16 @@ def fetch_tms_shipments(client: MovewareClient | None = None, *, days: int | Non
     # V2 ignores every date filter we tried (createdAfter/createdFrom/
     # modifiedSince/updatedAfter/dateFrom and six more — measured 2026-09-14,
     # all returned the identical first page). It honours exactly three params:
-    #   limit   rows per page — honoured up to 18, silently capped above that
+    #   limit   rows per page — see the size trap below
     #   page    1-indexed page number   (`offset` is ignored — that was v1)
     #   status  job status, W = Won
+    #
+    # THE PAGE-SIZE TRAP (measured 2026-09-14): `page` only advances while
+    # `limit` is small. At limit=5/8/10 the pages are distinct and walk steadily
+    # back through time. At limit=18 — and at 50, where the server caps the page
+    # at 18 anyway — page 2, 3 and 4 come back as byte-identical copies of page
+    # 1, so the walk collects 18 jobs and can never see past them. 10 is used:
+    # honoured exactly, pages continuously, and half the requests of 5.
     # With status=W the feed is ordered NEWEST FIRST (page 1 = today, page 60 ≈
     # 11 months back), so a date window needs no filter at all: page forward and
     # stop once the rows fall out of it. That is also far cheaper than v1's
@@ -393,7 +400,7 @@ def fetch_tms_shipments(client: MovewareClient | None = None, *, days: int | Non
     seen: dict[str, dict] = {}
     cutoff = today - dt.timedelta(days=days)
     max_pages = int(os.environ.get("TMS_MAX_PAGES", "40") or 40)
-    page_limit = min(page_limit, int(os.environ.get("TMS_PAGE_LIMIT", "18") or 18))
+    page_limit = min(page_limit, int(os.environ.get("TMS_PAGE_LIMIT", "10") or 10))
     stopped = "page budget"
     barren = 0
     for page in range(1, max_pages + 1):

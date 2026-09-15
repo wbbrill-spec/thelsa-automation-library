@@ -37,7 +37,7 @@ import time
 
 from flask import Blueprint, jsonify, redirect, request, session, url_for
 
-from . import alerts, clickup, demo, engine, remisiones, tim, tms
+from . import alerts, clickup, demo, engine, remisiones, sit, tim, tms
 from .dashboard import DASHBOARD_HTML
 from .models import Source
 
@@ -73,6 +73,15 @@ def _refresh_worker(include_completed: bool, prog: dict):
             tms_ships, tdiag = _tms_cached(prog)
             shipments = shipments + tms_ships
             diag["tms"] = tdiag
+        # SIT "Plan de Viajes" — the Mexican onward leg (truck, driver, dates)
+        # and the real trucks the engine can offer. A SIT failure must never
+        # cost us the board, same rule as Moveware and Remisiones.
+        if os.environ.get("SIT_ENABLED", "1") in ("1", "true", "yes"):
+            try:
+                diag["sit"] = _merge_sit(shipments)
+            except Exception as exc:  # noqa: BLE001
+                log.exception("sit merge failed")
+                diag["sit"] = {"error": f"{type(exc).__name__}: {exc}"}
         with _LOCK:
             _CACHE.update(at=time.time(), shipments=shipments, diag=diag,
                           completed=include_completed, error=None)
@@ -174,6 +183,46 @@ def _tms_cached(prog: dict):
         with _LOCK:
             _TMS_CACHE.update(degraded=True, reason=why)
         return _tms_stale(cached, cdiag, now, why)
+
+
+# The Plan de Viajes workbook is republished ~3x a day, so it is pulled on its
+# own slow clock and the parsed trips are kept for the engine to plan against.
+_SIT_CACHE: dict = {"at": 0.0, "trips": [], "fleet": {}, "diag": {}}
+_SIT_TTL = int(os.environ.get("SIT_CACHE_TTL", "7200") or 7200)
+
+
+def _sit_cached():
+    now = time.time()
+    with _LOCK:
+        age = (now - _SIT_CACHE["at"]) if _SIT_CACHE["at"] else None
+        if age is not None and age < _SIT_TTL:
+            return list(_SIT_CACHE["trips"]), dict(_SIT_CACHE["fleet"]), {**_SIT_CACHE["diag"], "cache_age_s": int(age)}
+    trips, fleet, info = sit.load_plan()
+    with _LOCK:
+        # Keep the last good plan rather than blanking the onward leg on a blip.
+        if trips or not _SIT_CACHE["trips"]:
+            _SIT_CACHE.update(at=now, trips=trips, fleet=fleet, diag=info)
+            return trips, fleet, info
+        return (list(_SIT_CACHE["trips"]), dict(_SIT_CACHE["fleet"]),
+                {**_SIT_CACHE["diag"], "stale": True, "stale_reason": info.get("error") or "no trips returned"})
+
+
+def _merge_sit(shipments: list) -> dict:
+    """Hang each shipment's Mexican leg on it, and remember the trucks."""
+    trips, fleet, info = _sit_cached()
+    if not trips:
+        return info
+    plans = sit.job_plans(trips)
+    m = sit.match_plans_to_shipments(plans, shipments)
+    by_id = {s.id: s for s in shipments}
+    for sid, jp in m["matches"].items():
+        if sid in by_id:
+            sit.enrich_shipment(by_id[sid], jp)
+    trucks = sit.truck_loads(trips, fleet)
+    with _LOCK:
+        _SIT_CACHE["trucks"] = trucks
+    return {**info, **m["diag"], "trips": len(trips), "fleet": len(fleet),
+            "trucks": len(trucks), "spare_by_hub": sit.spare_by_hub(trucks)}
 
 
 def ensure_fresh(force: bool = False, include_completed: bool = False) -> dict:
@@ -338,7 +387,7 @@ def api_shipments():
     shipments, diag = _with_demo(shipments, diag, request.args)
     return jsonify({"count": len(shipments), "status": status,
                     "diagnostics": {"remisiones": diag.get("remisiones"), "requests_made": diag.get("requests_made"),
-                                    "errors": diag.get("errors"), "demo": diag.get("demo"),
+                                    "errors": diag.get("errors"), "demo": diag.get("demo"), "sit": diag.get("sit"),
                                     "tms": {k: v for k, v in (diag.get("tms") or {}).items()
                                             if k in ("env", "count", "error", "rows_seen", "cross_border", "by_direction",
                                                      "details_fetched", "requests_made", "by_stage",
@@ -359,7 +408,31 @@ def api_plan():
         return jsonify({"error": f"{type(exc).__name__}: {exc}", "loads": []}), 200
     p["status"] = status
     p["demo"] = diag.get("demo")
+    # Name the real SIT trucks that could carry each suggested load, and the
+    # empty space already heading to each hub. Advisory only — nothing books.
+    with _LOCK:
+        trucks = list(_SIT_CACHE.get("trucks") or [])
+    if trucks and not diag.get("demo"):
+        try:
+            p["loads"] = sit.offer_trucks(p.get("loads") or [], trucks)
+            p["spare_by_hub"] = sit.spare_by_hub(trucks)
+            p["trucks_considered"] = len(trucks)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("truck offers failed")
+            p["trucks_error"] = f"{type(exc).__name__}: {exc}"
     return jsonify(p)
+
+
+@crossborder_bp.route("/crossborder/api/trucks")
+@_login_required
+def api_trucks():
+    """SIT trucks in the horizon with their booked and spare m³."""
+    load_shipments()                      # make sure a refresh has run at least once
+    with _LOCK:
+        trucks = list(_SIT_CACHE.get("trucks") or [])
+        diag = dict(_SIT_CACHE.get("diag") or {})
+    return jsonify({"count": len(trucks), "spare_by_hub": sit.spare_by_hub(trucks),
+                    "diagnostics": diag, "trucks": trucks})
 
 
 def _plan_recipients() -> list[str]:

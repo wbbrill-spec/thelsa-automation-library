@@ -97,6 +97,15 @@ main { max-width: 1500px; margin: 0 auto; padding: 22px 24px 60px; }
 .load .row .m3 { white-space: nowrap; color: #333; font-weight: 600; }
 .load .adv { font-size: 12px; color: #92400e; background: #fff8ec; border-radius: 8px; padding: 8px 10px; margin-top: 8px; line-height: 1.45; }
 .load .rs { color: #999; font-size: 11px; }
+.trucks { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; margin-top: 10px; }
+.truck { background: #fff; border: 1px solid #e8e8e8; border-radius: 10px; padding: 10px 12px; font-size: 12px; }
+.truck b { font-size: 13px; }
+.truck .sp { color: #1e7e34; font-weight: 700; }
+.truck .bar { height: 8px; background: #f0f1f4; border-radius: 4px; overflow: hidden; margin: 6px 0 4px; }
+.truck .bar i { display: block; height: 100%; background: #1967d2; }
+.tag.truck { background: #e8f0fe; color: #1967d2; }
+.tag.truckfit { background: #e6f4ea; color: #1e7e34; }
+.tag.awaiting_truck { background: #fff4e5; color: #b45309; }
 .tag.full { background: #e6f4ea; color: #1e7e34; } .tag.light { background: #fff4e5; color: #b45309; } .tag.xs { background: #1a1a2e; color: #fff; } .tag.anchor { background: #e8f0fe; color: #1967d2; } .tag.risk { background: #fce8e6; color: #c0392b; }
 .plan-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 22px 0 10px; }
 .plan-head .section { margin: 0; }
@@ -166,6 +175,7 @@ body.demo header { border-bottom-color: #7c2d12; }
     <span id="src-rem" class="pill">Remisiones · —</span>
     <span id="src-tms" class="pill">Moveware · —</span>
     <span id="src-trs" class="pill" style="display:none">SIT/TRS · —</span>
+    <span id="src-sit" class="pill" style="display:none">Plan de Viajes · —</span>
     <span id="asof">—</span>
     <span class="langtog"><button id="lang-en" class="on">EN</button><button id="lang-es">ES</button></span>
     <a href="/" id="lib-link">← Library</a>
@@ -203,6 +213,11 @@ body.demo header { border-bottom-color: #7c2d12; }
     </div>
     <div class="loads" id="loads"></div>
     <div id="coming" class="note" style="display:none"></div>
+  <div id="sparehead" class="plan-head" style="display:none">
+    <div class="section"><span data-i18n="Trucks with space">Trucks with space</span> <span class="cnt" id="cnt-trucks">0</span></div>
+    <span class="plan-stats" id="spare-stats"></span>
+  </div>
+  <div class="trucks" id="trucks"></div>
 
     <div class="grid2">
       <div>
@@ -241,8 +256,8 @@ const FLAG_LABEL = {stalled:"Stalled ≥7 days", docs_incomplete:"Docs incomplet
   payment_pending:"Payment pending", in_storage:"In storage", certificate_pending:"Certificate pending",
   in_progress:"In progress", window_risk:"Delivery window at risk", docs_pending:"Waiting on documents",
   visa_pending:"Visa pending", unresponsive:"Customer unresponsive", awaiting_green_light:"Awaiting green light",
-  awaiting_booking:"Awaiting booking"};
-const FLAG_ICON = {stalled:"⏳", docs_incomplete:"📄", on_hold:"⛔", payment_pending:"💳", in_storage:"🏬", certificate_pending:"📝", in_progress:"▶", window_risk:"⚠️", unresponsive:"📵", docs_pending:"📄", visa_pending:"🛂", awaiting_green_light:"🟢", awaiting_booking:"📅"};
+  awaiting_booking:"Awaiting booking", awaiting_truck:"No truck assigned yet"};
+const FLAG_ICON = {stalled:"⏳", docs_incomplete:"📄", on_hold:"⛔", payment_pending:"💳", in_storage:"🏬", certificate_pending:"📝", in_progress:"▶", window_risk:"⚠️", unresponsive:"📵", docs_pending:"📄", visa_pending:"🛂", awaiting_green_light:"🟢", awaiting_booking:"📅", awaiting_truck:"🚚"};
 const ALERT_FLAGS = ["on_hold","payment_pending","window_risk","unresponsive","docs_incomplete","docs_pending","certificate_pending","visa_pending","stalled"];
 const HUBS = ["Monterrey","Mexico City","Guadalajara","Querétaro","Mérida","Torreón","Unknown"];
 const TRUCK_LV = 13;
@@ -311,6 +326,11 @@ const ES = {
   "open shipments without a destination hub": "envíos abiertos sin hub de destino",
   "Could not create draft: ": "No se pudo crear el borrador: ",
   "✉ Draft owner alerts": "✉ Borrador de alertas por responsable",
+  "Trucks with space": "Camiones con espacio", "On a truck already going": "En un camión que ya va",
+  "free": "libres", "truck": "camión", "trucks": "camiones",
+  "of empty space already heading to Mexico in the next 14 days": "de espacio vacío que ya va a México en los próximos 14 días",
+  "Mexican leg": "Tramo en México", "loads": "carga", "unloads": "descarga",
+  "No truck assigned yet": "Sin camión asignado",
 };
 let LANG = (function(){ try { return localStorage.getItem("cb_lang") || "en"; } catch(e){ return "en"; } })();
 function tr(s){ if (LANG !== "es" || s == null) return s; return (s in ES) ? ES[s] : s; }
@@ -372,6 +392,11 @@ async function load(force) {
   const trsN = ALL.filter(s => s.source === "TRS").length;
   if (trsN) { $("#src-trs").style.display = ""; $("#src-trs").textContent = `SIT/TRS · ${trsN}`; $("#src-trs").className = "pill ok"; }
   else $("#src-trs").style.display = "none";
+  const sd = DIAG.sit || {};
+  if (sd.trips) { $("#src-sit").style.display = ""; $("#src-sit").textContent = `Plan de Viajes · ${sd.matched || 0}/${sd.plans || 0}`;
+    $("#src-sit").className = "pill ok"; $("#src-sit").title = `${sd.trips} trips, ${sd.fleet} units, ${sd.trucks} trucks in the horizon`; }
+  else if (sd.error) { $("#src-sit").style.display = ""; $("#src-sit").textContent = "Plan de Viajes · error"; $("#src-sit").className = "pill warn"; $("#src-sit").title = sd.error; }
+  else $("#src-sit").style.display = "none";
   const rem = DIAG.remisiones || {};
   if (rem.error) { $("#src-rem").textContent = "Remisiones · no access"; $("#src-rem").className = "pill warn"; $("#src-rem").title = rem.error; }
   else if (rem.matched != null) { $("#src-rem").textContent = `Remisiones · ${rem.matched} matched (${rem.week || "latest"})`; $("#src-rem").className = "pill ok"; }
@@ -422,6 +447,7 @@ function renderPlan() {
       <div class="fillbar"><i class="${cls}" style="width:${pct}%"></i></div>
       <div class="fl"><span>${l.m3} / ${l.truck_m3} m³ · ${l.fill_pct}%${l.kg ? ` · ${fmtN(l.kg)} kg` : ""}</span><span>${l.depart_by ? tr("depart by") + " " + fmtD(l.depart_by) : ""}</span></div>
       ${l.shipments.map(it => `<div class="row" data-id="${esc(it.id)}"><div class="who"><b>${esc(it.customer)}</b>${it.anchor ? ' <span class="tag anchor">anchor</span>' : ""}${l.window_risk.includes(it.id) ? ' <span class="tag risk">by ' + fmtD(it.deadline) + '</span>' : ""}<br><span class="rs">${esc(it.source)} · ${esc(it.agent || "")}${it.reference ? " · " + esc(it.reference) : ""} · → ${esc(it.destination || "?")}${it.service ? " · " + esc(it.service) : ""}</span></div><div class="m3">${it.m3} m³</div></div>`).join("")}
+      ${(l.trucks||[]).length ? `<div class="fl" style="margin-top:6px"><span>${tr("On a truck already going")}: ${l.trucks.map(t => `<span class="tag ${t.fits?"truckfit":"truck"}" title="${esc(t.driver||"")}">${esc(t.unit)} · ${fmtD(t.date)} · ${t.spare_m3} m³ ${tr("free")}</span>`).join(" ")}</span></div>` : ""}
       ${opp && opp.advice ? `<div class="adv">${esc(opp.advice)}</div>` : ""}
     </div>`; }).join("") : `<div class="empty">${p.error ? "" : tr("No consolidatable shipments are ready right now.")}</div>`;
   document.querySelectorAll("#loads .row").forEach(el => el.onclick = () => openDrawer(el.dataset.id));
@@ -432,6 +458,26 @@ function renderPlan() {
   if (ulanes.length) parts.push(`<b>Not plannable — no volume on record (${p.unsized}):</b> ` + ulanes.map(k => `${esc(k)}: ` + ub[k].filter(i => !src || i.source === src).map(i => esc(i.customer)).join(", ")).join(" · "));
   $("#coming").style.display = parts.length ? "" : "none";
   $("#coming").innerHTML = parts.join("<br><br>");
+  renderTrucks(p);
+}
+
+// SIT already runs trucks to these hubs with space left on them. This panel is
+// the number the team cannot get anywhere else: paid-for empty space, by hub.
+function renderTrucks(p) {
+  const spare = p.spare_by_hub || {};
+  const hubs = Object.values(spare).filter(h => h.hub !== "Unknown" && h.spare_m3 > 0);
+  const head = $("#sparehead");
+  if (!hubs.length) { head.style.display = "none"; $("#trucks").innerHTML = ""; return; }
+  head.style.display = "";
+  const total = hubs.reduce((a, h) => a + h.spare_m3, 0);
+  $("#cnt-trucks").textContent = p.trucks_considered || 0;
+  $("#spare-stats").textContent = `${fmtN(total)} m³ ${tr("of empty space already heading to Mexico in the next 14 days")}`;
+  $("#trucks").innerHTML = hubs.map(h => `<div class="truck">
+      <b>${esc(h.hub)}</b>
+      <div class="bar"><i style="width:${Math.min(100, Math.round(h.spare_m3 / (TRUCK_M3 * Math.max(h.trucks,1)) * 100))}%"></i></div>
+      <div><span class="sp">${fmtN(h.spare_m3)} m³ ${tr("free")}</span> · ${h.trucks} ${h.trucks === 1 ? tr("truck") : tr("trucks")}</div>
+      <div class="rs" style="color:#999">${esc((h.units || []).slice(0, 6).join(", "))}</div>
+    </div>`).join("");
 }
 
 $("#plan-draft").onclick = async () => {
@@ -620,6 +666,7 @@ function openDrawer(id) {
       <b>${tr("Volume")}</b><span>${s.lift_vans ? s.lift_vans + " lift van(s) · " : ""}${s.u_boxes ? s.u_boxes + " U-Box(es) · " : ""}${s.volume_m3 ? s.volume_m3 + " m³ · " : ""}${esc(ex.volume_text || "")}${!(s.lift_vans || s.u_boxes || s.volume_m3 || ex.volume_text) ? "—" : ""}</span>
       <b>${tr("Sale value")}</b><span>${money(ex.sale_value)}</span>
       ${s.weight ? `<b>${tr("Weight")}</b><span>${s.weight} kg</span>` : ""}
+      ${ex.sit_unit ? `<b>${tr("Mexican leg")}</b><span>${esc(ex.sit_unit)}${ex.sit_driver ? " · " + esc(ex.sit_driver) : ""}${ex.sit_load_date ? "<br>" + tr("loads") + " " + fmtD(ex.sit_load_date) : ""}${ex.sit_unload_date ? " → " + tr("unloads") + " " + fmtD(ex.sit_unload_date) : ""}${ex.sit_route ? "<br>" + esc(ex.sit_route) : ""}</span>` : ""}
       ${s.source !== "TIM" ? "" : `<b>Remisiones</b><span>${ex.remisiones_block ? esc(ex.remisiones_block) + (ex.remisiones_week ? " · " + esc(ex.remisiones_week) : "") + (ex.remisiones_status ? "<br>" + esc(ex.remisiones_status) : "") : tr("not on the sheet")}</span>`}
     </div>
     <div class="section" style="margin-top:0">${tr("Milestones")}</div>

@@ -317,9 +317,23 @@ def _place(v) -> str:
     return _s(v)
 
 
-def _loc(detail: dict, which: str) -> dict:
-    locs = detail.get("locations") if isinstance(detail.get("locations"), dict) else {}
-    return locs.get(which) if isinstance(locs.get(which), dict) else {}
+def _loc(detail: dict, which: str, row: dict | None = None) -> dict:
+    """The origin/destination object. v1 nested these under `locations`; V2 puts
+    them under `addresses` (on the list row as well as the detail).
+
+    Without the `addresses` branch the destination text came out empty, which
+    cost more than a blank column: the hub lookup had nothing to match, so every
+    import landed in "Unassigned hub", and the suggested-load lanes read
+    "Export → ?".
+    """
+    for src in (detail, row):
+        if not isinstance(src, dict):
+            continue
+        for key in ("locations", "addresses"):
+            block = src.get(key)
+            if isinstance(block, dict) and isinstance(block.get(which), dict):
+                return block[which]
+    return {}
 
 
 def stage_for(row: dict, detail: dict | None, today: dt.date) -> tuple[Stage, list[str], dict]:
@@ -382,7 +396,7 @@ def build_shipment(row: dict, detail: dict | None, *, today: dt.date | None = No
     payer = _s(billing.get("name"))
     agent = payer if str(ex.get("debtortype") or "").lower() == "agent" and payer else (
         _s(d.get("branchName")) or payer or "TMS")
-    oloc, dloc = _loc(d, "origin"), _loc(d, "destination")
+    oloc, dloc = _loc(d, "origin", row), _loc(d, "destination", row)
     origin = _place(oloc) if oloc else (_place(d.get("origin")) or _country(row.get("origin")))
     destination = _place(dloc) if dloc else (_place(d.get("destination")) or _country(row.get("destination")))
     hub = hub_for_destination(destination) if dirn == "import" else Hub.UNKNOWN

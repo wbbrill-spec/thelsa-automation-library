@@ -29,6 +29,7 @@ Both feed parse_sheet_rows(), which does the actual work.
 """
 from __future__ import annotations
 
+import datetime as dt
 import difflib
 import re
 from dataclasses import dataclass, field
@@ -292,10 +293,54 @@ def parse_workbook(path: str) -> dict[str, list[RemisionRow]]:
     return sheets
 
 
-def latest_week(sheets: dict[str, list[RemisionRow]]) -> str:
-    """Sheets are kept in chronological order in the workbook; the last one is
-    the current week."""
-    return list(sheets.keys())[-1]
+# Spanish month abbreviations as they appear in the sheet tabs.
+_ES_MONTHS = {"ene": 1, "feb": 2, "mar": 3, "abr": 4, "may": 5, "jun": 6,
+              "jul": 7, "ago": 8, "sep": 9, "set": 9, "oct": 10, "nov": 11, "dic": 12}
+
+
+def week_end_date(title: str, year: Optional[int] = None) -> Optional[dt.date]:
+    """The END date of a week tab, or None when the tab is not a week.
+
+    The tabs are not written to one pattern — all of these are real:
+        "4 al 10 ene"        one month, applies to both days
+        "25 ene al 31 ene"   month repeated
+        "22 FEB 28 FEB"      no "al", upper case
+        "26 abr al 2 may"    the week straddles two months
+    so the last day token and the last month token are what end the week.
+    """
+    toks = norm_text(title).split()
+    days = [int(t) for t in toks if t.isdigit() and 1 <= int(t) <= 31]
+    months = [_ES_MONTHS[t[:3]] for t in toks if t[:3] in _ES_MONTHS]
+    if not days or not months:
+        return None                     # "Hoja1", "Resumen", a scratch tab…
+    try:
+        return dt.date(year or dt.date.today().year, months[-1], days[-1])
+    except ValueError:                  # e.g. "31 feb" from a typo'd tab
+        return None
+
+
+def latest_week(sheets: dict[str, list[RemisionRow]],
+                today: Optional[dt.date] = None) -> str:
+    """The tab holding the current week's rows.
+
+    This used to take the workbook's LAST sheet, on the assumption that the
+    tabs sit in chronological order. They mostly do — but the workbook also
+    carries a trailing scratch tab ("Hoja1"), so the last sheet was an empty
+    one and the dashboard merged 0 rows while reporting a healthy read. Pick
+    by the date in the tab name instead, and only from tabs that have rows.
+    """
+    today = today or dt.date.today()
+    dated = [(week_end_date(t), t) for t in sheets]
+    live = [(d, t) for d, t in dated if d and sheets[t]]
+    # The current week ends on or after today; allow a week of slack so a tab
+    # rolled forward early still wins over last week's.
+    current = [(d, t) for d, t in live if d <= today + dt.timedelta(days=7)]
+    if current:
+        return max(current)[1]
+    if live:
+        return max(live)[1]
+    with_rows = [t for t in sheets if sheets[t]]
+    return with_rows[-1] if with_rows else list(sheets.keys())[-1]
 
 
 # ── matching to ClickUp shipments ───────────────────────────────────────────────

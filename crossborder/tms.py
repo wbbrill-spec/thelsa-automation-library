@@ -214,8 +214,50 @@ def _extras(detail: dict) -> dict:
     return out
 
 
+def _v2_measures(detail: dict) -> dict:
+    """V2 carries the size on the job as `measures[]`, already converted:
+
+        measures[0].volume.{net,gross}.{m3,f3}
+        measures[0].weight.{net,gross}.{kg,lb}
+
+    (v1 sent a flat `measurements[]` of {type, uom, value} rows — see below.)
+    Nett is preferred over gross, and the metric figure is taken directly rather
+    than converting the imperial one, which Moveware derives and can leave stale.
+    """
+    vol = wt = None
+    for m in detail.get("measures") or []:
+        if not isinstance(m, dict):
+            continue
+        v, w = m.get("volume"), m.get("weight")
+        if isinstance(v, dict) and vol is None:
+            for side in ("net", "gross"):
+                n = to_number((v.get(side) or {}).get("m3")) if isinstance(v.get(side), dict) else None
+                if not n:
+                    f3 = to_number((v.get(side) or {}).get("f3")) if isinstance(v.get(side), dict) else None
+                    n = round(f3 / CUFT_PER_M3, 2) if f3 else None
+                if n:
+                    vol = round(n, 2)
+                    break
+        if isinstance(w, dict) and wt is None:
+            for side in ("net", "gross"):
+                n = to_number((w.get(side) or {}).get("kg")) if isinstance(w.get(side), dict) else None
+                if not n:
+                    lb = to_number((w.get(side) or {}).get("lb")) if isinstance(w.get(side), dict) else None
+                    n = round(lb * 0.4536, 1) if lb else None
+                if n:
+                    wt = round(n, 1)
+                    break
+    return {"volume_m3": vol, "weight_kg": wt, "items": None}
+
+
 def _measurements(detail: dict) -> dict:
-    """{'volume_m3': float|None, 'weight_kg': float|None, 'items': int|None}"""
+    """{'volume_m3': float|None, 'weight_kg': float|None, 'items': int|None}
+
+    Reads V2's `measures[]` first, then falls back to v1's `measurements[]`.
+    """
+    v2 = _v2_measures(detail)
+    if v2["volume_m3"] or v2["weight_kg"]:
+        return v2
     vol_m3 = weight = items = None
     weight_src = -1
     vol_src = -1
@@ -245,6 +287,24 @@ def _measurements(detail: dict) -> dict:
     return {"volume_m3": vol_m3, "weight_kg": weight, "items": items}
 
 
+def _activity_dates(obj: dict):
+    """A lookup into V2's activityDates block: ad("pack") -> date | None.
+
+    Each entry is {"date": "YYYY-MM-DD", ...} and most are null on any given
+    job, so callers read several names in preference order.
+    """
+    ad = obj.get("activityDates") if isinstance(obj, dict) else None
+    if not isinstance(ad, dict):
+        return lambda _name: None
+
+    def get(name: str):
+        v = ad.get(name)
+        if isinstance(v, dict):
+            return _mw_date(v.get("date"))
+        return _mw_date(v)
+    return get
+
+
 def _place(v) -> str:
     """Best human-readable place from a list value or a detail address object."""
     if isinstance(v, dict):
@@ -269,11 +329,24 @@ def stage_for(row: dict, detail: dict | None, today: dt.date) -> tuple[Stage, li
     ex = _extras(detail or {})
     status = _s(row.get("status") or (detail or {}).get("jobStatus")).upper()[:1]
     d = detail or {}
-    uplift = (_mw_date(d.get("upliftStart")) or _mw_date(d.get("pack")) or _mw_date(row.get("uplift"))
-              or _mw_date(ex.get("dtpacking")) or _mw_date(d.get("estimatedMove")))
-    delivery = (_mw_date(d.get("deliveryStart")) or _mw_date(ex.get("dtdelivery")) or _mw_date(row.get("delivery"))
-                or _mw_date(d.get("estimatedDelivery")))
-    ops_done = _mw_date(ex.get("dtopscomplete"))
+    # V2 nests every milestone under activityDates.<name>.date. The full
+    # vocabulary on a live job: analysis, arrival, booked, cartonDel, created,
+    # delivery, departure, estimatedDelivery, estimatedMove, followup, pack,
+    # survey, unload, unpack, uplift.
+    #
+    # `uplift` is usually EMPTY and `pack` carries the move-out date — the audit
+    # tool (mw_live.py) has always read it that way. Reading only upliftStart,
+    # as the v1 mapper did, is why every V2 job looked like it had no dates.
+    ad = _activity_dates(d) or _activity_dates(row)
+    uplift = (ad("uplift") or ad("pack") or ad("departure")
+              or _mw_date(d.get("upliftStart")) or _mw_date(d.get("pack"))
+              or _mw_date(row.get("uplift")) or _mw_date(ex.get("dtpacking"))
+              or ad("estimatedMove") or _mw_date(d.get("estimatedMove")))
+    delivery = (ad("delivery") or ad("cartonDel") or ad("unpack") or ad("unload")
+                or _mw_date(d.get("deliveryStart")) or _mw_date(ex.get("dtdelivery"))
+                or _mw_date(row.get("delivery"))
+                or ad("estimatedDelivery") or _mw_date(d.get("estimatedDelivery")))
+    ops_done = _mw_date(ex.get("dtopscomplete")) or ad("unpack")
     dates = {"uplift": uplift, "delivery": delivery, "ops_complete": ops_done}
     flags: list[str] = []
     if status in DEAD_STATUSES or str(d.get("isClosed") or "").upper() == "Y":
@@ -339,7 +412,9 @@ def build_shipment(row: dict, detail: dict | None, *, today: dt.date | None = No
         status_flags=flags, updated_at=updated, url="",
         assignees=[x for x in [_s(mm.get("name")) or _s(row.get("moveManager"))] if x],
         process_format="Moveware", current_step="", steps_done=0, steps_total=0,
-        milestones={"booked": _mw_date(row.get("created")), "uplift": dates["uplift"],
+        milestones={"booked": (_activity_dates(d)("booked") or _activity_dates(row)("booked")
+                               or _created(d) or _created(row) or _mw_date(row.get("created"))),
+                    "uplift": dates["uplift"],
                     "delivered": dates["delivery"] if dates["delivery"] and dates["delivery"] <= today else None,
                     "closed": dates["ops_complete"]},
         last_progress_at=last_progress, days_since_progress=days,

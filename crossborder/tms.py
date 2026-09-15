@@ -142,7 +142,9 @@ _COUNTRY_NAMES = {
 def _country(v) -> str:
     """A 2-letter ISO code from a code, a full country name, or an address dict."""
     if isinstance(v, dict):
-        for k in ("country", "countryCode", "code"):
+        # V2 address objects carry iso2country ("US", "MX") alongside the
+        # spelled-out country. Prefer the code — it needs no name table.
+        for k in ("iso2country", "countryISO2", "countryCode", "code", "country"):
             if v.get(k):
                 v = v[k]
                 break
@@ -285,6 +287,20 @@ def _measurements(detail: dict) -> dict:
         elif t == "items":
             items = int(val)
     return {"volume_m3": vol_m3, "weight_kg": weight, "items": items}
+
+
+def _named(v) -> str:
+    """A name from a value that may be an object OR a bare string.
+
+    v1 sent ports and agents as {"name": …}; V2 sends the code as a plain
+    string ("USBOS", "MXVER"). Calling .get() on that string is what took the
+    whole TMS pull down with
+    `AttributeError: 'str' object has no attribute 'get'` — and it only
+    surfaced once these fields started being populated at all.
+    """
+    if isinstance(v, dict):
+        return _s(v.get("name") or v.get("code") or v.get("text"))
+    return _s(v)
 
 
 def _activity_dates(obj: dict):
@@ -436,10 +452,10 @@ def build_shipment(row: dict, detail: dict | None, *, today: dt.date | None = No
                "payer": payer, "branch": _s(d.get("branchName")), "branch_code": _s(d.get("branchCode")),
                "customer_type": _s(d.get("customerType")), "currency": _s(d.get("currency")),
                "coordinator_email": _s(mm.get("email")), "items": meas["items"],
-               "origin_country": _country(row.get("origin")), "destination_country": _country(row.get("destination")),
-               "origin_port": _s((oloc.get("port") or {}).get("name")) if oloc else "",
-               "destination_port": _s((dloc.get("port") or {}).get("name")) if dloc else "",
-               "destination_agent": _s((dloc.get("agent") or {}).get("name")) if dloc else "",
+               "origin_country": _country(oloc) or _country(row.get("origin")),
+               "destination_country": _country(dloc) or _country(row.get("destination")),
+               "origin_port": _named(oloc.get("port")), "destination_port": _named(dloc.get("port")),
+               "destination_agent": _named(dloc.get("agent")),
                "sale_value": sale, "is_closed": str(d.get("isClosed") or ""), "note": crew_note[:400],
                "mw_env": env, "load_type": _s(ex.get("loadtype")), "sit_location": _s(ex.get("sitloc")),
                "delivery_type": _s(d.get("deliveryType"))},

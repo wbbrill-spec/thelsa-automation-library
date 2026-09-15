@@ -174,7 +174,7 @@ body.demo header { border-bottom-color: #7c2d12; }
     <span id="src-tim" class="pill">ClickUp · —</span>
     <span id="src-rem" class="pill">Remisiones · —</span>
     <span id="src-tms" class="pill">Moveware · —</span>
-    <span id="src-trs" class="pill" style="display:none">SIT/TRS · —</span>
+    <span id="src-trs" class="pill" style="display:none">TRS · —</span>
     <span id="src-sit" class="pill" style="display:none">Plan de Viajes · —</span>
     <span id="asof">—</span>
     <span class="langtog"><button id="lang-en" class="on">EN</button><button id="lang-es">ES</button></span>
@@ -184,7 +184,7 @@ body.demo header { border-bottom-color: #7c2d12; }
 <div id="demobar"><span id="demotext"></span><a class="x" id="demo-off" href="?demo=0">turn demo data off</a></div>
 <main>
   <div class="toolbar">
-    <select id="f-source"><option value="">All sources</option><option value="TIM">TIM (ClickUp)</option><option value="TMS">TMS (Moveware)</option><option value="TRS">TRS (SIT domestic)</option></select>
+    <select id="f-source"><option value="">All sources</option><option value="TIM">TIM (ClickUp)</option><option value="TMS">TMS (Moveware)</option><option value="TRS">TRS (domestic)</option></select>
     <select id="f-agent"><option value="">All agents</option></select>
     <select id="f-flag"><option value="">All flags</option></select>
     <select id="f-hub"><option value="">All hubs</option></select>
@@ -390,7 +390,7 @@ async function load(force) {
   else if (t.count != null) { $("#src-tms").textContent = `Moveware · ${tmsN}${t.env && t.env !== "prod" ? " (" + t.env + ")" : ""}`; $("#src-tms").className = "pill ok"; $("#src-tms").title = `${t.rows_seen} jobs updated in window · ${t.cross_border} cross-border · ${t.requests_made} calls`; }
   else { $("#src-tms").textContent = "Moveware · pending"; $("#src-tms").className = "pill"; }
   const trsN = ALL.filter(s => s.source === "TRS").length;
-  if (trsN) { $("#src-trs").style.display = ""; $("#src-trs").textContent = `SIT/TRS · ${trsN}`; $("#src-trs").className = "pill ok"; }
+  if (trsN) { $("#src-trs").style.display = ""; $("#src-trs").textContent = `TRS · ${trsN}`; $("#src-trs").className = "pill ok"; }
   else $("#src-trs").style.display = "none";
   const sd = DIAG.sit || {};
   if (sd.trips) { $("#src-sit").style.display = ""; $("#src-sit").textContent = `Plan de Viajes · ${sd.matched || 0}/${sd.plans || 0}`;
@@ -419,8 +419,8 @@ function renderDemoBar(dg) {
   if (!on) return;
   const real = ALL.length - (dg.count || 0);
   $("#demotext").textContent = LANG === "es"
-    ? `⚠ DATOS DE DEMOSTRACIÓN — ${dg.count} envíos simulados (${dg.tms} TMS, ${dg.trs} TRS domésticos)${dg.mode === "only" ? "; los datos reales están ocultos" : ` junto a ${real} reales`}. No son de ClickUp, Moveware ni SIT. Los borradores de correo están desactivados.`
-    : `⚠ DEMO DATA — ${dg.count} simulated shipments (${dg.tms} TMS, ${dg.trs} domestic TRS)${dg.mode === "only" ? "; live data hidden" : `, alongside ${real} real ones`}. Not from ClickUp, Moveware or SIT. Email drafting is disabled.`;
+    ? `⚠ DATOS DE DEMOSTRACIÓN — ${dg.count} envíos simulados (${dg.tms} TMS, ${dg.trs} TRS domésticos)${dg.mode === "only" ? "; los datos reales están ocultos" : ` junto a ${real} reales`}. No son de ClickUp, Moveware ni TRS. Los borradores de correo están desactivados.`
+    : `⚠ DEMO DATA — ${dg.count} simulated shipments (${dg.tms} TMS, ${dg.trs} domestic TRS)${dg.mode === "only" ? "; live data hidden" : `, alongside ${real} real ones`}. Not from ClickUp, Moveware or TRS. Email drafting is disabled.`;
 }
 const isDemo = s => !!(s.extra && s.extra.demo);
 
@@ -461,7 +461,7 @@ function renderPlan() {
   renderTrucks(p);
 }
 
-// SIT already runs trucks to these hubs with space left on them. This panel is
+// TRS already runs trucks to these hubs with space left on them. This panel is
 // the number the team cannot get anywhere else: paid-for empty space, by hub.
 function renderTrucks(p) {
   const spare = p.spare_by_hub || {};

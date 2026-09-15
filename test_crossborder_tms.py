@@ -104,7 +104,13 @@ def test_walk_slices_filters_and_details():
     ships, diag = tms.fetch_tms_shipments(Fake(), days=20, slice_days=10, today=TODAY)
     assert diag["rows_seen"] == 5 and diag["cross_border"] == 2 and diag["by_direction"] == {"import": 1, "export": 1}
     assert diag["by_lane"]["US→MX"] == 2 and diag["by_status"] == {"W": 3, "L": 1, "P": 1}
-    assert len(diag["slices"]) == 2 and diag["slices"][0]["from"] == "2026-08-29"
+    # V2 pages a newest-first feed instead of walking date slices. A short page
+    # is NOT the end (V2's page sizes are erratic) — the walk goes on until an
+    # empty page, so this Fake is read twice.
+    assert diag["pages_walked"] == 2 and diag["slices"][0]["page"] == 1
+    assert diag["stopped_because"] == "end of feed"
+    assert Fake.calls[0][1].get("status") == "W", "the walk must filter to Won jobs server-side"
+    assert "createdAfter" not in Fake.calls[0][1], "V2 ignores date filters — don't send them"
     assert sorted(s.source_ref for s in ships) == ["110991", "4"]
     ships.sort(key=lambda s: s.source_ref)
     assert ships[0].destination_hub is Hub.GUADALAJARA and ships[1].destination_hub is Hub.UNKNOWN

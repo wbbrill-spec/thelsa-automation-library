@@ -245,6 +245,19 @@ class Shipment:
     milestones: dict = field(default_factory=dict)   # e.g. {"green_light": date, "crossed": date}
     last_progress_at: Optional[dt.date] = None       # when the latest step was completed
     days_since_progress: Optional[int] = None
+    # ── commercial (Moveware `jobValue` + `roles`; TIM fills what Remisiones has) ──
+    # Revenue is stored exactly as booked, in its own currency, and converted only
+    # at display time — see crossborder/fx.py. Never normalize it here.
+    revenue: Optional[float] = None
+    revenue_currency: str = ""      # "USD" / "MXN"; "" means do not convert
+    revenue_month: str = ""         # YYYY-MM the books rate is taken from
+    revenue_month_basis: str = ""   # which date set it: "pack" (export) / "delivery" (import) / "booked" (fallback)
+    invoice_status: str = ""        # Moveware invoiceStatus: "Y" invoiced, "N" not
+    customer_type: str = ""         # "Company" / "Diplomatic" / "" (private)
+    corporate_account: str = ""     # the corporate client, when the move is one
+    booking_agent: str = ""
+    origin_agent: str = ""
+    destination_agent: str = ""
     extra: dict = field(default_factory=dict)        # source-specific facts (e.g. remisiones sale value)
 
     # ── derived ──
@@ -262,6 +275,23 @@ class Shipment:
     @property
     def is_open(self) -> bool:
         return self.stage in OPEN_STAGES or self.stage is Stage.UNKNOWN
+
+    @property
+    def is_corporate(self) -> bool:
+        """Corporate move rather than a private/consumer one.
+
+        Some Moveware files carry the literal placeholder "CORPORATIVO" instead
+        of a real account name. That still means corporate, so it counts here —
+        `corporate_account_named` is what says whether we can name the client.
+        """
+        return bool(self.corporate_account.strip()) or self.customer_type.strip().lower() in (
+            "company", "corporate", "diplomatic")
+
+    @property
+    def corporate_account_named(self) -> bool:
+        """True when the corporate client is actually named, not a placeholder."""
+        name = self.corporate_account.strip().upper()
+        return bool(name) and name not in ("CORPORATIVO", "CORPORATE", "N/A", "-")
 
     @property
     def planning_m3(self) -> float:
@@ -287,4 +317,6 @@ class Shipment:
         d["lift_van_equivalents"] = self.lift_van_equivalents
         d["planning_m3"] = self.planning_m3
         d["is_open"] = self.is_open
+        d["is_corporate"] = self.is_corporate
+        d["corporate_account_named"] = self.corporate_account_named
         return d

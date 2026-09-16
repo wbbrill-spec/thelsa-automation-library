@@ -303,6 +303,67 @@ def _named(v) -> str:
     return _s(v)
 
 
+def _role(detail: dict, name: str) -> str:
+    """The name behind one of V2's `roles` entries.
+
+    The trap: the readable name is NOT `roles.<name>.name` — it sits one level
+    down at `roles.<name>.entity.name`. Reading the outer level returns "" for
+    every job, which looks exactly like Moveware having no agent on file. It
+    does not. Verified 2026-09-16 against live jobs 111131 and 111135.
+
+        roles.billTo.entity.name          → "Sirva International BRGS"
+        roles.corporateAccount.entity.name→ "Dow"
+
+    Falls back to first+last name (people rather than companies) and finally to
+    the outer `name`, so a v1-shaped payload still parses.
+    """
+    roles = detail.get("roles")
+    if not isinstance(roles, dict):
+        return ""
+    slot = roles.get(name)
+    if not isinstance(slot, dict):
+        return _s(slot)
+    entity = slot.get("entity") if isinstance(slot.get("entity"), dict) else {}
+    full = " ".join(x for x in (_s(entity.get("firstName")), _s(entity.get("lastName"))) if x)
+    return _s(entity.get("name")) or full or _s(slot.get("name")) or ""
+
+
+def _job_value(detail: dict, row: dict, extras: dict):
+    """Revenue for the job, as booked.
+
+    V2 puts it on the job detail as `jobValue` (2532.84 on job 111131). It is
+    NOT on the list rows, so a job with no detail fetched has no revenue — that
+    is why the walk fetches detail for the cross-border subset.
+
+    v1 exposed it as an extras field called `revenue`; both are read so a
+    rollback to TMS_MW_ENV=v1 keeps working.
+    """
+    for candidate in (detail.get("jobValue"), row.get("jobValue"), extras.get("revenue")):
+        value = to_number(candidate)
+        if value:
+            return value
+    return None
+
+
+def _job_currency(detail: dict, row: dict) -> str:
+    """The currency the job is booked in.
+
+    V2 writes it as `payment: "ACC USD"` — a payment-method string with the code
+    inside it, not a bare currency field. Returns "" when nothing recognisable is
+    present, which tells the UI to show the figure unconverted rather than
+    assuming a currency and being wrong by ~17x.
+    """
+    from . import fx
+    for candidate in (detail.get("currency"), detail.get("payment"),
+                      row.get("currency"), row.get("payment"),
+                      (detail.get("roles") or {}).get("billTo", {}).get("entity", {}).get("currency")
+                      if isinstance(detail.get("roles"), dict) else None):
+        code = fx.normalize_currency(candidate)
+        if code:
+            return code
+    return ""
+
+
 def _activity_dates(obj: dict):
     """A lookup into V2's activityDates block: ad("pack") -> date | None.
 
@@ -409,9 +470,12 @@ def build_shipment(row: dict, detail: dict | None, *, today: dt.date | None = No
     # The list row's `name` is the transferee; `billing.name` is who pays —
     # for agent-booked jobs that is the agent (extras.debtortype == "Agent").
     customer = _s(row.get("name")) or _s(billing.get("name"))
-    payer = _s(billing.get("name"))
-    agent = payer if str(ex.get("debtortype") or "").lower() == "agent" and payer else (
-        _s(d.get("branchName")) or payer or "TMS")
+    payer = _s(billing.get("name")) or _role(d, "billTo")
+    # V2 names the agent properly under roles; v1's debtortype/billing path is
+    # kept as the fallback so a rollback still labels jobs the same way.
+    agent = (_role(d, "bookingAgent")
+             or (payer if str(ex.get("debtortype") or "").lower() == "agent" and payer else "")
+             or _s(d.get("branchName")) or payer or "TMS")
     oloc, dloc = _loc(d, "origin", row), _loc(d, "destination", row)
     origin = _place(oloc) if oloc else (_place(d.get("origin")) or _country(row.get("origin")))
     destination = _place(dloc) if dloc else (_place(d.get("destination")) or _country(row.get("destination")))
@@ -430,7 +494,21 @@ def build_shipment(row: dict, detail: dict | None, *, today: dt.date | None = No
     for n in d.get("notes") or []:
         if isinstance(n, dict) and n.get("type") == "crewNote" and n.get("comment"):
             crew_note = str(n["comment"]).strip()
-    sale = to_number(ex.get("revenue"))
+    revenue = _job_value(d, row, ex)
+    currency = _job_currency(d, row)
+    booked_on = (_activity_dates(d)("booked") or _activity_dates(row)("booked")
+                 or _created(d) or _created(row))
+    # Books FX needs a month to price the job at. Bill's rule (2026-09-16):
+    # exports key off the pack/load date, imports off the delivery date — the
+    # point at which the move actually earns. Open files often have neither yet,
+    # so the booked date is the fallback and `revenue_month_basis` says which
+    # one was used, rather than letting the UI imply a precision we don't have.
+    from . import fx
+    anchor, basis = (dates["uplift"], "pack") if dirn == "export" else (dates["delivery"], "delivery")
+    if not anchor:
+        anchor, basis = booked_on, "booked"
+    revenue_month = fx.month_key(anchor) if revenue is not None else ""
+    sale = revenue
     return Shipment(
         id=f"TMS:{list_id}", source=Source.TMS, source_ref=list_id,
         reference_number=display, customer_name=customer,
@@ -448,6 +526,14 @@ def build_shipment(row: dict, detail: dict | None, *, today: dt.date | None = No
                     "delivered": dates["delivery"] if dates["delivery"] and dates["delivery"] <= today else None,
                     "closed": dates["ops_complete"]},
         last_progress_at=last_progress, days_since_progress=days,
+        revenue=revenue, revenue_currency=currency, revenue_month=revenue_month,
+        revenue_month_basis=basis if revenue is not None else "",
+        invoice_status=_s(d.get("invoiceStatus")),
+        customer_type=_s(d.get("customerType")),
+        corporate_account=_role(d, "corporateAccount"),
+        booking_agent=_role(d, "bookingAgent"),
+        origin_agent=_role(d, "originAgent"),
+        destination_agent=_role(d, "destinationAgent") or _named(dloc.get("agent")),
         extra={"direction": dirn, "method": method, "job_type": _s(row.get("jobType")), "service": svc,
                "payer": payer, "branch": _s(d.get("branchName")), "branch_code": _s(d.get("branchCode")),
                "customer_type": _s(d.get("customerType")), "currency": _s(d.get("currency")),
@@ -455,7 +541,8 @@ def build_shipment(row: dict, detail: dict | None, *, today: dt.date | None = No
                "origin_country": _country(oloc) or _country(row.get("origin")),
                "destination_country": _country(dloc) or _country(row.get("destination")),
                "origin_port": _named(oloc.get("port")), "destination_port": _named(dloc.get("port")),
-               "destination_agent": _named(dloc.get("agent")),
+               "destination_agent": _named(dloc.get("agent")),   # legacy key; prefer Shipment.destination_agent
+               "bill_to": payer, "quote_to": _s(d.get("quoteTo")),
                "sale_value": sale, "is_closed": str(d.get("isClosed") or ""), "note": crew_note[:400],
                "mw_env": env, "load_type": _s(ex.get("loadtype")), "sit_location": _s(ex.get("sitloc")),
                "delivery_type": _s(d.get("deliveryType"))},

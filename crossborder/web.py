@@ -37,7 +37,7 @@ import time
 
 from flask import Blueprint, jsonify, redirect, request, session, url_for
 
-from . import alerts, clickup, demo, engine, remisiones, sit, tim, tms
+from . import alerts, clickup, demo, engine, fx, remisiones, sit, tim, tms
 from .dashboard import DASHBOARD_HTML
 from .models import Source
 
@@ -385,7 +385,7 @@ def api_shipments():
     except Exception as exc:
         return jsonify({"error": f"{type(exc).__name__}: {exc}", "shipments": []}), 200
     shipments, diag = _with_demo(shipments, diag, request.args)
-    return jsonify({"count": len(shipments), "status": status,
+    return jsonify({"count": len(shipments), "status": status, "fx": fx.describe(),
                     "diagnostics": {"remisiones": diag.get("remisiones"), "requests_made": diag.get("requests_made"),
                                     "errors": diag.get("errors"), "demo": diag.get("demo"), "sit": diag.get("sit"),
                                     "tms": {k: v for k, v in (diag.get("tms") or {}).items()
@@ -433,6 +433,50 @@ def api_trucks():
         diag = dict(_SIT_CACHE.get("diag") or {})
     return jsonify({"count": len(trucks), "spare_by_hub": sit.spare_by_hub(trucks),
                     "diagnostics": diag, "trucks": trucks})
+
+
+@crossborder_bp.route("/crossborder/api/invoices/<job_id>")
+@_login_required
+def api_invoices(job_id: str):
+    """Invoiced vs outstanding for one Moveware job, fetched on demand.
+
+    Deliberately NOT part of the refresh: it is one extra call per job, and the
+    board only needs it when somebody opens a shipment. Read-only — this never
+    writes to Moveware, and the accounting record stays the system of truth.
+    """
+    jid = str(job_id or "").strip()
+    if not jid.isdigit():
+        return jsonify({"error": "job id must be numeric"}), 400
+    if jid.startswith("DEMO") or demo.demo_mode(request.args) == "only":
+        return jsonify({"job_id": jid, "invoices": [], "demo": True})
+    try:
+        client = tms.MovewareClient()
+        body = client.get(f"/jobs/{jid}/invoices")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("invoice fetch failed for %s: %s", jid, exc)
+        return jsonify({"job_id": jid, "error": f"{type(exc).__name__}: {exc}", "invoices": []}), 200
+    rows = body.get("invoices") if isinstance(body, dict) else None
+    out, invoiced, outstanding, currency = [], 0.0, 0.0, ""
+    for inv in rows or []:
+        if not isinstance(inv, dict):
+            continue
+        cur = fx.normalize_currency(inv.get("currency"))
+        currency = currency or cur
+        value = tms.to_number(inv.get("valueInclusive")) or 0.0
+        owed = tms.to_number(inv.get("outstanding")) or 0.0
+        invoiced += value
+        outstanding += owed
+        out.append({"id": inv.get("id"), "number": _clean(inv.get("number")), "date": inv.get("date"),
+                    "status": _clean(inv.get("status")), "currency": cur,
+                    "value": round(value, 2), "outstanding": round(owed, 2),
+                    "description": _clean(inv.get("description"))[:120]})
+    return jsonify({"job_id": jid, "currency": currency, "count": len(out),
+                    "invoiced": round(invoiced, 2), "outstanding": round(outstanding, 2),
+                    "invoices": out})
+
+
+def _clean(v) -> str:
+    return str(v or "").strip()
 
 
 def _plan_recipients() -> list[str]:

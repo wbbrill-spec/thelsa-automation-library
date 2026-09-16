@@ -136,6 +136,10 @@ class Load:
             "ready_by": self.ready_by.isoformat() if self.ready_by else None,
             "depart_by": self.depart_by.isoformat() if self.depart_by else None,
             "window_risk": [i.id for i in risk],
+            # Revenue riding on this trailer, kept split by the currency it was
+            # booked in. Summing MXN and USD here would be wrong by ~17x; the UI
+            # converts at the books rate when it renders.
+            "revenue": _revenue_by_currency(i.shipment for i in self.items),
             "shipments": [{
                 "id": i.id, "source": i.shipment.source.value, "customer": i.shipment.customer_name,
                 "agent": i.shipment.agent, "reference": i.shipment.reference_number,
@@ -144,9 +148,42 @@ class Load:
                 "ready_date": i.ready_date.isoformat() if i.ready_date else None,
                 "deadline": i.deadline.isoformat() if i.deadline else None,
                 "anchor": i.anchor, "service": (i.shipment.extra or {}).get("service", ""),
+                "revenue": i.shipment.revenue, "revenue_currency": i.shipment.revenue_currency,
+                "revenue_month": i.shipment.revenue_month,
+                "corporate_account": i.shipment.corporate_account,
+                "booking_agent": i.shipment.booking_agent,
                 "reasons": i.reasons,
             } for i in self.items],
         }
+
+
+def _revenue_by_currency(shipments) -> list[dict]:
+    """[{currency, amount, month, files}] — one entry per booked currency.
+
+    Kept separate on purpose. Thelsa books some files in MXN and some in USD, so
+    a single total is only meaningful once a rate is applied, and the rate
+    belongs to the month each file earned in. Files with no revenue on record
+    are counted in `files_without_revenue` by the caller, never as zero.
+    """
+    buckets: dict[str, dict] = {}
+    for s in shipments:
+        if s.revenue in (None, "") or not s.revenue_currency:
+            continue
+        b = buckets.setdefault(s.revenue_currency, {"currency": s.revenue_currency, "amount": 0.0,
+                                                    "files": 0, "months": set()})
+        b["amount"] += float(s.revenue)
+        b["files"] += 1
+        if s.revenue_month:
+            b["months"].add(s.revenue_month)
+    out = []
+    for b in buckets.values():
+        months = sorted(b.pop("months"))
+        # One month means the whole bucket converts at one rate; several means
+        # the UI must convert file by file rather than on the total.
+        out.append({**b, "amount": round(b["amount"], 2),
+                    "month": months[0] if len(months) == 1 else "",
+                    "months": months})
+    return sorted(out, key=lambda x: -x["amount"])
 
 
 # ── eligibility ──────────────────────────────────────────────────────────────

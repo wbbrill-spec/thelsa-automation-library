@@ -158,6 +158,16 @@ td a { color: #1967d2; text-decoration: none; }
 .langtog { display: inline-flex; border: 1px solid #d9dbe0; border-radius: 7px; overflow: hidden; }
 .langtog button { background: #fff; color: #666; border: 0; padding: 3px 9px; font: inherit; font-size: 11px; font-weight: 700; cursor: pointer; }
 .langtog button.on { background: #c0392b; color: #fff; }
+.curtog button { padding: 3px 10px; }
+.fxnote { font-size: 11px; color: #8a8f98; margin: 0 0 10px; }
+.fxnote b { color: #555; font-weight: 600; }
+.money { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.money .cur { color: #8a8f98; font-size: .85em; margin-left: 2px; }
+.money.asis { color: #8a6d3b; }
+.prov { color: #8a6d3b; border-bottom: 1px dotted #c9a227; cursor: help; }
+.corp { display: inline-block; background: #eef2ff; color: #3b4cca; border-radius: 9px;
+        padding: 1px 7px; font-size: 11px; font-weight: 600; }
+.corp.unnamed { background: #f3f4f6; color: #8a8f98; font-style: italic; }
 /* demo mode — simulated data must be impossible to mistake for the real board */
 #demobar { display: none; background: repeating-linear-gradient(135deg,#7c2d12,#7c2d12 14px,#9a3412 14px,#9a3412 28px); color: #fff; font-size: 12.5px; font-weight: 700; letter-spacing: .3px; padding: 9px 28px; display: none; align-items: center; gap: 12px; }
 #demobar.on { display: flex; }
@@ -178,6 +188,7 @@ body.demo header { border-bottom-color: #7c2d12; }
     <span id="src-sit" class="pill" style="display:none">Plan de Viajes · —</span>
     <span id="asof">—</span>
     <span class="langtog"><button id="lang-en" class="on">EN</button><button id="lang-es">ES</button></span>
+    <span class="langtog curtog"><button id="cur-mxn">Pesos</button><button id="cur-usd" class="on">USD · books</button></span>
     <a href="/" id="lib-link">← Library</a>
   </div>
 </header>
@@ -207,6 +218,7 @@ body.demo header { border-bottom-color: #7c2d12; }
     <div class="plan-head">
       <div class="section"><span data-i18n="Suggested loads">Suggested loads</span> <span class="cnt" id="cnt-loads">0</span></div>
       <span class="plan-stats" id="plan-stats"></span>
+      <div class="fxnote" id="fxnote"></div>
       <span class="spacer"></span>
       <button class="btn" id="plan-draft">✉ Draft today's load email</button>
       <span class="plan-stats" id="plan-msg"></span>
@@ -276,6 +288,28 @@ const money = n => n == null ? "—" : "$" + Math.round(n).toLocaleString();
 const ES = {
   "Cross-Border": "Transfronterizo", "Shipments": "Envíos",
   "← Library": "← Biblioteca",
+  // ── money / FX ──
+  "Pesos": "Pesos", "USD · books": "USD · libros",
+  "Revenue": "Ingresos", "revenue": "ingresos", "Invoiced": "Facturado",
+  "invoiced": "facturado", "outstanding": "pendiente de cobro",
+  "yes": "sí", "not yet": "aún no", "check outstanding": "ver pendiente de cobro",
+  "checking…": "consultando…", "no invoice raised yet": "aún no se ha emitido factura",
+  "no invoice date": "sin fecha de factura",
+  "Client": "Cliente", "private / consumer": "particular", "private": "particular",
+  "Corporate account": "Cuenta corporativa",
+  "— placeholder, no account named in Moveware": "— genérico, sin cuenta nombrada en Moveware",
+  "Agents": "Agentes", "booking": "reserva", "origin": "origen", "destination": "destino",
+  "Booked": "Registrado", "As booked": "Tal como se registró", "rate": "tipo",
+  "provisional rate": "tipo provisional", "no month on file": "sin mes registrado",
+  "pack / load date": "fecha de carga", "delivery date": "fecha de entrega",
+  "booked date": "fecha de alta",
+  "No currency on this file — shown as booked": "Sin moneda en el expediente — se muestra tal cual",
+  "Mixed months — open the load to see each file": "Meses distintos — abre la carga para ver cada expediente",
+  "Rates on file through": "Tipos registrados hasta",
+  "Pesos as booked. USD files converted at each month's accounting rate.":
+    "Pesos tal como se registraron. Los expedientes en USD se convierten al tipo contable de cada mes.",
+  "USD at each month's own accounting rate. Peso files converted; USD files shown as booked.":
+    "USD al tipo contable de cada mes. Los expedientes en pesos se convierten; los de USD se muestran tal cual.",
   "TIM + TMS": "TIM + TMS", "TIM (ClickUp)": "TIM (ClickUp)", "TMS (Moveware)": "TMS (Moveware)",
   "All agents": "Todos los agentes", "All flags": "Todas las alertas", "All hubs": "Todos los hubs",
   "All stages": "Todas las etapas",
@@ -338,6 +372,9 @@ function applyStaticLang(){
   document.documentElement.lang = LANG;
   $("#lang-en").classList.toggle("on", LANG === "en");
   $("#lang-es").classList.toggle("on", LANG === "es");
+  $("#cur-mxn").textContent = tr("Pesos");
+  $("#cur-usd").textContent = tr("USD · books");
+  if (typeof applyCurrency === "function") applyCurrency();
   const H = $(".brand h1"); if (H) H.innerHTML = LANG === "es" ? 'Envíos <span>Transfronterizos</span>' : 'Cross-Border <span>Shipments</span>';
   const lib = $("#lib-link"); if (lib) lib.textContent = tr("← Library");
   $("#f-agent").querySelector('option[value=""]') && ($("#f-agent").querySelector('option[value=""]').textContent = tr("All agents"));
@@ -357,6 +394,94 @@ function setLang(l){ LANG = l; try { localStorage.setItem("cb_lang", l); } catch
   applyStaticLang(); buildFilters(); render(); renderPlan(); renderDemoBar(DIAG.demo); }
 
 
+// ── money ────────────────────────────────────────────────────────────────────
+// Thelsa books some files in MXN and some in USD. Nothing here ever adds two
+// currencies together without converting first, and the conversion uses the
+// books rate for the month the file earned in — pack/load date on exports,
+// delivery date on imports (Bill, 2026-09-16), falling back to the booked date
+// when neither is filled. FX comes from the server (crossborder/fx.py) so the
+// page and the API can never disagree about a rate.
+const BASIS_LABEL = { pack: "pack / load date", delivery: "delivery date", booked: "booked date" };
+let CUR = (function(){ try { return localStorage.getItem("cb_cur") || "USD"; } catch(e){ return "USD"; } })();
+let FX = { table: {}, base: "MXN", current_rate: null, last_month: "", provisional: false };
+
+function fxRate(month){
+  const months = Object.keys(FX.table || {}).sort();
+  if (!months.length) return null;
+  if (month && FX.table[month] != null) return FX.table[month];
+  if (!month) return FX.table[months[months.length - 1]];
+  if (month > months[months.length - 1]) return FX.table[months[months.length - 1]];
+  if (month < months[0]) return FX.table[months[0]];
+  const earlier = months.filter(m => m < month);
+  return FX.table[earlier.length ? earlier[earlier.length - 1] : months[0]];
+}
+// True when we had to carry a rate forward rather than use the month's own.
+function fxProvisional(month){
+  const months = Object.keys(FX.table || {}).sort();
+  return !months.length || !month || FX.table[month] == null;
+}
+function convert(amount, from, month){
+  if (amount == null || amount === "" || !from) return null;
+  if (from === CUR) return Number(amount);
+  const rate = fxRate(month);
+  if (rate == null) return null;
+  return from === "USD" ? Number(amount) * rate : Number(amount) / rate;
+}
+function fmtMoney(amount, currency, month, opts){
+  opts = opts || {};
+  if (amount == null || amount === "") return opts.dash === false ? "" : "—";
+  // No currency on the record means we must not convert it — showing an
+  // unconverted figure is honest, quietly treating MXN as USD is not.
+  if (!currency) {
+    return '<span class="money asis" title="' + tr("No currency on this file — shown as booked") + '">'
+      + Math.round(Number(amount)).toLocaleString() + '</span>';
+  }
+  const value = convert(amount, currency, month);
+  if (value == null) return '<span class="money asis">' + Math.round(Number(amount)).toLocaleString()
+      + '<span class="cur">' + currency + '</span></span>';
+  const text = "$" + Math.round(value).toLocaleString() + (CUR === "MXN" ? " MXN" : "");
+  const converted = currency !== CUR;
+  const prov = converted && fxProvisional(month);
+  const title = converted
+    ? (tr("Booked") + " " + Math.round(Number(amount)).toLocaleString() + " " + currency
+       + " · " + (month ? month : tr("no month on file")) + " @ " + (fxRate(month) || "—")
+       + (prov ? " · " + tr("provisional rate") : ""))
+    : tr("As booked");
+  return '<span class="money' + (prov ? " prov" : "") + '" title="' + title.replace(/"/g, "&quot;") + '">' + text + '</span>';
+}
+// Several currencies on one load: convert each bucket at its own month's rate.
+function fmtMoneyBuckets(buckets){
+  if (!buckets || !buckets.length) return "";
+  let total = 0, anyProv = false, ok = true, parts = [];
+  buckets.forEach(b => {
+    parts.push(Math.round(b.amount).toLocaleString() + " " + b.currency);
+    const months = b.months && b.months.length ? b.months : [b.month];
+    if (b.currency !== CUR && months.length > 1) { ok = false; return; }
+    const v = convert(b.amount, b.currency, b.month || months[0] || "");
+    if (v == null) { ok = false; return; }
+    if (b.currency !== CUR && fxProvisional(b.month || months[0] || "")) anyProv = true;
+    total += v;
+  });
+  if (!ok) return '<span class="money asis" title="' + tr("Mixed months — open the load to see each file") + '">'
+    + parts.join(" + ") + "</span>";
+  return '<span class="money' + (anyProv ? " prov" : "") + '" title="' + parts.join(" + ").replace(/"/g, "&quot;") + '">'
+    + "$" + Math.round(total).toLocaleString() + (CUR === "MXN" ? " MXN" : "") + "</span>";
+}
+function applyCurrency(){
+  $("#cur-mxn").classList.toggle("on", CUR === "MXN");
+  $("#cur-usd").classList.toggle("on", CUR === "USD");
+  const note = $("#fxnote");
+  if (note) {
+    note.innerHTML = CUR === "MXN"
+      ? tr("Pesos as booked. USD files converted at each month's accounting rate.")
+      : tr("USD at each month's own accounting rate. Peso files converted; USD files shown as booked.")
+        + (FX.last_month ? " <b>" + tr("Rates on file through") + " " + FX.last_month + "</b>" : "");
+  }
+}
+function setCur(c){ CUR = c; try { localStorage.setItem("cb_cur", c); } catch(e){}
+  applyCurrency(); render(); renderPlan(); }
+
+
 // Demo data is opt-in per request: whatever ?demo= the page was opened with is
 // forwarded to every API call, so the board and the plan agree about it and a
 // bookmark of the live board can never pick it up by accident.
@@ -369,6 +494,7 @@ async function load(force) {
   const r = await fetch(`/crossborder/api/shipments?v=${Date.now()}${force ? "&refresh=1" : ""}${closed}${DEMOQ}`);
   const j = await r.json();
   ALL = j.shipments || []; STATUS = j.status || {}; DIAG = j.diagnostics || {};
+  if (j.fx && j.fx.table) { FX = j.fx; applyCurrency(); }
   if (STATUS.refreshing && !ALL.length) { $("#asof").innerHTML = '<span class="spin"></span>first pull running (~40 s)…'; setTimeout(() => load(false), 8000); return; }
   if (STATUS.refreshing) setTimeout(() => load(false), 8000);
   const age = STATUS.cache_age_s;
@@ -445,8 +571,9 @@ function renderPlan() {
     return `<div class="load ${l.light ? "light" : ""}">
       <h4>${esc(l.lane)} ${l.fill_pct >= 85 ? `<span class="tag full">${tr("Full")}</span>` : ""}${l.light ? `<span class="tag light">${tr("Running light")}</span>` : ""}${l.cross_silo ? '<span class="tag xs">TIM + TMS</span>' : ""}${l.window_risk.length ? `<span class="tag risk">${l.window_risk.length} ${tr("window risk")}</span>` : ""}${l.anchors > 1 ? `<span class="tag anchor">${tr("2 FTL jobs share")}</span>` : ""}</h4>
       <div class="fillbar"><i class="${cls}" style="width:${pct}%"></i></div>
-      <div class="fl"><span>${l.m3} / ${l.truck_m3} m³ · ${l.fill_pct}%${l.kg ? ` · ${fmtN(l.kg)} kg` : ""}</span><span>${l.depart_by ? tr("depart by") + " " + fmtD(l.depart_by) : ""}</span></div>
-      ${l.shipments.map(it => `<div class="row" data-id="${esc(it.id)}"><div class="who"><b>${esc(it.customer)}</b>${it.anchor ? ' <span class="tag anchor">anchor</span>' : ""}${l.window_risk.includes(it.id) ? ' <span class="tag risk">by ' + fmtD(it.deadline) + '</span>' : ""}<br><span class="rs">${esc(it.source)} · ${esc(it.agent || "")}${it.reference ? " · " + esc(it.reference) : ""} · → ${esc(it.destination || "?")}${it.service ? " · " + esc(it.service) : ""}</span></div><div class="m3">${it.m3} m³</div></div>`).join("")}
+      <div class="fl"><span>${l.m3} / ${l.truck_m3} m³ · ${l.fill_pct}%${l.kg ? ` · ${fmtN(l.kg)} kg` : ""}${
+        (l.revenue || []).length ? ` · ${tr("revenue")} ${fmtMoneyBuckets(l.revenue)}` : ""}</span><span>${l.depart_by ? tr("depart by") + " " + fmtD(l.depart_by) : ""}</span></div>
+      ${l.shipments.map(it => `<div class="row" data-id="${esc(it.id)}"><div class="who"><b>${esc(it.customer)}</b>${it.anchor ? ' <span class="tag anchor">anchor</span>' : ""}${it.corporate_account ? ` <span class="corp">${esc(it.corporate_account)}</span>` : ""}${l.window_risk.includes(it.id) ? ' <span class="tag risk">by ' + fmtD(it.deadline) + '</span>' : ""}<br><span class="rs">${esc(it.source)} · ${esc(it.agent || "")}${it.reference ? " · " + esc(it.reference) : ""} · → ${esc(it.destination || "?")}${it.service ? " · " + esc(it.service) : ""}</span></div><div class="m3">${it.m3} m³${it.revenue != null ? `<br><span class="rs">${fmtMoney(it.revenue, it.revenue_currency, it.revenue_month)}</span>` : ""}</div></div>`).join("")}
       ${(l.trucks||[]).length ? `<div class="fl" style="margin-top:6px"><span>${tr("On a truck already going")}: ${l.trucks.map(t => `<span class="tag ${t.fits?"truckfit":"truck"}" title="${esc(t.driver||"")}">${esc(t.unit)} · ${fmtD(t.date)} · ${t.spare_m3} m³ ${tr("free")}</span>`).join(" ")}</span></div>` : ""}
       ${opp && opp.advice ? `<div class="adv">${esc(opp.advice)}</div>` : ""}
     </div>`; }).join("") : `<div class="empty">${p.error ? "" : tr("No consolidatable shipments are ready right now.")}</div>`;
@@ -629,7 +756,7 @@ function renderHubs(rows) {
   $("#hubs").innerHTML = html + (unk ? `<div class="note">${unk} ${tr("open shipments without a destination hub")}${rem.error ? (" " + tr("Destinations and volumes come from the Remisiones workbook — waiting on Files.Read.All access for the Graph app.")) : (" " + tr("Extend the destination → hub table for the unmapped cities."))}</div>` : "");
 }
 
-const COLS = [["customer_name","Customer"],["source","Src"],["agent","Agent"],["reference_number","Reference"],["stage","Stage"],["current_step","Current step"],["days_since_progress","Days idle"],["destination","Destination"],["destination_hub","Hub"],["planning_m3","m³"],["status_flags","Flags"],["assignees","Assigned"],["milestones.green_light","Green light"],["milestones.crossed","Crossed"],["milestones.delivered","Delivered"]];
+const COLS = [["customer_name","Customer"],["source","Src"],["agent","Agent"],["corporate_account","Corporate account"],["reference_number","Reference"],["stage","Stage"],["current_step","Current step"],["days_since_progress","Days idle"],["destination","Destination"],["destination_hub","Hub"],["planning_m3","m³"],["revenue","Revenue"],["status_flags","Flags"],["assignees","Assigned"],["milestones.green_light","Green light"],["milestones.crossed","Crossed"],["milestones.delivered","Delivered"]];
 const get = (s, k) => k.includes(".") ? k.split(".").reduce((o, p) => o && o[p], s) : s[k];
 function renderTable(rows) {
   rows = [...rows].sort((a, b) => { let x = get(a, sortKey), y = get(b, sortKey); if (Array.isArray(x)) x = x.join(","); if (Array.isArray(y)) y = y.join(",");
@@ -642,6 +769,10 @@ function renderTable(rows) {
     else if (c[0] === "assignees") v = esc((v || []).join(", "));
     else if (c[0].startsWith("milestones")) v = fmtD(v);
     else if (c[0] === "planning_m3") v = v ? fmtN(v) : "—";
+    else if (c[0] === "revenue") v = fmtMoney(s.revenue, s.revenue_currency, s.revenue_month);
+    else if (c[0] === "corporate_account") v = s.corporate_account
+      ? `<span class="corp${s.corporate_account_named ? "" : " unnamed"}">${esc(s.corporate_account)}</span>`
+      : (s.customer_type ? esc(s.customer_type) : `<span style="color:#b9bdc4">${tr("private")}</span>`);
     else if (c[0] === "customer_name") v = s.url ? `<a href="${esc(s.url)}" target="_blank" onclick="event.stopPropagation()">${esc(v)}</a>` : esc(v);
     else v = esc(v ?? "—");
     return `<td>${v}</td>`; }).join("") + "</tr>").join("");
@@ -664,13 +795,44 @@ function openDrawer(id) {
       <b>${tr("Assigned")}</b><span>${esc((s.assignees || []).join(", ") || "—")}</span>
       <b>${tr("Origin → Dest.")}</b><span>${esc(s.origin || "?")} → ${esc(s.destination || "?")}${s.destination_hub !== "Unknown" ? ` (${esc(s.destination_hub)} hub)` : ""}</span>
       <b>${tr("Volume")}</b><span>${s.lift_vans ? s.lift_vans + " lift van(s) · " : ""}${s.u_boxes ? s.u_boxes + " U-Box(es) · " : ""}${s.volume_m3 ? s.volume_m3 + " m³ · " : ""}${esc(ex.volume_text || "")}${!(s.lift_vans || s.u_boxes || s.volume_m3 || ex.volume_text) ? "—" : ""}</span>
-      <b>${tr("Sale value")}</b><span>${money(ex.sale_value)}</span>
+      <b>${tr("Revenue")}</b><span>${s.revenue != null
+          ? fmtMoney(s.revenue, s.revenue_currency, s.revenue_month)
+            + (s.revenue_month ? ` <span style="color:#8a8f98;font-size:11px">· ${esc(s.revenue_month)} ${tr("rate")}`
+               + ` (${tr(BASIS_LABEL[s.revenue_month_basis] || s.revenue_month_basis || "")})</span>` : "")
+          : (ex.sale_value ? money(ex.sale_value) : "—")}</span>
+      ${s.source === "TMS" ? `<b>${tr("Invoiced")}</b><span id="dinv">${s.invoice_status === "Y" ? tr("yes") : tr("not yet")} · <a href="#" id="dinv-load" style="color:#1967d2">${tr("check outstanding")}</a></span>` : ""}
+      <b>${tr("Client")}</b><span>${s.corporate_account
+          ? `<span class="corp${s.corporate_account_named ? "" : " unnamed"}">${esc(s.corporate_account)}</span>`
+            + (s.corporate_account_named ? "" : ` <span style="color:#8a8f98;font-size:11px">${tr("— placeholder, no account named in Moveware")}</span>`)
+          : (s.customer_type ? esc(s.customer_type) : tr("private / consumer"))}</span>
+      ${(s.booking_agent || s.origin_agent || s.destination_agent) ? `<b>${tr("Agents")}</b><span>${
+          [[tr("booking"), s.booking_agent], [tr("origin"), s.origin_agent], [tr("destination"), s.destination_agent]]
+            .filter(p => p[1]).map(p => `${p[0]}: ${esc(p[1])}`).join("<br>")}</span>` : ""}
       ${s.weight ? `<b>${tr("Weight")}</b><span>${s.weight} kg</span>` : ""}
       ${ex.sit_unit ? `<b>${tr("Mexican leg")}</b><span>${esc(ex.sit_unit)}${ex.sit_driver ? " · " + esc(ex.sit_driver) : ""}${ex.sit_load_date ? "<br>" + tr("loads") + " " + fmtD(ex.sit_load_date) : ""}${ex.sit_unload_date ? " → " + tr("unloads") + " " + fmtD(ex.sit_unload_date) : ""}${ex.sit_route ? "<br>" + esc(ex.sit_route) : ""}</span>` : ""}
       ${s.source !== "TIM" ? "" : `<b>Remisiones</b><span>${ex.remisiones_block ? esc(ex.remisiones_block) + (ex.remisiones_week ? " · " + esc(ex.remisiones_week) : "") + (ex.remisiones_status ? "<br>" + esc(ex.remisiones_status) : "") : tr("not on the sheet")}</span>`}
     </div>
     <div class="section" style="margin-top:0">${tr("Milestones")}</div>
     <div class="ms">${ms.map(m => `<div class="${s.milestones && s.milestones[m] ? "done" : "todo"}"><span>${m.replace(/_/g, " ")}</span><span>${s.milestones && s.milestones[m] ? esc(s.milestones[m]) : "—"}</span></div>`).join("")}</div>`;
+  // Invoiced-vs-outstanding is one extra Moveware call, so it is fetched only
+  // when somebody asks for it rather than on every refresh.
+  const invLink = $("#dinv-load");
+  if (invLink) invLink.onclick = async (e) => {
+    e.preventDefault();
+    invLink.textContent = tr("checking…");
+    try {
+      const r = await fetch(`/crossborder/api/invoices/${encodeURIComponent(s.source_ref)}?v=${Date.now()}${DEMOQ}`);
+      const j = await r.json();
+      if (j.error) { $("#dinv").innerHTML = `<span style="color:#c0392b">${esc(j.error)}</span>`; return; }
+      if (!j.count) { $("#dinv").textContent = tr("no invoice raised yet"); return; }
+      $("#dinv").innerHTML = `${tr("Invoiced")} ${fmtMoney(j.invoiced, j.currency, s.revenue_month)}`
+        + ` · ${tr("outstanding")} <b>${fmtMoney(j.outstanding, j.currency, s.revenue_month)}</b>`
+        + j.invoices.map(i => `<br><span style="color:#8a8f98;font-size:11px">${esc(i.number || i.id)}`
+            + `${i.date ? " · " + esc(i.date) : " · " + tr("no invoice date")}</span>`).join("");
+    } catch (err) {
+      $("#dinv").innerHTML = `<span style="color:#c0392b">${esc(String(err))}</span>`;
+    }
+  };
   $("#drawer").classList.add("open"); $("#overlay").classList.add("open");
 }
 function closeDrawer() { $("#drawer").classList.remove("open"); $("#overlay").classList.remove("open"); }
@@ -684,8 +846,9 @@ $("#view-table").onclick = () => { view = "table"; render(); };
 $("#refresh").onclick = () => load(true);
 $("#dclose").onclick = closeDrawer; $("#overlay").onclick = closeDrawer;
 $("#lang-en").onclick = () => setLang("en"); $("#lang-es").onclick = () => setLang("es");
+$("#cur-mxn").onclick = () => setCur("MXN"); $("#cur-usd").onclick = () => setCur("USD");
 document.addEventListener("keydown", e => { if (e.key === "Escape") closeDrawer(); });
-applyStaticLang(); load(false);
+applyStaticLang(); applyCurrency(); load(false);
 setInterval(() => load(false), 5 * 60 * 1000);
 </script>
 </body>

@@ -292,7 +292,9 @@ const ES = {
   "Pesos": "Pesos", "USD · books": "USD · libros",
   "Revenue": "Ingresos", "revenue": "ingresos", "Invoiced": "Facturado",
   "invoiced": "facturado", "outstanding": "pendiente de cobro",
-  "yes": "sí", "not yet": "aún no", "check outstanding": "ver pendiente de cobro",
+  "yes": "sí", "not yet": "aún no", "show invoice": "ver factura",
+  "Invoiced in Moveware": "Facturado en Moveware",
+  "Payment status is not held in Moveware.": "El estado de pago no se lleva en Moveware.",
   "checking…": "consultando…", "no invoice raised yet": "aún no se ha emitido factura",
   "no invoice date": "sin fecha de factura",
   "Client": "Cliente", "private / consumer": "particular", "private": "particular",
@@ -800,7 +802,7 @@ function openDrawer(id) {
             + (s.revenue_month ? ` <span style="color:#8a8f98;font-size:11px">· ${esc(s.revenue_month)} ${tr("rate")}`
                + ` (${tr(BASIS_LABEL[s.revenue_month_basis] || s.revenue_month_basis || "")})</span>` : "")
           : (ex.sale_value ? money(ex.sale_value) : "—")}</span>
-      ${s.source === "TMS" ? `<b>${tr("Invoiced")}</b><span id="dinv">${s.invoice_status === "Y" ? tr("yes") : tr("not yet")} · <a href="#" id="dinv-load" style="color:#1967d2">${tr("check outstanding")}</a></span>` : ""}
+      ${s.source === "TMS" ? `<b>${tr("Invoiced in Moveware")}</b><span id="dinv">${s.invoice_status === "Y" ? tr("yes") : tr("not yet")} · <a href="#" id="dinv-load" style="color:#1967d2">${tr("show invoice")}</a></span>` : ""}
       <b>${tr("Client")}</b><span>${s.corporate_account
           ? `<span class="corp${s.corporate_account_named ? "" : " unnamed"}">${esc(s.corporate_account)}</span>`
             + (s.corporate_account_named ? "" : ` <span style="color:#8a8f98;font-size:11px">${tr("— placeholder, no account named in Moveware")}</span>`)
@@ -825,10 +827,14 @@ function openDrawer(id) {
       const j = await r.json();
       if (j.error) { $("#dinv").innerHTML = `<span style="color:#c0392b">${esc(j.error)}</span>`; return; }
       if (!j.count) { $("#dinv").textContent = tr("no invoice raised yet"); return; }
+      // Deliberately NOT labelled "outstanding". Moveware is not Thelsa's
+      // accounting system of record (Bill, 2026-09-16) — payments are booked
+      // elsewhere, so Moveware shows nearly every invoice as unpaid. Presenting
+      // that as an AR figure would invent a receivables crisis that isn't real.
       $("#dinv").innerHTML = `${tr("Invoiced")} ${fmtMoney(j.invoiced, j.currency, s.revenue_month)}`
-        + ` · ${tr("outstanding")} <b>${fmtMoney(j.outstanding, j.currency, s.revenue_month)}</b>`
         + j.invoices.map(i => `<br><span style="color:#8a8f98;font-size:11px">${esc(i.number || i.id)}`
-            + `${i.date ? " · " + esc(i.date) : " · " + tr("no invoice date")}</span>`).join("");
+            + `${i.date ? " · " + esc(i.date) : " · " + tr("no invoice date")}</span>`).join("")
+        + `<br><span style="color:#8a8f98;font-size:11px">${tr("Payment status is not held in Moveware.")}</span>`;
     } catch (err) {
       $("#dinv").innerHTML = `<span style="color:#c0392b">${esc(String(err))}</span>`;
     }

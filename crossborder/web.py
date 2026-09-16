@@ -438,11 +438,17 @@ def api_trucks():
 @crossborder_bp.route("/crossborder/api/invoices/<job_id>")
 @_login_required
 def api_invoices(job_id: str):
-    """Invoiced vs outstanding for one Moveware job, fetched on demand.
+    """The invoice(s) raised against one Moveware job, fetched on demand.
 
     Deliberately NOT part of the refresh: it is one extra call per job, and the
-    board only needs it when somebody opens a shipment. Read-only — this never
-    writes to Moveware, and the accounting record stays the system of truth.
+    board only needs it when somebody opens a shipment. Read-only.
+
+    `outstanding` is returned because Moveware sends it, but it is NOT a
+    receivables figure: Moveware is not Thelsa's accounting system of record
+    (Bill, 2026-09-16), payments are booked elsewhere, and so almost every
+    invoice here reads as fully unpaid. The UI shows the invoiced amount and
+    says plainly that payment status lives in another system. Do not build an
+    AR metric on this field without checking where cash is actually recorded.
     """
     jid = str(job_id or "").strip()
     if not jid.isdigit():

@@ -556,23 +556,44 @@ def _map_job(job: dict) -> dict | None:
                 coordinator_email = em
         if coordinator and coordinator_email:
             break
-    # Fallback: the /roles array (only if we still lack an email).
+    # Fallback: the /roles array (fetched once) — first by a coordinator-ish role
+    # type, then, failing that, by ANY @thelsa.com email on any role. On live V2
+    # files the coordinator/moveManager roles are often blank while the Thelsa
+    # handler's @thelsa.com address is attached to another role (e.g. originClient);
+    # the client's own email is external (never @thelsa.com), so the @thelsa.com
+    # scan addresses the file to the real handler instead of "Unassigned".
     if not coordinator_email:
+        role_rows = []
+        if isinstance(roles_obj, dict):
+            role_rows += [v for v in roles_obj.values() if isinstance(v, dict)]
         try:
             rr = _get(f"/jobs/{job_id}/roles") or {}
-            for r in (_first(rr, "roles", default=[]) or []):
-                t = (_code_text(_first(r, "type", default="")) or "").lower().replace(" ", "")
-                if t in ("coordinator", "movemanager", "accountmanager", "manager"):
-                    nm = (f"{_first(r, 'firstName', default='') or ''} "
-                          f"{_first(r, 'lastName', default='') or ''}").strip()
-                    em = (_first(r, "email", default="") or "").strip()
-                    if nm and not coordinator:
-                        coordinator = nm
-                    if em:
-                        coordinator_email = em
-                        break
+            role_rows += [r for r in (_first(rr, "roles", default=[]) or []) if isinstance(r, dict)]
         except Exception:
             pass
+        # 1) a coordinator-ish role type.
+        for r in role_rows:
+            t = (_code_text(_first(r, "type", default="")) or "").lower().replace(" ", "")
+            if t in ("coordinator", "movemanager", "accountmanager", "manager"):
+                nm = (f"{_first(r, 'firstName', default='') or ''} "
+                      f"{_first(r, 'lastName', default='') or ''}").strip()
+                em = (_first(r, "email", default="") or "").strip()
+                if nm and not coordinator:
+                    coordinator = nm
+                if em:
+                    coordinator_email = em
+                    break
+        # 2) any @thelsa.com email on the file (the client is never @thelsa.com).
+        if not coordinator_email:
+            for r in role_rows:
+                em = (_first(r, "email", default="") or "").strip()
+                if em.lower().endswith("@thelsa.com"):
+                    coordinator_email = em
+                    if not coordinator:
+                        nm = (f"{_first(r, 'firstName', default='') or ''} "
+                              f"{_first(r, 'lastName', default='') or ''}").strip()
+                        coordinator = nm or coordinator
+                    break
 
     # Options → accepted-option sell + sell charge lines (quote scope). Only the
     # charge-line sub-calls are gated by AUDIT_DEEP_LINES (they add calls/file);

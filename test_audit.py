@@ -780,3 +780,39 @@ def test_v2_jobs_url_sends_page_and_offset():
     url = mw._jobs_url(3, 500)
     assert "page=3" in url and "offset=3" in url
     assert "limit=10" in url  # capped to the ~18-row trap ceiling
+
+
+def test_v2_coordinator_falls_back_to_any_thelsa_email(monkeypatch):
+    """Live V2 files often leave coordinator/moveManager blank while a Thelsa
+    handler's @thelsa.com email is attached to another role (e.g. originClient).
+    The client's email is external, so the first @thelsa.com email is the handler."""
+    job = {
+        "id": 111136, "status": "W", "jobValue": 61641,
+        "activityDates": {"pack": {"date": "2026-10-01"}, "created": {"date": "2026-09-14"}},
+        "roles": {
+            "coordinator": {"firstName": "", "lastName": "", "email": ""},
+            "moveManager": {"firstName": "", "lastName": "", "email": ""},
+            "destinationClient": {"firstName": "Luis", "lastName": "Jimenez", "email": ""},
+            "originClient": {"firstName": "Luis", "lastName": "Jimenez",
+                             "email": "edgarespino@thelsa.com"},
+        },
+    }
+    monkeypatch.setattr(mw, "_get", lambda path: job if path == "/jobs/111136" else {})
+    m = mw._map_job({"id": "111136", "status": "W"})
+    assert m["coordinator_email"] == "edgarespino@thelsa.com"  # addressable, not Unassigned
+
+
+def test_v2_coordinator_ignores_external_client_email(monkeypatch):
+    """A file whose only emails are the external client's stays without a
+    coordinator email (honest 'Unassigned') rather than mis-addressing to the client."""
+    job = {
+        "id": 111135, "status": "W", "jobValue": 13438,
+        "activityDates": {"created": {"date": "2026-09-14"}},
+        "roles": {
+            "originClient": {"firstName": "Alexandre", "lastName": "Monteiro",
+                             "email": "adefreit@visa.com"},
+        },
+    }
+    monkeypatch.setattr(mw, "_get", lambda path: job if path == "/jobs/111135" else {})
+    m = mw._map_job({"id": "111135", "status": "W"})
+    assert m["coordinator_email"] == ""   # external client is never taken as coordinator

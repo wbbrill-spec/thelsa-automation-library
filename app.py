@@ -62,6 +62,21 @@ logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
+# Server-side sessions keep each user's Graph access token OFF the client cookie
+# (the cookie holds only an opaque session id). Filesystem backend = no extra infra;
+# on a restart sessions are simply re-created on next login. Guarded so a missing
+# dependency degrades to default cookie sessions rather than failing to boot.
+try:
+    from flask_session import Session as _ServerSession
+    app.config["SESSION_TYPE"] = "filesystem"
+    app.config["SESSION_FILE_DIR"] = str(BASE / "data" / "flask_session")
+    app.config["SESSION_PERMANENT"] = True
+    app.config["SESSION_USE_SIGNER"] = True
+    _ServerSession(app)
+    logger.info("Server-side sessions active (filesystem).")
+except Exception as _sess_exc:  # pragma: no cover
+    logger.warning("Flask-Session not active (%s) — using default cookie sessions.", _sess_exc)
+
 # ── Access control (email-domain allow-list) ───────────────────────────────────
 ALLOWED_DOMAINS = {
     d.strip().lower()
@@ -113,7 +128,7 @@ MS_CLIENT_SECRET = os.environ.get("MS_CLIENT_SECRET", "").strip()
 MS_TENANT_ID = os.environ.get("MS_TENANT_ID", "").strip()
 MS_REDIRECT_URI = os.environ.get("MS_REDIRECT_URI", "").strip()
 MS_AUTHORITY = f"https://login.microsoftonline.com/{MS_TENANT_ID}" if MS_TENANT_ID else ""
-MS_SCOPES = ["User.Read"]  # openid/profile/email are added automatically by MSAL
+MS_SCOPES = ["User.Read", "Mail.Read"]  # openid/profile/email added automatically by MSAL. Mail.Read = live per-user inbox scan for the personal assistant (already admin-consented on the web-login app).
 
 
 def microsoft_enabled() -> bool:
@@ -362,6 +377,11 @@ def auth_callback_microsoft():
     session["user_email"] = email
     session["user_name"] = name
     session["auth_provider"] = "microsoft"
+    # Keep the user's own Graph access token in the SERVER-SIDE session only, for
+    # on-demand mailbox scans (the personal assistant). No refresh token is stored,
+    # so nothing long-lived that can read their mail is ever persisted. ~1h lifetime;
+    # on expiry the assistant redirects the user to sign in again.
+    session["ms_access_token"] = result.get("access_token")
     session.permanent = True
     logger.info(f"Login (Microsoft): {email}")
     return redirect(session.pop("oauth_next", url_for("index")))
@@ -452,6 +472,9 @@ app.register_blueprint(faim_bp)
 # Cross-Border Shipment Dashboard (TIM/ClickUp + TMS/Moveware, unified)
 from crossborder.web import crossborder_bp
 app.register_blueprint(crossborder_bp)
+# Personal AI Assistant — per-user, on-demand mailbox scan (multi-tenant Phase 1)
+from assistant_web import assistant_bp
+app.register_blueprint(assistant_bp)
 
 
 # ── Entry point ─────────────────────────────────────────────────────────────────

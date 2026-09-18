@@ -310,7 +310,9 @@ def test_full_coverage_audits_every_file(full_feed):
 
 def test_full_coverage_window_ready_before_backfill_done(full_feed):
     # Run just enough cycles to pass the recent region but not the whole feed.
-    for _ in range(6):
+    # Pages are _AUDIT_PAGE rows each (10 on V2); the in-window region is ids
+    # 300..400, so ~11 backward cycles cross the window edge — run a few more.
+    for _ in range(15):
         mw._auditor_cycle()
     assert mw._AUDIT["window_ready"] is True         # recoverable view usable early
     assert mw._AUDIT["window_complete"] is False     # backfill still going
@@ -335,28 +337,36 @@ def test_anchor_drives_window_with_created_fallback():
 
 
 def test_map_job_reads_packing_and_created_when_delivery_blank(monkeypatch):
-    """Real MoveWare shape: delivery/uplift blank, but packing/survey/created set.
-    The file must anchor on the populated dates, not be treated as undated."""
-    quotes = {"quotes": [{
-        "job": {
-            "dates": {
-                "packing": {"date": "2026-07-30", "time": ""},
-                "delivery": {"date": "", "time": ""},
-                "uplift": {"date": "", "time": ""},
-                "survey": {"date": "2026-07-23", "time": ""},
-            },
-            "created": "2026-07-16", "estimatedMove": "",
-            "jobStatus": {"code": "W"},
+    """Real MoveWare V2 shape: dates live on GET /jobs/{id} under activityDates,
+    with delivery/uplift blank but pack/survey/created set. The file must anchor on
+    the populated dates, not be treated as undated."""
+    job = {
+        "id": 110995,
+        "status": "W",
+        "jobValue": 5000,
+        "activityDates": {
+            "pack": {"date": "2026-07-30", "time": ""},
+            "delivery": {"date": "", "time": ""},
+            "uplift": {"date": "", "time": ""},
+            "survey": {"date": "2026-07-23", "time": ""},
+            "created": {"date": "2026-07-16", "time": ""},
         },
-        "options": [], "roles": {},
-    }]}
-    monkeypatch.setattr(mw, "_get", lambda path: quotes if "quotes" in path else {"invoices": []})
+        "roles": {},
+    }
+
+    def fake_get(path):
+        if path == "/jobs/110995":
+            return job
+        return {}   # /roles, /options, /invoices — empty for this date test
+
+    monkeypatch.setattr(mw, "_get", fake_get)
     m = mw._map_job({"id": "110995", "status": "W"})
     assert m is not None
     assert m["created"] == dt.date(2026, 7, 16)
-    assert m["pack"] == dt.date(2026, 7, 30)      # packing used when uplift blank
+    assert m["pack"] == dt.date(2026, 7, 30)      # pack used when uplift blank
     assert m["delivery"] is None                  # genuinely blank
     assert m["anchor"] == dt.date(2026, 7, 30)    # latest milestone => window anchor
+    assert m["sell"] == 5000                       # sell = job.jobValue (V2)
     assert mw._file_anchor_date(m) == dt.date(2026, 7, 30)
 
 
@@ -698,3 +708,75 @@ def test_demo_dataset_renders():
     aw.check_calculations(files)
     m = aw.compute_metrics(files, live_counts=None, cost_available=True)
     assert len(Template(aw.TEMPLATE).render(m=m, demo=True)) > 1000
+
+
+# ── V2 endpoint migration (2026-09-17) ───────────────────────────────────────
+# Pins the V2 contract so a later edit can't silently regress the audit back to
+# the V1 /quotes+/account shape (which 404s on V2) or to offset= paging.
+
+def test_v2_map_job_reads_jobvalue_and_coordinator_from_job(monkeypatch):
+    """V2: sell = job.jobValue and the coordinator (name + @thelsa.com email) come
+    straight off GET /jobs/{id} under roles.coordinator — no /quotes call."""
+    job = {
+        "id": 111001, "status": "W", "jobValue": 8200,
+        "name": "Reyes/Ana", "activityDates": {"created": {"date": "2026-08-01"}},
+        "roles": {"coordinator": {"firstName": "Sara", "lastName": "Reyes",
+                                  "email": "sarareyes@thelsa.com"}},
+        "insurance": {"value": 50000, "premium": 600},
+    }
+    called = {"paths": []}
+
+    def fake_get(path):
+        called["paths"].append(path)
+        if path == "/jobs/111001":
+            return job
+        return {}
+
+    monkeypatch.setattr(mw, "_get", fake_get)
+    m = mw._map_job({"id": "111001", "status": "W"})
+    assert m["sell"] == 8200
+    assert m["coordinator"] == "Sara Reyes"
+    assert m["coordinator_email"] == "sarareyes@thelsa.com"
+    assert m["declared"] == 50000 and m["ins"] == 600
+    assert m["act"] == 0  # actual cost is not exposed by V2 yet (MoveConnect)
+    # never touches the dead V1 endpoints
+    assert not any("/quotes" in p or "/account" in p for p in called["paths"])
+
+
+def test_v2_sell_falls_back_to_accepted_option(monkeypatch):
+    """When the job carries no headline jobValue, sell falls back to the accepted
+    option's valueInclusive from /jobs/{id}/options."""
+    job = {"id": 111002, "status": "W", "activityDates": {"created": {"date": "2026-08-01"}}}
+    options = {"options": [
+        {"id": 1, "statusQuote": "rejected", "valueInclusive": 1000},
+        {"id": 2, "statusQuote": "accepted", "valueInclusive": 7400},
+    ]}
+
+    def fake_get(path):
+        if path == "/jobs/111002":
+            return job
+        if path == "/jobs/111002/options":
+            return options
+        return {}
+
+    monkeypatch.setattr(mw, "_get", fake_get)
+    m = mw._map_job({"id": "111002", "status": "W"})
+    assert m["sell"] == 7400
+
+
+def test_v2_feed_count_reads_x_total_count_header(monkeypatch):
+    """_feed_count / _feed_total read V2's x-total-count header (count=true)."""
+    def fake_headers(url, timeout):
+        assert "count=true" in url
+        return {"jobs": []}, {"x-total-count": "10130"}
+
+    monkeypatch.setattr(mw, "_raw_json_headers", fake_headers)
+    assert mw._feed_count() == 10130
+    assert mw._feed_total() == 10130
+
+
+def test_v2_jobs_url_sends_page_and_offset():
+    """The feed URL must send page= (V2) AND offset= (v1 rollback), capped at 10."""
+    url = mw._jobs_url(3, 500)
+    assert "page=3" in url and "offset=3" in url
+    assert "limit=10" in url  # capped to the ~18-row trap ceiling

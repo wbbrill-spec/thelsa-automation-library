@@ -994,6 +994,92 @@ def audit_rawjob():
     return jsonify(out)
 
 
+@audit_bp.route("/audit/v2feed")
+@_login_required
+def audit_v2feed():
+    """Debug (V2): fetch one page of the /jobs feed the V2 way — `page` + small
+    `limit` — and show the row shape + ordering so we can confirm the walk. V2
+    ignores `offset` and caps the page at ~18 rows, so limit stays <= 10."""
+    from flask import jsonify, request
+    import mw_live
+    try:
+        page = int(request.args.get("page", "1"))
+        lim = min(int(request.args.get("limit", "10")), 10)
+        status = request.args.get("status", "").strip()
+        q = f"/jobs?limit={lim}&page={page}&offset={page}" + (f"&status={status}" if status else "")
+        payload = mw_live._get_timed(q, 12)
+        jobs = mw_live._page_jobs(payload)
+        keys = ("id", "name", "status", "jobType", "method", "service",
+                "origin", "destination", "number", "fileNumber", "jobValue")
+        rows = [{k: j.get(k) for k in keys if k in j} for j in jobs if isinstance(j, dict)]
+        return jsonify({
+            "query": q,
+            "top_keys": list(payload.keys()) if isinstance(payload, dict) else "list",
+            "count": len(jobs),
+            "first_row_all_keys": list(jobs[0].keys()) if jobs else [],
+            "rows": rows,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
+
+@audit_bp.route("/audit/v2probe")
+@_login_required
+def audit_v2probe():
+    """Debug (V2): dump the REAL V2 payloads for one job so the audit mapping can
+    be wired to actual field names — job, roles, options(+charges), invoices
+    (+charges), and the supplier COST side (/suppliers/{id}/transactions?job=)."""
+    from flask import jsonify, request
+    import mw_live
+    jid = request.args.get("id", "").strip()
+    out = {"id": jid, "base_url": mw_live.BASE_URL}
+    if not jid:
+        return jsonify({"error": "pass ?id=JOBID"})
+
+    def grab(key, path, t=10):
+        try:
+            out[key] = mw_live._get_timed(path, t)
+        except Exception as e:
+            out[key + "_error"] = str(e)[:200]
+
+    grab("job", f"/jobs/{jid}")
+    grab("roles", f"/jobs/{jid}/roles")
+    grab("quotations", f"/jobs/{jid}/quotations")
+    grab("options", f"/jobs/{jid}/options")
+    # first option's charge lines
+    try:
+        opts = (out.get("options") or {}).get("options") or []
+        if opts:
+            oid = opts[0].get("id")
+            out["opt0_id"] = oid
+            grab("opt0_charges", f"/jobs/{jid}/options/{oid}/charges")
+    except Exception as e:
+        out["opt0_charges_error"] = str(e)[:200]
+    grab("invoices", f"/jobs/{jid}/invoices")
+    # first invoice's charge lines
+    try:
+        invs = (out.get("invoices") or {}).get("invoices") or []
+        if invs:
+            iid = invs[0].get("id")
+            out["inv0_id"] = iid
+            grab("inv0_charges", f"/jobs/{jid}/invoices/{iid}/charges")
+    except Exception as e:
+        out["inv0_charges_error"] = str(e)[:200]
+    # COST side: supplier transactions filtered by this job/file.
+    grab("supplier_tx_by_job", f"/suppliers/all/transactions?job={jid}")
+    grab("supplier_tx_by_file", f"/suppliers/all/transactions?file={jid}")
+    grab("suppliers_sample", "/suppliers?limit=3")
+    try:
+        sups = (out.get("suppliers_sample") or {}).get("suppliers") or []
+        if sups:
+            sid = sups[0].get("id")
+            out["sup0_id"] = sid
+            grab("sup0_tx_for_job", f"/suppliers/{sid}/transactions?job={jid}")
+    except Exception as e:
+        out["sup0_tx_error"] = str(e)[:200]
+    return jsonify(out)
+
+
 TEMPLATE = r"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">

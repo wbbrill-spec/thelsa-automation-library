@@ -99,11 +99,27 @@ def _headers() -> dict:
 # blows past gunicorn's worker timeout and the whole page 500s.
 _REQ_TIMEOUT = 10
 
+# Line-level charge reconciliation (options/{id}/charges + invoices/{id}/charges)
+# adds sub-calls per file. On by default; set AUDIT_DEEP_LINES=0 in the Render env
+# to drop those calls (keeps sell/dates/coordinator/invoiced, drops the line-level
+# quote-vs-invoice detail) if the extra calls ever pressure the worker timeout.
+_DEEP_LINES = os.environ.get("AUDIT_DEEP_LINES", "1") == "1"
+
 
 def _raw_json(url: str, timeout: int):
     req = urllib.request.Request(url, headers=_headers(), method="GET")
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
+
+
+def _raw_json_headers(url: str, timeout: int):
+    """Like _raw_json but also returns the response headers (lower-cased keys).
+    Used to read V2's `x-total-count` (returned when a feed query carries
+    `count=true`)."""
+    req = urllib.request.Request(url, headers=_headers(), method="GET")
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        hdrs = {str(k).lower(): v for k, v in resp.headers.items()}
+        return json.loads(resp.read().decode("utf-8")), hdrs
 
 
 def _fetch(url: str, timeout: int):
@@ -142,6 +158,43 @@ def _get_abs(url: str):
     return _fetch(url, _REQ_TIMEOUT)
 
 
+def _feed_count() -> int:
+    """Exact job count via V2's `x-total-count` header (returned when the query
+    carries `count=true`). Confirmed by MoveConnect (Dave Pile, 2026-09-17). This
+    replaces the old V1 offset binary-search (`offset` is ignored on V2). Returns
+    0 if the header is missing/unavailable."""
+    box: dict = {}
+
+    def run():
+        try:
+            _, hdrs = _raw_json_headers(
+                f"{BASE_URL}/jobs?limit=1&page=1&count=true", _COUNT_TIMEOUT)
+            box["n"] = hdrs.get("x-total-count")
+        except Exception as e:  # noqa: BLE001
+            box["e"] = e
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    t.join(_COUNT_TIMEOUT + 3)
+    try:
+        return int(box.get("n")) if box.get("n") not in (None, "") else 0
+    except (TypeError, ValueError):
+        return 0
+
+
+# V2 caps the /jobs page at ~18 rows and silently repeats page 1 above that
+# (measured), so keep the page size small.
+_FEED_PAGE_MAX = 10
+
+
+def _jobs_url(page: int, limit: int = _FEED_PAGE_MAX) -> str:
+    """Build a /jobs feed URL the V2 way. V2 reads `page` (1-indexed) and IGNORES
+    `offset`; we send BOTH so a MOVEWARE_URL rollback to v1 (which read `offset`)
+    still pages. Page size is capped at _FEED_PAGE_MAX (the ~18-row trap)."""
+    lim = min(int(limit or _FEED_PAGE_MAX), _FEED_PAGE_MAX)
+    return f"/jobs?limit={lim}&page={page}&offset={page}"
+
+
 def _link_href(links, rel):
     """Return the href for a pagination rel ('next','prev','last') from a
     Moveware `_links` block, checking both the top level and a nested `pages`."""
@@ -169,30 +222,27 @@ def _recent_job_items(limit_jobs: int):
     """
     total = 0
     try:
-        counts = live_file_counts()
-        total = int((counts or {}).get("total") or 0)
+        total = _feed_count()
     except Exception:
         total = 0
 
-    if total and limit_jobs:
-        last_page = max(1, (total + limit_jobs - 1) // limit_jobs)
-        # Grab the last page (newest) and, if it's short, the page before it so we
-        # always return a full `limit_jobs` of recent files.
-        for pg in (last_page, last_page - 1):
+    if total:
+        # Feed is oldest-first, so the newest files sit at the END of the LAST page.
+        last_page = max(1, (total + _FEED_PAGE_MAX - 1) // _FEED_PAGE_MAX)
+        collected = []
+        for pg in (last_page - 1, last_page):   # oldest→newest so the tail is newest
             if pg < 1:
                 continue
             try:
-                jobs = _page_jobs(_get_timed(f"/jobs?limit={limit_jobs}&offset={pg}", _REQ_TIMEOUT))
+                collected += _page_jobs(_get_timed(_jobs_url(pg), _REQ_TIMEOUT))
             except Exception:
-                jobs = []
-            if len(jobs) >= limit_jobs:
-                return jobs[-limit_jobs:]
-            if jobs:
-                return jobs
+                pass
+        if collected:
+            return collected[-limit_jobs:]
 
     # Fallback: first page tail (least-bad if the count is unavailable).
     try:
-        jobs = _page_jobs(_get_timed("/jobs?limit=100", _REQ_TIMEOUT))
+        jobs = _page_jobs(_get_timed(_jobs_url(1), _REQ_TIMEOUT))
     except Exception:
         try:
             jobs = _page_jobs(_get("/jobs"))
@@ -217,7 +267,7 @@ def _recent_job_items(limit_jobs: int):
 # So we page the feed in SMALL, fast chunks using `?limit&offset`, accumulating
 # until a short page ends the feed. Every request is capped well under gunicorn's
 # 120s so a slow feed degrades to a floor count instead of killing the worker.
-_PAGE_SIZE = 500          # rows per status-scan page.
+_PAGE_SIZE = _FEED_PAGE_MAX  # rows per status-scan page (V2 caps at ~18; use 10).
 _MAX_COUNT_PAGES = 0      # status scan DISABLED — each 500-row page is a slow ~2s
                           # call and we can't afford them within the proxy budget.
                           # We report the exact-ish TOTAL only; active is omitted.
@@ -231,31 +281,11 @@ _TOTAL_MAX_PROBES = 9     # binary-search probes → resolution ~_TOTAL_MAX/2^9 
 
 
 def _feed_total():
-    """APPROXIMATE-but-tight file count, cheaply. The feed has no count endpoint,
-    but `offset` is a 1-indexed page number, so with limit=1 page N exists iff
-    there are ≥ N jobs. Binary-search the largest existing page over [1,_TOTAL_MAX]
-    with a hard probe cap (each probe is one ~2s request, so we cap to stay under
-    the proxy timeout). ~12 probes → within ~8 of the true count. Returns 0 if
-    unavailable.
-    """
-    def exists(off: int) -> bool:
-        try:
-            return len(_page_jobs(_get_timed(f"/jobs?limit=1&offset={off}", _COUNT_TIMEOUT))) > 0
-        except Exception:
-            return False
-
-    if not exists(1):
-        return 0
-    lo, hi = 1, _TOTAL_MAX
-    probes = 0
-    while lo + 1 < hi and probes < _TOTAL_MAX_PROBES:
-        mid = (lo + hi) // 2
-        if exists(mid):
-            lo = mid
-        else:
-            hi = mid
-        probes += 1
-    return lo
+    """EXACT file count. On V2 this is the `x-total-count` header returned when the
+    feed query carries `count=true` (MoveConnect, 2026-09-17) — see `_feed_count`.
+    (The old V1 offset-binary-search no longer works: V2 ignores `offset`.) Returns
+    0 if unavailable."""
+    return _feed_count()
 
 
 def _get_timed(path: str, timeout: int):
@@ -286,7 +316,7 @@ def _paginate_all_jobs(page_budget: float = _COUNT_BUDGET, max_pages: int = _MAX
     exhausted = False
     while pages < max_pages and time.time() - start < page_budget:
         try:
-            payload = _get_timed(f"/jobs?limit={_PAGE_SIZE}&offset={page_idx}", _COUNT_TIMEOUT)
+            payload = _get_timed(_jobs_url(page_idx, _PAGE_SIZE), _COUNT_TIMEOUT)
         except Exception:
             break
         page = _page_jobs(payload)
@@ -478,183 +508,193 @@ def _map_job(job: dict) -> dict | None:
     coordinator = _code_text(_first(job, "moveManager", default=""))
     coordinator_email = ""   # populated from the quote roles below (carries the email)
  
+    # ── V2 enrichment ──────────────────────────────────────────────────────
+    # RestV2 flattened the old V1 nesting: the rich job (dates, value, roles,
+    # insurance, status) comes from GET /jobs/{id} directly — there is NO
+    # /jobs/{id}/quotes and NO /jobs/{id}/account in V2 (both 404). Sell = the
+    # job's headline `jobValue`; sell lines from /options(+charges); revenue from
+    # /invoices. Actual supplier COST is NOT exposed by the API yet (confirmed by
+    # MoveConnect 2026-09-17: option charges are sell-only), so `act` stays 0 and
+    # profit/margin are suppressed downstream until MoveWare ships a cost endpoint.
     sell = est_cost = 0.0
-    # Internal-recalculation inputs: the selected option's header value (sell)
-    # should equal the sum of its charge lines. We capture the line total and
-    # the line count so audit_web.check_calculations() can verify "revenue adds
-    # up" and only assert it when line items are actually present.
     charge_lines_total = 0.0
     n_charge_lines = 0
-    declared = ins = weight = None
-    # Line-level reconciliation inputs: every quoted charge line across ALL quote
-    # options (multi-component quotes bill move + insurance + storage separately),
-    # plus the size the quote was based on. audit_web matches invoice lines to
-    # these so a legitimate scope change (extra service, volume/weight increase)
-    # is surfaced as context — not flagged as an error.
-    q_lines = []          # list of {"desc", "value"} for every quote charge line
-    sel_lines = []        # charge lines of the SELECTED/accepted option only —
-                          # the agreed scope the invoice is expected to cover.
-                          # Used for the under-billing (quoted-but-not-invoiced) check.
-    est_vol = act_vol = est_wt = act_wt = None
-    rich = {}
+    declared = ins = None
+    q_lines = []          # every quoted (sell) charge line — for reconciliation
+    sel_lines = []        # accepted-option sell lines (quoted-but-not-invoiced check)
+    est_vol = est_wt = act_wt = None
+
+    detail = {}
     try:
-        qd = _get(f"/jobs/{job_id}/quotes")
-        quotes = _first(qd, "quotes", default=[]) or []
-        if quotes:
-            q0 = quotes[0]
-            rich = _first(q0, "job", default={}) or {}
-            roles = _first(q0, "roles", default={}) or {}
-            if not client:
-                corp = _first(roles, "corporate", default={}) or {}
-                cust = _first(roles, "customer", default={}) or {}
-                client = _first(corp, "name") or _first(cust, "name") or ""
-            # The move coordinator / manager lives in the quote roles and carries
-            # the real @thelsa.com email — so alerts can address the right person
-            # automatically (no name→email map needed).
-            mgr_role = (_first(roles, "accountManager", default={})
-                        or _first(roles, "manager", default={}) or {})
-            _cn = (f"{_first(mgr_role, 'firstName', default='') or ''} "
-                   f"{_first(mgr_role, 'lastName', default='') or ''}").strip()
-            if _cn:
-                coordinator = _cn
-            coordinator_email = (_first(mgr_role, "email", default="") or "").strip()
-            # Selected quote option carries the sell price + measurements.
-            option = None
-            for q in quotes:
-                for opt in (_first(q, "options", default=[]) or []):
-                    if _first(opt, "selected") in (True, "true", 1):
-                        option = opt
-                        break
-                if option:
-                    break
-            if option is None:
-                opts = _first(q0, "options", default=[]) or []
-                option = opts[0] if opts else None
-            if option:
-                # Sell = option's tax-inclusive value (charges[] is the line
-                # breakdown; sum it for cost lines when present).
-                sell = _num(_first(option, "valueInc", "value", "valueEx"))
-                weight = _weight_from_measurements(
-                    _first(option, "measurements") or _first(q0, "measurements")
-                )
-                for ch in (_first(option, "charges", default=[]) or []):
-                    cval = _num(_first(ch, "value", "valueInc"))
-                    charge_lines_total += cval
-                    n_charge_lines += 1
-                    if _classify_charge(ch) == "cost":
-                        est_cost += cval
-                    # Sell-side line of the accepted option = a charge the client
-                    # agreed to and should therefore be invoiced.
-                    sval = _num(_first(ch, "valueInc", "value", "valueEx"))
-                    if sval > 0 and _classify_charge(ch) != "cost":
-                        sel_lines.append({"desc": _code_text(_first(ch, "description", default="")),
-                                          "value": round(sval, 2)})
-                # Some real moves carry the priced charge lines but no option-level
-                # `value` header — fall back to the sum of the accepted charge lines
-                # so a genuine quote total isn't lost (verified: option value == sum
-                # of charges on live files).
-                if not sell and sel_lines:
-                    sell = round(sum(l["value"] for l in sel_lines), 2)
-            # Collect EVERY quote charge line across ALL options (and the quote's
-            # `services`) for line-level reconciliation against the invoices.
-            for q in quotes:
-                for opt in (_first(q, "options", default=[]) or []):
-                    for ch in (_first(opt, "charges", default=[]) or []):
-                        cval = _num(_first(ch, "valueInc", "value", "valueEx"))
-                        if cval > 0:
-                            q_lines.append({"desc": _code_text(_first(ch, "description", default="")), "value": round(cval, 2)})
-                svcs = _first(q, "services", default={}) or {}
-                if isinstance(svcs, dict):
-                    for sv in svcs.values():
-                        cval = _num(_first(sv, "valueInc", "value", "valueEx")) if isinstance(sv, dict) else 0
-                        if cval > 0:
-                            q_lines.append({"desc": _code_text(_first(sv, "description", default="")), "value": round(cval, 2)})
-                # Size the quote was based on (estimated vs actual measurements).
-                meas = _first(q0, "measurements") or (_first(option, "measurements") if option else None) or []
-                for mrow in (meas if isinstance(meas, list) else []):
-                    mt = (_code_text(_first(mrow, "type", default="")) or "").lower()
-                    uom = (str(_first(mrow, "uom", default="")).lower())
-                    v = _num(_first(mrow, "value"))
-                    if mt == "volumenett" and uom in ("m", "m3", ""):
-                        est_vol = v or est_vol
-                    elif mt == "actualweight" and uom == "kg":
-                        act_wt = v or act_wt
-                    elif mt == "weightnett" and uom == "kg":
-                        est_wt = v or est_wt
-                break  # measurements/services taken from the first quote only
+        d = _get(f"/jobs/{job_id}") or {}
+        detail = _first(d, "data", default=d) or d
     except Exception:
-        pass
- 
-    src = rich or job
- 
-    # Dates live under job.dates.{uplift,packing,delivery,cartonDelivery,survey,
-    # unpacking}.date — but MANY of these are blank on any given file (e.g. a job
-    # may carry only `packing` + `survey`, with uplift/delivery empty). Read a
-    # milestone from whichever field is populated. `created` is present on every
-    # job and is the reliable fallback anchor for the audit window.
-    dates = _first(src, "dates", default={}) or {}
+        detail = {}
+    src = detail or job
 
-    def _dt_field(name):
-        return _date(_first(_first(dates, name, default={}) or {}, "date"))
+    # Client / transferee name.
+    if not client:
+        client = (_first(src, "name", "fullname", "searchName", default="")
+                  or (f"{_first(src, 'firstName', default='') or ''} "
+                      f"{_first(src, 'lastName', default='') or ''}").strip())
 
-    # Uplift/packing = the move-out milestone; delivery = the move-in milestone.
-    pack = _dt_field("uplift") or _dt_field("packing") or \
+    # Sell = the job's headline quote value (V2 puts it on the job object).
+    sell = _num(_first(src, "jobValue", "value", default=0))
+
+    # Coordinator (name + email) from job.roles.coordinator || moveManager — each
+    # role is an object carrying firstName/lastName/email.
+    roles_obj = _first(src, "roles", default={}) or {}
+    for _rk in ("coordinator", "moveManager"):
+        r = _first(roles_obj, _rk, default={}) or {}
+        if isinstance(r, dict):
+            nm = (f"{_first(r, 'firstName', default='') or ''} "
+                  f"{_first(r, 'lastName', default='') or ''}").strip()
+            em = (_first(r, "email", default="") or "").strip()
+            if nm and not coordinator:
+                coordinator = nm
+            if em and not coordinator_email:
+                coordinator_email = em
+        if coordinator and coordinator_email:
+            break
+    # Fallback: the /roles array (only if we still lack an email).
+    if not coordinator_email:
+        try:
+            rr = _get(f"/jobs/{job_id}/roles") or {}
+            for r in (_first(rr, "roles", default=[]) or []):
+                t = (_code_text(_first(r, "type", default="")) or "").lower().replace(" ", "")
+                if t in ("coordinator", "movemanager", "accountmanager", "manager"):
+                    nm = (f"{_first(r, 'firstName', default='') or ''} "
+                          f"{_first(r, 'lastName', default='') or ''}").strip()
+                    em = (_first(r, "email", default="") or "").strip()
+                    if nm and not coordinator:
+                        coordinator = nm
+                    if em:
+                        coordinator_email = em
+                        break
+        except Exception:
+            pass
+
+    # Options → accepted-option sell + sell charge lines (quote scope). Only the
+    # charge-line sub-calls are gated by AUDIT_DEEP_LINES (they add calls/file);
+    # /options itself is fetched only when we still need a sell figure or lines.
+    if _DEEP_LINES or not sell:
+        try:
+            od = _get(f"/jobs/{job_id}/options") or {}
+            options = _first(od, "options", default=[]) or []
+            accepted = None
+            for opt in options:
+                st = (_code_text(_first(opt, "statusQuote", "status", default="")) or "").lower()
+                if (_first(opt, "selected") in (True, "true", 1)
+                        or st in ("accepted", "won", "selected", "current", "active", "confirmed")):
+                    accepted = opt
+                    break
+            if accepted is None and options:
+                accepted = max(options, key=lambda o: _num(_first(o, "valueInclusive", "valueExclusive", "value")))
+            if accepted is not None:
+                if not sell:
+                    sell = _num(_first(accepted, "valueInclusive", "valueExclusive", "value"))
+                oid = _first(accepted, "id")
+                if _DEEP_LINES and oid is not None:
+                    try:
+                        cd = _get(f"/jobs/{job_id}/options/{oid}/charges") or {}
+                        for ch in (_first(cd, "charges", default=[]) or []):
+                            cval = _num(_first(ch, "valueInclusive", "value", "valueExclusive"))
+                            if cval <= 0:
+                                continue
+                            charge_lines_total += cval
+                            n_charge_lines += 1
+                            desc = _code_text(_first(ch, "description", default=""))
+                            # V2 option charges are SELL-only (per MoveConnect); the
+                            # cost branch is kept for when a cost endpoint arrives.
+                            if _classify_charge(ch) == "cost":
+                                est_cost += cval
+                            else:
+                                sel_lines.append({"desc": desc, "value": round(cval, 2)})
+                            q_lines.append({"desc": desc, "value": round(cval, 2)})
+                    except Exception:
+                        pass
+            if not sell and sel_lines:
+                sell = round(sum(l["value"] for l in sel_lines), 2)
+        except Exception:
+            pass
+
+    # Dates from V2 activityDates{name:{date,time}} (most blank on any file); fall
+    # back to a legacy `dates` block for older cached snapshots.
+    ad = _first(src, "activityDates", default={}) or {}
+    legacy = _first(src, "dates", default={}) or {}
+
+    def _adate(name):
+        v = _first(ad, name, default=None)
+        if isinstance(v, dict):
+            d0 = _date(_first(v, "date"))
+            if d0:
+                return d0
+        elif v:
+            d0 = _date(v)
+            if d0:
+                return d0
+        lv = _first(legacy, name, default={})
+        return _date(_first(lv, "date")) if isinstance(lv, dict) else _date(lv)
+
+    pack = _adate("uplift") or _adate("pack") or _adate("packing") or \
         _date(_first(job, "uplift", "pack", "estimatedMove"))
-    delivery = _dt_field("delivery") or _dt_field("cartonDelivery") or _dt_field("unpacking") or \
+    delivery = _adate("delivery") or _adate("cartonDel") or _adate("unpack") or \
+        _adate("cartonDelivery") or _adate("unpacking") or \
         _date(_first(job, "delivery", "deliveryStart", "estimatedDelivery"))
-    created = _date(_first(src, "created")) or _date(_first(job, "created"))
-    survey = _dt_field("survey")
-    est_move = _date(_first(src, "estimatedMove"))
-    # Window anchor = the file's most recent activity date across ALL signals,
-    # falling back to `created` so no file is ever treated as truly "undated"
-    # (which previously let old files slip into the window and inflated the count).
+    created = _adate("created") or _date(_first(src, "created")) or _date(_first(job, "created"))
+    survey = _adate("survey")
+    est_move = _adate("estimatedMove") or _date(_first(src, "estimatedMove"))
     anchor = max([d for d in (delivery, pack, survey, est_move, created) if d], default=None)
- 
-    # Insurance / declared value from job.services.insurance.
-    services = _first(src, "services", default={}) or {}
-    ins_obj = _first(services, "insurance", default={}) or {}
+
+    # Insurance: V2 puts it on the job as insurance{value,premium}.
+    ins_obj = _first(src, "insurance", default={}) or {}
+    if not isinstance(ins_obj, dict):
+        ins_obj = {}
     declared = _num(_first(ins_obj, "value")) or None
     ins = _num(_first(ins_obj, "premium")) or None
-    if not coordinator:
-        mgr = _first(src, "moveManager", default="")
-        coordinator = _code_text(mgr)
- 
-    # Invoices → invoiced amount + every invoiced charge line (for reconciliation).
+
+    # Invoices → invoiced amount + invoiced charge lines (revenue reconciliation).
     invoiced_amt = 0.0
     invoiced = False
     i_lines = []
     try:
-        inv = _get(f"/jobs/{job_id}/invoices")
+        inv = _get(f"/jobs/{job_id}/invoices") or {}
         for it in (_first(inv, "invoices", default=[]) or []):
-            iv = _num(_first(it, "value", "total", "amount"))
+            iv = _num(_first(it, "valueInclusive", "value", "valueExclusive", "total", "amount"))
             invoiced_amt += iv
-            chs = _first(it, "charges", default=[]) or []
-            if chs:
-                for ch in chs:
-                    cval = _num(_first(ch, "valueInc", "value", "valueEx"))
-                    if cval > 0:
-                        i_lines.append({"desc": _code_text(_first(ch, "description", default="")), "value": round(cval, 2)})
-            elif iv > 0:
-                i_lines.append({"desc": _code_text(_first(it, "description", default="")), "value": round(iv, 2)})
+            iid = _first(it, "id")
+            got = False
+            if _DEEP_LINES and iid is not None:
+                try:
+                    cd = _get(f"/jobs/{job_id}/invoices/{iid}/charges") or {}
+                    for ch in (_first(cd, "charges", default=[]) or []):
+                        cval = _num(_first(ch, "valueInclusive", "value", "valueExclusive"))
+                        if cval > 0:
+                            i_lines.append({"desc": _code_text(_first(ch, "description", default="")),
+                                            "value": round(cval, 2)})
+                            got = True
+                except Exception:
+                    pass
+            if not got and iv > 0:
+                i_lines.append({"desc": _code_text(_first(it, "description", default="")),
+                                "value": round(iv, 2)})
         invoiced = invoiced_amt > 0
     except Exception:
         pass
- 
-    # Actual (supplier/creditor) cost is NOT available in Moveware RestV1: the
-    # /jobs/{id}/account endpoint returns DEBTOR (receivable) lines — what the
-    # CLIENT owes — which equal revenue, not what Thelsa pays its agents/carriers.
-    # Summing it produced cost == revenue → profit 0 (the bogus figures). So we do
-    # NOT call /account and we leave actual cost UNKNOWN (0). Profit/margin are
-    # suppressed downstream (cost_available=False) until a real cost source exists
-    # (RestV2 / a creditor endpoint). This also drops a sub-call per job.
+
+    # Actual (supplier/creditor) cost is NOT exposed by RestV2 yet (MoveConnect,
+    # 2026-09-17: option charges are sell-only). Leave it 0 so profit/margin stay
+    # suppressed downstream until MoveWare ships a cost endpoint.
     actual_cost = 0.0
- 
+
     mode = _mode(src if src else job)
- 
-    # Job status code (W=Won, L=Lead, P=Pending, C=Cancelled). Prefer the rich
-    # jobStatus.code from the quotes response; fall back to the light list item.
-    _jstat = _first(_first(src, "jobStatus", default={}) or {}, "code") or _first(job, "status") or ""
-    status = str(_jstat).strip().upper()
+
+    # Status string (W=Won, L=Lead, P=Pending, C=Cancelled). V2 puts it on the job
+    # as a plain `status`; fall back to a rich jobStatus.code / the light row.
+    _jstat = (_first(src, "status", default="")
+              or _first(_first(src, "jobStatus", default={}) or {}, "code")
+              or _first(job, "status") or "")
+    status = str(_code_text(_jstat)).strip().upper()
 
     return {
         "job": job_id,
@@ -792,7 +832,7 @@ _AUDIT_IDLE_SLEEP = 60    # seconds between checks while idle (snapshot complete
 # instead of page*4. With 40/cycle at ~12s/cycle the full ~12-month window
 # (a few hundred files) is covered in ~2-3 minutes rather than ~15. Files are
 # still processed in a strict newest→oldest run so the window-edge stop is exact.
-_AUDIT_PAGE = 40          # ids fetched + classified per cycle
+_AUDIT_PAGE = _FEED_PAGE_MAX  # ids fetched + classified per cycle (V2 caps ~18)
 _AUDIT_WORKERS = 12       # concurrent per-file fetches (I/O-bound; GIL released)
 _AUDIT_BATCH = _AUDIT_PAGE  # back-compat alias (per-cycle deep-check count)
 
@@ -1003,7 +1043,7 @@ def _auditor_cycle():
     # ids ascend, so reversed() is newest-first, and page decreases each cycle.
     last_page = _auditor_last_page(total)
     try:
-        jobs = _page_jobs(_get_timed(f"/jobs?limit={_AUDIT_PAGE}&offset={page}", _REQ_TIMEOUT))
+        jobs = _page_jobs(_get_timed(_jobs_url(page, _AUDIT_PAGE), _REQ_TIMEOUT))
     except Exception:
         with _AUDIT_LOCK:
             _AUDIT["errors"] += 1
@@ -1125,7 +1165,7 @@ def _refresh_recent():
     new_jobs = {}
     for p in range(last_page, max(0, last_page - _REFRESH_SCAN_PAGES), -1):
         try:
-            jobs = _page_jobs(_get_timed(f"/jobs?limit={_AUDIT_PAGE}&offset={p}", _REQ_TIMEOUT))
+            jobs = _page_jobs(_get_timed(_jobs_url(p, _AUDIT_PAGE), _REQ_TIMEOUT))
         except Exception:
             continue
         for j in jobs:
@@ -1327,18 +1367,15 @@ def raw_sample(job_id: str | None = None) -> dict:
             out["first_job"] = arr[0]
             jid = job_id or str(_first(arr[0], "id", "jobId", "jobNumber", "jobFile"))
             out["sample_job_id"] = jid
-            try:
-                out["quotes"] = _get(f"/jobs/{jid}/quotes")
-            except Exception as e:
-                out["quotes_error"] = str(e)
-            try:
-                out["invoices"] = _get(f"/jobs/{jid}/invoices")
-            except Exception as e:
-                out["invoices_error"] = str(e)
-            try:
-                out["account"] = _get(f"/jobs/{jid}/account")
-            except Exception as e:
-                out["account_error"] = str(e)
+            # V2 paths (there is no /quotes or /account in V2).
+            for key, path in (("job", f"/jobs/{jid}"),
+                              ("roles", f"/jobs/{jid}/roles"),
+                              ("options", f"/jobs/{jid}/options"),
+                              ("invoices", f"/jobs/{jid}/invoices")):
+                try:
+                    out[key] = _get(path)
+                except Exception as e:
+                    out[key + "_error"] = str(e)
     except Exception as e:
         out["error"] = str(e)
     return out

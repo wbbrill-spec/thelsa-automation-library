@@ -37,7 +37,7 @@ import os
 from dataclasses import dataclass, field
 
 from .models import (
-    LIFT_VAN_M3, TRUCK_53_LIFT_VANS, U_BOX_M3, Hub, Shipment, Source, Stage, TIM_DELIVERY_WINDOW_DAYS,
+    LIFT_VAN_M3, TRUCK_53_LIFT_VANS, TRUCK_53_U_BOXES, U_BOX_M3, Hub, Shipment, Source, Stage, TIM_DELIVERY_WINDOW_DAYS,
     TRUCK_53_KG, TRUCK_53_M3,
 )
 
@@ -47,6 +47,9 @@ from .models import (
 # 13 vans exactly fill a trailer. Loose freight still consumes its own m³, which
 # keeps mixed loads (vans plus loose) on one consistent scale.
 LV_SLOT_M3 = TRUCK_53_M3 / TRUCK_53_LIFT_VANS
+# Same logic for U-Boxes: 10 per 53 ft trailer (Bill, 2026-09-21), so each box
+# consumes 88 ÷ 10 = 8.8 m³ of trailer, not its 7.3 m³ usable capacity.
+UB_SLOT_M3 = TRUCK_53_M3 / TRUCK_53_U_BOXES
 
 READY_STAGES = {Stage.GREEN_LIGHT, Stage.TO_BORDER, Stage.CUSTOMS}
 COMING_STAGES = {Stage.BOOKED, Stage.DOCS_PENDING}
@@ -89,11 +92,17 @@ class Item:
     reasons: list[str] = field(default_factory=list)
     sized: bool = True
     lift_vans: int = 0                # >0 → lift-van loaded; capacity counts positions
+    u_boxes: int = 0                  # >0 → U-Box job; capacity counts positions
     space: float = 0.0                # trailer m³ this item actually consumes
 
     def __post_init__(self):
         if not self.space:
-            self.space = round(self.lift_vans * LV_SLOT_M3, 4) if self.lift_vans else self.m3
+            if self.lift_vans:
+                self.space = round(self.lift_vans * LV_SLOT_M3, 4)
+            elif self.u_boxes:
+                self.space = round(self.u_boxes * UB_SLOT_M3, 4)
+            else:
+                self.space = self.m3
 
     @property
     def id(self) -> str:
@@ -124,6 +133,14 @@ class Load:
     @property
     def lift_vans(self) -> int:
         return sum(i.lift_vans for i in self.items)
+
+    @property
+    def u_boxes(self) -> int:
+        return sum(i.u_boxes for i in self.items)
+
+    @property
+    def free_u_box_positions(self) -> int:
+        return int((max(0.0, TRUCK_53_M3 - self.space) + 0.05) // UB_SLOT_M3)
 
     @property
     def fill(self) -> float:
@@ -159,6 +176,8 @@ class Load:
             "truck_m3": TRUCK_53_M3, "m3": self.m3, "kg": self.kg, "fill_pct": round(self.fill * 100),
             "space_m3": round(self.space, 2), "lift_vans": self.lift_vans, "lift_van_positions": TRUCK_53_LIFT_VANS,
             "free_lift_van_positions": self.free_lift_van_positions,
+            "u_boxes": self.u_boxes, "u_box_positions": TRUCK_53_U_BOXES,
+            "free_u_box_positions": self.free_u_box_positions,
             "spare_m3": self.spare_m3, "light": self.fill < MIN_FILL_TO_SUGGEST,
             "anchor": self.anchor.id if self.anchor else None,
             "anchors": sum(1 for i in self.items if i.anchor),
@@ -312,7 +331,14 @@ def make_item(s: Shipment, today: dt.date) -> Item | None:
     # conversion they have always used; extending positions to them is a
     # separate decision, not something to change silently here.
     lift_vans = s.lift_vans_planned if (s.is_us_diplomatic and m3 > 0) else 0
-    space = round(lift_vans * LV_SLOT_M3, 4) if lift_vans else m3
+    u_boxes = s.u_boxes_planned if (not lift_vans and s.is_ubox_job and m3 > 0) else 0
+    if lift_vans:
+        space = round(lift_vans * LV_SLOT_M3, 4)
+    elif u_boxes:
+        space = round(u_boxes * UB_SLOT_M3, 4)
+        reasons.append(f"takes {u_boxes} of {TRUCK_53_U_BOXES} U-Box positions on a 53 ft trailer")
+    else:
+        space = m3
     if lift_vans:
         why = (f"{m3} m³ gross ÷ {LIFT_VAN_M3}" if s.is_us_diplomatic and not s.lift_vans
                else "lift-van count on record")
@@ -325,9 +351,11 @@ def make_item(s: Shipment, today: dt.date) -> Item | None:
         reasons.append("full-truck job — anchors its own trailer" if _service(s) in FULL_SERVICES
                        else (f"{lift_vans} lift vans is ≥ {int(ANCHOR_FRACTION * 100)}% of a trailer — anchors its own trailer"
                              if lift_vans else
+                             f"{u_boxes} U-Boxes is ≥ {int(ANCHOR_FRACTION * 100)}% of a trailer — anchors its own trailer"
+                             if u_boxes else
                              f"{m3} m³ is ≥ {int(ANCHOR_FRACTION * 100)}% of a trailer — anchors its own trailer"))
     it = Item(shipment=s, m3=m3, kg=kg, ready=ready, ready_date=ready_date, deadline=deadline,
-              anchor=anchor, reasons=reasons, lift_vans=lift_vans, space=space)
+              anchor=anchor, reasons=reasons, lift_vans=lift_vans, u_boxes=u_boxes, space=space)
     it.sized = m3 > 0
     return it
 
@@ -447,6 +475,10 @@ def _group_ids(items: list[Item]) -> dict:
 
 
 def _used(ld: Load) -> str:
+    if ld.u_boxes and not ld.lift_vans:
+        loose = round(ld.space - ld.u_boxes * UB_SLOT_M3, 1)
+        return (f"{ld.u_boxes} of {TRUCK_53_U_BOXES} U-Box positions"
+                + (f" plus {loose} m³ loose" if loose > 0.05 else ""))
     if ld.lift_vans:
         loose = round(ld.space - ld.lift_vans * LV_SLOT_M3, 1)
         return (f"{ld.lift_vans} of {TRUCK_53_LIFT_VANS} lift van positions"
@@ -455,6 +487,9 @@ def _used(ld: Load) -> str:
 
 
 def _free(ld: Load) -> str:
+    if ld.u_boxes and not ld.lift_vans:
+        n = ld.free_u_box_positions
+        return f"{n} U-Box position{'s' if n != 1 else ''} ({ld.spare_m3} m³)"
     if ld.lift_vans:
         n = ld.free_lift_van_positions
         return f"{n} lift van position{'s' if n != 1 else ''} ({ld.spare_m3} m³)"
@@ -488,7 +523,9 @@ def email_body(p: dict, site: str = "https://thelsa.inflectionpointnow.com/cross
         tag = " · LIGHT" if ld["light"] else (" · FULL" if ld["fill_pct"] >= 85 else "")
         xs = " · TIM + TMS" if ld["cross_silo"] else ""
         size = (f"{ld['lift_vans']} of {ld['lift_van_positions']} lift van positions · {ld['m3']} m³ gross"
-                if ld.get("lift_vans") else f"{ld['m3']} m³")
+                if ld.get("lift_vans") else
+                f"{ld['u_boxes']} of {ld['u_box_positions']} U-Box positions · {ld['m3']} m³"
+                if ld.get("u_boxes") else f"{ld['m3']} m³")
         L.append(f"TRAILER {n} — {ld['lane']} — {size} ({ld['fill_pct']}%){tag}{xs}")
         if ld["depart_by"]:
             L.append(f"  Depart by {ld['depart_by']} (earliest delivery-window deadline on board)")
@@ -496,6 +533,7 @@ def email_body(p: dict, site: str = "https://thelsa.inflectionpointnow.com/cross
             flag = " *WINDOW RISK*" if it["id"] in ld["window_risk"] else ""
             L.append(f"  - [{it['source']}] {it['customer']} — {it['agent'] or ''} {it['reference'] or ''} → {it['destination'] or '?'} · {it['m3']} m³"
                      + (f" · {it['lift_vans']} lift van{'s' if it['lift_vans'] != 1 else ''}" if it.get("lift_vans") else "")
+                     + (f" · {it['u_boxes']} U-Box{'es' if it['u_boxes'] != 1 else ''}" if it.get("u_boxes") else "")
                      + (f" · {it['service']}" if it["service"] else "") + (" · ANCHOR" if it["anchor"] else "") + flag)
         L.append("")
     if p["opportunities"]:

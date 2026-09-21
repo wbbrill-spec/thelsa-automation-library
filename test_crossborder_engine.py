@@ -57,7 +57,10 @@ def test_plan_packs_anchor_then_fills_and_flags_light_trailers():
     for ld in p["loads"]:
         by_lane.setdefault(ld["lane"], []).append(ld)
     g = by_lane["Import → Guadalajara"]
-    assert len(g) == 1 and g[0]["anchor"] == "TMS:1" and g[0]["m3"] == 70.7 and g[0]["fill_pct"] == 80
+    # 52 + 11.4 m³, plus one U-Box at 8.8 m³ of trailer (1 of 10 positions — Bill,
+    # 2026-09-21) rather than its 7.3 m³ usable volume: 72.2 of 88 → 82%.
+    assert len(g) == 1 and g[0]["anchor"] == "TMS:1" and g[0]["m3"] == 70.7 and g[0]["fill_pct"] == 82
+    assert g[0]["u_boxes"] == 1
     assert g[0]["cross_silo"] and g[0]["depart_by"] == "2026-09-20"
     m = sorted(by_lane["Import → Monterrey"], key=lambda l: -l["m3"])
     assert [l["m3"] for l in m] == [65.7, 40.0]          # best-fit: the small one tops up the fullest trailer

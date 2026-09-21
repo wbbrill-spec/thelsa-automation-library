@@ -72,3 +72,36 @@ def test_load_rows_carry_the_ubox_flag():
     p = engine.plan([job("AA1", ub=2)], today=TODAY)
     row = p["loads"][0]["shipments"][0]
     assert row["ubox"] is True and row["u_boxes"] == 2
+
+
+# ── 10 U-Boxes per 53 ft trailer (Bill, 2026-09-21) ─────────────────────────
+def test_each_ubox_takes_one_tenth_of_a_trailer():
+    it = engine.make_item(job("AA1", ub=3), TODAY)
+    assert it.u_boxes == 3 and it.space == pytest.approx(26.4)      # 3 × 8.8, not 3 × 7.3
+    assert any("3 of 10 U-Box positions" in r for r in it.reasons)
+
+
+def test_ten_uboxes_fill_a_trailer_and_eleven_do_not():
+    p = engine.plan([job("AA1", ub=4), job("AA2", ub=6)], today=TODAY)
+    assert len(p["loads"]) == 1 and p["loads"][0]["u_boxes"] == 10 and p["loads"][0]["fill_pct"] == 100
+    p = engine.plan([job("AA1", ub=4), job("AA2", ub=7)], today=TODAY)
+    assert len(p["loads"]) == 2
+
+
+def test_twelve_by_volume_would_have_fit_but_positions_say_no():
+    """12 × 7.3 = 87.6 m³ fits 88 on volume; on positions it is 12 of 10."""
+    p = engine.plan([job("AA1", ub=6), job("AA2", ub=6)], today=TODAY)
+    assert len(p["loads"]) == 2
+
+
+def test_ubox_load_dict_and_email():
+    p = engine.plan([job("AA1", ub=4)], today=TODAY)
+    ld = p["loads"][0]
+    assert ld["u_boxes"] == 4 and ld["u_box_positions"] == 10 and ld["free_u_box_positions"] == 6
+    _, body = engine.email_body(p)
+    assert "4 of 10 U-Box positions" in body and "4 U-Boxes" in body
+
+
+def test_ubox_count_from_volume_uses_positions_too():
+    it = engine.make_item(job("AA1", m3=14.6), TODAY)       # 2 boxes
+    assert it.u_boxes == 2 and it.space == pytest.approx(17.6)

@@ -1,0 +1,717 @@
+"""
+AI Assistant web routes (Flask blueprint, mounted in the library app).
+
+Isolation rule: every route derives the user from the signed-in session
+(session["user_email"]) — never from a URL or form parameter. Item/draft ids in
+URLs are always looked up together with that user's id, so guessing another
+user's id returns nothing. Admin routes additionally require role == admin and
+show connection health only, never anyone's mail.
+"""
+
+import datetime as _dt
+import functools
+import io
+import json
+import os
+import secrets
+import zipfile
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+from flask import (Blueprint, Response, abort, jsonify, redirect, render_template_string,
+                   request, session, url_for)
+
+from . import db, drafting, graph, priority, scan, vault
+
+bp = Blueprint("assistant", __name__)
+MX = ZoneInfo("America/Mexico_City")
+EXT_DIR = Path(__file__).resolve().parent / "whatsapp_extension"
+
+
+def _admins():
+    raw = os.environ.get("ASSISTANT_ADMINS",
+                         "bbrill@thelsa.com,bill.brill@inflectionpointnow.com")
+    return {e.strip().lower() for e in raw.split(",") if e.strip()}
+
+
+# ── Auth helpers ───────────────────────────────────────────────────────────────
+def current_user():
+    email = (session.get("user_email") or "").lower().strip()
+    if not email:
+        return None
+    u = db.get_user_by_email(email)
+    role = "admin" if email in _admins() else None
+    if not u or (role and u["role"] != role):
+        u = db.upsert_user(email, session.get("user_name"), role=role)
+    return u
+
+
+def login_required(f):
+    @functools.wraps(f)
+    def wrapped(*a, **k):
+        if not session.get("user_email"):
+            return redirect(url_for("login", next=request.url))
+        u = current_user()
+        if not u["active"]:
+            return _page("Access paused", "<p class='sub'>Your assistant has been turned off by an "
+                         "administrator.</p>"), 403
+        return f(u, *a, **k)
+    return wrapped
+
+
+def admin_required(f):
+    @functools.wraps(f)
+    @login_required
+    def wrapped(u, *a, **k):
+        if u["role"] != "admin":
+            abort(403)
+        return f(u, *a, **k)
+    return wrapped
+
+
+def _csrf_token():
+    if "asst_csrf" not in session:
+        session["asst_csrf"] = secrets.token_urlsafe(24)
+    return session["asst_csrf"]
+
+
+def _check_csrf():
+    sent = request.form.get("csrf") or request.headers.get("X-CSRF-Token") or ""
+    if not sent or not secrets.compare_digest(sent, session.get("asst_csrf", "")):
+        abort(400, "Form expired — reload the page and try again.")
+
+
+# ── Formatting ─────────────────────────────────────────────────────────────────
+def _mx(dt):
+    if not dt:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=_dt.timezone.utc)
+    return dt.astimezone(MX)
+
+
+def _when(dt):
+    d = _mx(dt)
+    if not d:
+        return ""
+    today = _dt.datetime.now(MX).date()
+    days = (today - d.date()).days
+    t = d.strftime("%-I:%M %p")
+    if days == 0:
+        return f"Today {t}"
+    if days == 1:
+        return f"Yesterday {t}"
+    if days == -1:
+        return f"Tomorrow"
+    return d.strftime("%b %-d")
+
+
+def _stamp(dt):
+    d = _mx(dt)
+    return d.strftime("%b %-d, %-I:%M %p") if d else "never"
+
+
+KIND_LABEL = {
+    "needs_reply": "Needs reply", "flagged": "Flagged", "whatsapp": "WhatsApp",
+    "invoice_file": "Invoice file", "invoice_charge": "Invoice charges",
+    "upload_docs": "Send documents", "request_docs": "Request documents",
+    "tim_docs": "Documents pending", "tim_stalled": "Stalled", "tim_step": "Next step",
+}
+SOURCE_LABEL = {"microsoft": "Mail", "moveware": "Moveware (TMS)", "clickup": "ClickUp (TIM)",
+                "whatsapp": "WhatsApp"}
+
+
+# ── Shared page shell ──────────────────────────────────────────────────────────
+CSS = """
+*{box-sizing:border-box}
+:root{--ink:#1a1a2e;--muted:#6b7080;--line:#e6e8ec;--bg:#f5f6f8;--card:#fff;--link:#1967d2;
+      --urgent:#c0392b;--today:#d68910;--soon:#7f8c8d;--ok:#1e8449}
+body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--ink)}
+a{color:var(--link)}
+.wrap{max-width:920px;margin:0 auto;padding:24px 16px 60px}
+.top{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:20px}
+.top img{height:32px}.top nav a{font-size:13px;font-weight:600;text-decoration:none;margin-left:14px}
+h1{font-size:24px;margin:0 0 4px}h2{font-size:17px;margin:0 0 10px}
+.sub{color:var(--muted);font-size:14px;margin:0 0 18px;line-height:1.5}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-bottom:18px}
+.kpi{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
+.kpi .n{font-size:26px;font-weight:700;line-height:1}.kpi .l{font-size:11px;color:var(--muted);margin-top:6px;text-transform:uppercase;letter-spacing:.5px}
+.kpi.urgent .n{color:var(--urgent)}.kpi.today .n{color:var(--today)}
+.fresh{display:flex;flex-wrap:wrap;gap:8px 16px;font-size:12px;color:var(--muted);margin-bottom:14px}
+.fresh b{color:var(--ink);font-weight:600}.fresh .err{color:var(--urgent)}
+.bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:16px}
+.chip{border:1px solid var(--line);background:#fff;border-radius:20px;padding:6px 12px;font-size:13px;cursor:pointer;font-weight:600;color:var(--ink)}
+.chip.on{background:var(--ink);color:#fff;border-color:var(--ink)}
+.spacer{flex:1}
+.btn{display:inline-block;border:0;background:var(--ink);color:#fff;text-decoration:none;font-weight:600;font-size:13px;padding:8px 14px;border-radius:9px;cursor:pointer;font-family:inherit}
+.btn.light{background:#fff;color:var(--ink);border:1px solid var(--line)}
+.btn.small{padding:5px 10px;font-size:12px}.btn.danger{background:var(--urgent)}
+.tier-h{font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase;margin:22px 0 10px;display:flex;align-items:center;gap:8px}
+.tier-h .dot{width:9px;height:9px;border-radius:50%}
+.card{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--soon);border-radius:12px;padding:12px 14px;margin-bottom:9px}
+.card.urgent{border-left-color:var(--urgent)}.card.today{border-left-color:var(--today)}.card.seen{opacity:.6}
+.card .row{display:flex;gap:12px;align-items:flex-start}.card .body{flex:1;min-width:0}
+.tag{display:inline-block;font-size:11px;font-weight:700;padding:2px 8px;border-radius:20px;margin-right:6px;background:#eef1f5;color:#3d4452}
+.tag.moveware{background:#e8f1fb;color:#1a5490}.tag.clickup{background:#f1eafd;color:#5b2a9e}.tag.whatsapp{background:#e6f6ec;color:#1e7a3c}.tag.kind{background:#fff4e0;color:#8a5a00}
+.card .title{font-weight:600;font-size:14px;margin:6px 0 2px;overflow-wrap:anywhere}
+.card .who{font-size:13px;color:var(--muted)}
+.card .snip{font-size:13px;color:#555;line-height:1.45;margin-top:4px;overflow-wrap:anywhere}
+.card .side{text-align:right;white-space:nowrap;font-size:12px;color:var(--muted)}
+.card .acts{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.card form{display:inline}
+textarea{width:100%;min-height:130px;border:1px solid var(--line);border-radius:9px;padding:10px;font:inherit;font-size:13px}
+.draft{background:#fafbfc;border:1px dashed #cfd5dd;border-radius:10px;padding:10px;margin-top:10px}
+.empty{color:var(--muted);font-size:14px;background:#fff;border:1px dashed #dfe3e8;border-radius:12px;padding:22px;text-align:center}
+.banner{background:#fff;border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:14px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.banner.warn{border-color:#f0c36d;background:#fffaf0}
+.box{background:#fff;max-width:560px;margin:6vh auto 0;border-radius:14px;padding:30px 26px;box-shadow:0 8px 30px rgba(0,0,0,.08)}
+.box ul{font-size:14px;line-height:1.6;padding-left:18px}
+label.ck{display:flex;gap:10px;font-size:14px;margin:12px 0;align-items:flex-start}
+table{width:100%;border-collapse:collapse;background:#fff;border:1px solid var(--line);border-radius:12px;overflow:hidden;font-size:13px}
+th,td{padding:8px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+th{background:#fafbfc;font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted)}
+.ok{color:var(--ok);font-weight:600}.bad{color:var(--urgent);font-weight:600}
+input[type=text],input[type=email]{border:1px solid var(--line);border-radius:8px;padding:7px 9px;font:inherit;font-size:13px}
+.foot{margin-top:28px;font-size:12px;color:var(--muted);line-height:1.6}
+code{background:#eef1f5;padding:2px 6px;border-radius:5px;font-size:12px;overflow-wrap:anywhere}
+@media(max-width:600px){.card .row{flex-direction:column}.card .side{text-align:left}}
+"""
+
+SHELL = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ title }} — Thelsa AI Assistant</title><style>{{ css|safe }}</style></head><body>
+<div class="wrap">
+  <div class="top"><img src="/static/thelsa_logo.png" alt="Thelsa">
+    <nav>{% if admin %}<a href="/assistant/admin">Admin</a>{% endif %}
+      <a href="/assistant">My dashboard</a><a href="/">← Automation Library</a></nav></div>
+  {{ body|safe }}
+</div></body></html>"""
+
+
+def _page(title, body, admin=False):
+    return render_template_string(SHELL, title=title, css=CSS, body=body, admin=admin)
+
+
+def _render(title, tpl, u, **ctx):
+    body = render_template_string(tpl, csrf=_csrf_token(), u=u, **ctx)
+    return _page(title, body, admin=(u and u["role"] == "admin"))
+
+
+# ── Consent ────────────────────────────────────────────────────────────────────
+CONSENT_TPL = """
+<div class="box">
+  <h1 style="font-size:21px">Your AI Assistant</h1>
+  <p class="sub">Before we set up your personal dashboard, here's exactly what it does.</p>
+  <ul>
+    <li><b>What it reads:</b> the sender, subject and first lines of emails in your Thelsa inbox
+        from the last 7 days, and the Moveware files where you are the coordinator.</li>
+    <li><b>How often:</b> automatically at 6am, 9am, 12pm, 3pm and 6pm (Mexico City), and whenever
+        you press "Refresh now".</li>
+    <li><b>What it stores:</b> only the short list shown on your dashboard. Your mailbox sign-in is
+        stored encrypted so it can refresh while you're away. Full emails are never stored.</li>
+    <li><b>Drafts:</b> it can suggest replies and save them to your Outlook Drafts. It never sends
+        anything.</li>
+    <li><b>Privacy:</b> only you can see your dashboard.</li>
+    <li><b>Stop anytime:</b> "Disconnect" deletes your stored sign-in and everything derived from
+        it immediately.</li>
+  </ul>
+  <form method="post" action="/assistant/consent">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label class="ck"><input type="checkbox" name="agree" required>
+      <span>I agree to the assistant reading my mailbox and Moveware files as described above.</span></label>
+    <label class="ck"><input type="checkbox" name="whatsapp">
+      <span><b>Optional (beta):</b> also show unread WhatsApp chats, using a browser extension that
+      reads the chat list only while WhatsApp Web is open in my browser. Chat names and
+      the last-message preview are sent; full history is not.</span></label>
+    <button class="btn" type="submit">Continue</button>
+  </form>
+</div>"""
+
+
+@bp.route("/assistant/consent", methods=["POST"])
+@login_required
+def consent(u):
+    _check_csrf()
+    if not request.form.get("agree"):
+        return redirect(url_for("assistant.dashboard"))
+    db.set_consent(u["id"], whatsapp_opt_in=bool(request.form.get("whatsapp")))
+    return redirect(url_for("assistant.connect_microsoft"))
+
+
+# ── Connect / disconnect ──────────────────────────────────────────────────────
+@bp.route("/assistant/connect/microsoft")
+@login_required
+def connect_microsoft(u):
+    if not u["consent_at"] or not vault.is_configured():
+        return redirect(url_for("assistant.dashboard"))
+    session["asst_connect"] = True
+    return redirect("/login/microsoft?next=/assistant%3Fconnected%3D1")
+
+
+def on_microsoft_login(email, name, cache):
+    """Called by the library's Microsoft callback when the user came from
+    'Connect mailbox'. Stores the encrypted MSAL cache and kicks off a first scan."""
+    u = db.upsert_user(email, name, role="admin" if email.lower() in _admins() else None)
+    if not u["consent_at"]:
+        return
+    graph.store_cache(u["id"], cache, email)
+    scan.scan_user_async(u["id"])
+
+
+@bp.route("/assistant/disconnect/<provider>", methods=["POST"])
+@login_required
+def disconnect(u, provider):
+    _check_csrf()
+    if provider not in ("microsoft", "whatsapp", "moveware", "clickup"):
+        abort(404)
+    db.disconnect(u["id"], provider)
+    if provider == "whatsapp":
+        db.set_consent(u["id"], whatsapp_opt_in=False)
+    return redirect(url_for("assistant.dashboard"))
+
+
+# ── Dashboard ──────────────────────────────────────────────────────────────────
+DASH_TPL = """
+<h1>{{ greeting }}, {{ first }}.</h1>
+<p class="sub">Everything that needs you — email{% if wa_on %}, WhatsApp{% endif %}, your Moveware (TMS) files and ClickUp (TIM) shipments — in order of urgency.</p>
+
+{% if not ready %}
+  <div class="banner warn"><div style="flex:1"><b>Your assistant is almost ready.</b><br>
+    <span class="sub" style="margin:0">The administrator is finishing setup. Your Moveware to-dos show below;
+    email connection will be available shortly.</span></div></div>
+{% elif not ms %}
+  <div class="banner warn"><div style="flex:1"><b>Connect your Thelsa mailbox</b><br>
+    <span class="sub" style="margin:0">So your assistant can check your email 5 times a day, even when you're not here.</span></div>
+    <a class="btn" href="/assistant/connect/microsoft">Connect mailbox</a></div>
+{% elif ms.status == 'error' %}
+  <div class="banner warn"><div style="flex:1"><b>Your mailbox needs to be reconnected.</b><br>
+    <span class="sub" style="margin:0">{{ ms.last_error or '' }}</span></div>
+    <a class="btn" href="/assistant/connect/microsoft">Reconnect</a></div>
+{% endif %}
+{% if refreshing %}<div class="banner">Refreshing your dashboard… this page will reload in a few seconds.</div>
+<script>setTimeout(function(){location.href='/assistant'},15000)</script>{% endif %}
+
+<div class="kpis">
+  <div class="kpi urgent"><div class="n">{{ counts.urgent }}</div><div class="l">Urgent</div></div>
+  <div class="kpi today"><div class="n">{{ counts.today }}</div><div class="l">Today</div></div>
+  <div class="kpi"><div class="n">{{ counts.soon }}</div><div class="l">Soon</div></div>
+  <div class="kpi"><div class="n">{{ counts.moveware }}</div><div class="l">Moveware to-dos</div></div>
+  {% if counts.clickup %}<div class="kpi"><div class="n">{{ counts.clickup }}</div><div class="l">TIM shipments</div></div>{% endif %}
+  <div class="kpi"><div class="n">{{ counts.mail }}</div><div class="l">Emails</div></div>
+</div>
+
+<div class="fresh">
+  <span>Mail: <b>{{ fresh.microsoft }}</b></span>
+  <span>Moveware: <b>{{ fresh.moveware }}</b></span>
+  {% if counts.clickup %}<span>ClickUp: <b>{{ fresh.clickup }}</b></span>{% endif %}
+  {% if wa_on %}<span>WhatsApp: <b>{{ fresh.whatsapp }}</b> <a href="/assistant/whatsapp">set up</a></span>{% endif %}
+  <span>Next automatic refresh: <b>{{ next_run }}</b></span>
+</div>
+
+<div class="bar">
+  <button class="chip on" data-f="all">All</button>
+  <button class="chip" data-f="microsoft">Mail</button>
+  <button class="chip" data-f="moveware">Moveware</button>
+  {% if counts.clickup %}<button class="chip" data-f="clickup">ClickUp</button>{% endif %}
+  {% if wa_on %}<button class="chip" data-f="whatsapp">WhatsApp</button>{% endif %}
+  <span class="spacer"></span>
+  <form method="post" action="/assistant/refresh"><input type="hidden" name="csrf" value="{{ csrf }}">
+    <button class="btn light" type="submit">↻ Refresh now</button></form>
+</div>
+
+{% if not items %}
+  <div class="empty">Nothing needs you right now. 🎉</div>
+{% endif %}
+{% for key, label, color in tiers %}
+  {% set group = items | selectattr('tier', 'equalto', key) | list %}
+  {% if group %}
+  <div class="tier-h" style="color:{{ color }}"><span class="dot" style="background:{{ color }}"></span>{{ label }} ({{ group|length }})</div>
+  {% for it in group %}
+  <div class="card {{ it.tier }} {% if it.seen %}seen{% endif %}" data-src="{{ it.source }}" id="i-{{ it.id }}">
+    <div class="row"><div class="body">
+      <span class="tag {{ it.source }}">{{ source_label.get(it.source, it.source) }}</span>{% if it.kind != 'whatsapp' %}<span class="tag kind">{{ kind_label.get(it.kind, it.kind) }}</span>{% endif %}
+      <div class="title">{{ it.subject }}</div>
+      <div class="who">{{ it.from_name or '' }}{% if it.from_addr %} &lt;{{ it.from_addr }}&gt;{% endif %}</div>
+      {% if it.snippet %}<div class="snip">{{ it.snippet[:260] }}</div>{% endif %}
+    </div>
+    <div class="side" title="urgency {{ it.score }}/100">{% if it.received_at %}{% if it.source == 'moveware' %}{{ 'Pack' if it.kind == 'request_docs' else 'Since' }} {% elif it.source == 'clickup' %}Last step {% endif %}{% endif %}{{ when(it.received_at) }}</div></div>
+    <div class="acts">
+      {% if it.url %}<a class="btn small light" href="{{ it.url }}" target="_blank" rel="noopener">Open ↗</a>{% endif %}
+      {% if it.source == 'microsoft' and draft_on %}
+      <form method="post" action="/assistant/item/{{ it.id }}/draft"><input type="hidden" name="csrf" value="{{ csrf }}">
+        <button class="btn small light" type="submit">✎ Suggest reply</button></form>{% endif %}
+      <form method="post" action="/assistant/item/{{ it.id }}/seen"><input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="seen" value="{{ '0' if it.seen else '1' }}">
+        <button class="btn small light" type="submit">{{ 'Undo done' if it.seen else '✓ Done' }}</button></form>
+    </div>
+    {% for d in drafts.get(it.id, []) %}
+    <div class="draft">
+      <form method="post" action="/assistant/draft/{{ d.id }}/save"><input type="hidden" name="csrf" value="{{ csrf }}">
+        <textarea name="body">{{ d.body }}</textarea>
+        <div class="acts">
+          {% if d.status == 'saved' %}<span class="ok">✓ Saved to your Outlook Drafts</span>
+          {% elif can_write %}<button class="btn small" type="submit">Save to Outlook Drafts</button>
+          {% else %}<span class="sub" style="margin:0">Copy this into your reply in Outlook. (Saving to Drafts needs IT to enable it.)</span>{% endif %}
+          <button class="btn small light" type="button" onclick="navigator.clipboard.writeText(this.form.body.value);this.textContent='Copied'">Copy</button>
+        </div></form>
+    </div>
+    {% endfor %}
+  </div>
+  {% endfor %}
+  {% endif %}
+{% endfor %}
+
+<div class="foot">
+  Only you can see this dashboard. Emails are scanned from your own mailbox; Moveware to-dos come from files
+  where you are the coordinator{% if u.moveware_email %} ({{ u.moveware_email }}){% endif %}; ClickUp items are
+  TIM shipments {{ 'you own' if u.tim_scope == 'all' else 'assigned to you' }}.
+  {% if ms %}<form method="post" action="/assistant/disconnect/microsoft" style="display:inline"
+     onsubmit="return confirm('Disconnect your mailbox and delete its data from the assistant?')">
+     <input type="hidden" name="csrf" value="{{ csrf }}"><button class="btn small light" type="submit">Disconnect mailbox</button></form>{% endif %}
+  {% if not wa_on %}<a href="/assistant/whatsapp">Add WhatsApp (beta)</a>{% endif %}
+</div>
+<script>
+document.querySelectorAll('.chip').forEach(function(c){c.onclick=function(){
+  document.querySelectorAll('.chip').forEach(function(x){x.classList.remove('on')});c.classList.add('on');
+  var f=c.dataset.f;document.querySelectorAll('.card').forEach(function(k){
+    k.style.display=(f==='all'||k.dataset.src===f)?'':'none'});
+  document.querySelectorAll('.tier-h').forEach(function(h){var n=h.nextElementSibling,any=false;
+    while(n&&n.classList.contains('card')){if(n.style.display!=='none')any=true;n=n.nextElementSibling}
+    h.style.display=any?'':'none'});
+}});
+</script>"""
+
+
+def _next_run_label():
+    now = _dt.datetime.now(MX)
+    hours = sorted(int(h) for h in scan.HOURS.split(",") if h.strip())
+    for h in hours:
+        t = now.replace(hour=h, minute=0, second=0, microsecond=0)
+        if t > now:
+            return t.strftime("%-I:%M %p")
+    return f"tomorrow {now.replace(hour=hours[0], minute=0).strftime('%-I:%M %p')}"
+
+
+@bp.route("/assistant")
+@login_required
+def dashboard(u):
+    if not u["consent_at"]:
+        return _render("Get started", CONSENT_TPL, u)
+    ms = db.get_connection(u["id"], "microsoft")
+    ranked = priority.rank(db.list_items(u["id"]))
+    wa_on = bool(u["whatsapp_opt_in"])
+    if not wa_on:
+        ranked = [i for i in ranked if i["source"] != "whatsapp"]
+    drafts = {}
+    for d in db.list_drafts(u["id"]):
+        if d["status"] != "dismissed":
+            drafts.setdefault(d["item_id"], []).append(d)
+    for k in drafts:
+        drafts[k] = drafts[k][:1]
+    st = db.sync_times(u["id"])
+    fresh = {s: _stamp(st.get(s)) for s in ("microsoft", "moveware", "clickup", "whatsapp")}
+    if not ms:
+        fresh["microsoft"] = "not connected"
+    counts = {t: sum(1 for i in ranked if i["tier"] == t and not i["seen"])
+              for t in ("urgent", "today", "soon")}
+    counts["moveware"] = sum(1 for i in ranked if i["source"] == "moveware" and not i["seen"])
+    counts["clickup"] = sum(1 for i in ranked if i["source"] == "clickup" and not i["seen"])
+    counts["mail"] = sum(1 for i in ranked if i["source"] == "microsoft" and not i["seen"])
+    hour = _dt.datetime.now(MX).hour
+    greeting = "Good morning" if hour < 12 else ("Good afternoon" if hour < 19 else "Good evening")
+    return _render("My dashboard", DASH_TPL, u,
+                   first=(u["name"] or u["email"]).split(" ")[0].split("@")[0],
+                   greeting=greeting, ms=ms, items=ranked, drafts=drafts, counts=counts,
+                   fresh=fresh, wa_on=wa_on, next_run=_next_run_label(),
+                   refreshing=request.args.get("refreshing") or request.args.get("connected"),
+                   tiers=[("urgent", "Urgent", "#c0392b"), ("today", "Today", "#d68910"),
+                          ("soon", "Soon", "#7f8c8d")],
+                   source_label=SOURCE_LABEL, kind_label=KIND_LABEL, when=_when,
+                   draft_on=drafting.enabled() and ms is not None,
+                   ready=vault.is_configured(),
+                   can_write=graph.can_write_drafts())
+
+
+@bp.route("/assistant/refresh", methods=["POST"])
+@login_required
+def refresh(u):
+    _check_csrf()
+    scan.scan_user_async(u["id"])
+    return redirect("/assistant?refreshing=1")
+
+
+@bp.route("/assistant/item/<item_id>/seen", methods=["POST"])
+@login_required
+def item_seen(u, item_id):
+    _check_csrf()
+    db.mark_seen(u["id"], item_id, request.form.get("seen", "1") == "1")
+    return redirect(f"/assistant#i-{item_id}")
+
+
+@bp.route("/assistant/item/<item_id>/draft", methods=["POST"])
+@login_required
+def item_draft(u, item_id):
+    _check_csrf()
+    it = db.get_item(u["id"], item_id)
+    if not it or it["source"] != "microsoft":
+        abort(404)
+    try:
+        body = graph.get_message_text(u["id"], it["external_id"])
+    except Exception:
+        body = it["snippet"] or ""
+    try:
+        text = drafting.suggest_reply(u["name"] or u["email"], f"{it['from_name']} <{it['from_addr']}>",
+                                      it["subject"] or "", body)
+    except Exception as exc:
+        text = f"(Couldn't generate a suggestion right now: {exc})"
+    db.save_draft(u["id"], item_id, text)
+    return redirect(f"/assistant#i-{item_id}")
+
+
+@bp.route("/assistant/draft/<draft_id>/save", methods=["POST"])
+@login_required
+def draft_save(u, draft_id):
+    _check_csrf()
+    d = next((x for x in db.list_drafts(u["id"]) if x["id"] == draft_id), None)
+    if not d:
+        abort(404)
+    it = db.get_item(u["id"], d["item_id"])
+    body = (request.form.get("body") or d["body"]).strip()
+    db.update_draft(u["id"], draft_id, body=body)
+    try:
+        res = graph.create_reply_draft(u["id"], it["external_id"], body)
+        db.update_draft(u["id"], draft_id, status="saved", provider_draft_id=res.get("id"))
+    except Exception as exc:
+        db.update_draft(u["id"], draft_id, body=f"{body}\n\n[Not saved to Outlook: {exc}]")
+    return redirect(f"/assistant#i-{it['id']}")
+
+
+# ── WhatsApp (opt-in beta) ────────────────────────────────────────────────────
+WA_TPL = """
+<h1>WhatsApp <span class="tag">beta</span></h1>
+<p class="sub">Shows your unread WhatsApp chats on your dashboard. It works through a small Chrome
+extension that reads your chat list <b>only while WhatsApp Web is open</b> in your browser, so the
+WhatsApp section shows "as of" the last time it synced.</p>
+{% if not u.whatsapp_opt_in %}
+  <form method="post" action="/assistant/whatsapp/optin"><input type="hidden" name="csrf" value="{{ csrf }}">
+    <label class="ck"><input type="checkbox" name="agree" required><span>I agree to send my WhatsApp chat
+    names, unread counts and last-message previews to my private dashboard. Full history is never read.</span></label>
+    <button class="btn" type="submit">Turn on WhatsApp</button></form>
+{% else %}
+  <div class="banner"><div style="flex:1">
+    <b>1.</b> <a href="/assistant/whatsapp/extension.zip">Download the extension</a> and unzip it.<br>
+    <b>2.</b> In Chrome open <code>chrome://extensions</code>, turn on <b>Developer mode</b>, click
+       <b>Load unpacked</b> and choose the unzipped folder.<br>
+    <b>3.</b> Click the extension's icon and paste your sync key.<br>
+    <b>4.</b> Open <a href="https://web.whatsapp.com" target="_blank" rel="noopener">web.whatsapp.com</a>.
+       It syncs every 5 minutes while open.</div></div>
+  {% if key %}<div class="banner warn"><div><b>Your sync key</b> (shown once — copy it now):<br><code>{{ key }}</code></div></div>{% endif %}
+  <p class="sub">Last sync: <b>{{ last }}</b></p>
+  <form method="post" action="/assistant/whatsapp/key" style="display:inline"><input type="hidden" name="csrf" value="{{ csrf }}">
+    <button class="btn light" type="submit">{{ 'Create a new sync key' if has_key else 'Create my sync key' }}</button></form>
+  <form method="post" action="/assistant/disconnect/whatsapp" style="display:inline"><input type="hidden" name="csrf" value="{{ csrf }}">
+    <button class="btn light" type="submit">Turn off WhatsApp &amp; delete its data</button></form>
+{% endif %}"""
+
+
+@bp.route("/assistant/whatsapp")
+@login_required
+def whatsapp(u):
+    key = session.pop("asst_wa_key", None)
+    return _render("WhatsApp", WA_TPL, u, key=key,
+                   has_key=db.get_connection(u["id"], "whatsapp") is not None,
+                   last=_stamp(db.sync_times(u["id"]).get("whatsapp")))
+
+
+@bp.route("/assistant/whatsapp/optin", methods=["POST"])
+@login_required
+def whatsapp_optin(u):
+    _check_csrf()
+    if request.form.get("agree"):
+        db.set_consent(u["id"], whatsapp_opt_in=True)
+    return redirect(url_for("assistant.whatsapp"))
+
+
+@bp.route("/assistant/whatsapp/key", methods=["POST"])
+@login_required
+def whatsapp_key(u):
+    _check_csrf()
+    if not u["whatsapp_opt_in"]:
+        abort(403)
+    session["asst_wa_key"] = db.new_whatsapp_key(u["id"])
+    return redirect(url_for("assistant.whatsapp"))
+
+
+@bp.route("/assistant/whatsapp/extension.zip")
+@login_required
+def whatsapp_extension(u):
+    base = request.host_url.rstrip("/")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for p in sorted(EXT_DIR.iterdir()):
+            if p.is_file():
+                data = p.read_text().replace("__SERVER__", base)
+                z.writestr(f"thelsa-assistant-whatsapp/{p.name}", data)
+    return Response(buf.getvalue(), mimetype="application/zip", headers={
+        "Content-Disposition": "attachment; filename=thelsa-assistant-whatsapp.zip"})
+
+
+@bp.route("/api/assistant/whatsapp/sync", methods=["POST", "OPTIONS"])
+def whatsapp_sync():
+    if request.method == "OPTIONS":
+        return ("", 204)
+    auth = request.headers.get("Authorization", "")
+    key = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+    u = db.user_for_whatsapp_key(key)
+    if not u:
+        return jsonify({"ok": False, "error": "invalid key or WhatsApp not enabled"}), 401
+    chats = (request.get_json(silent=True) or {}).get("chats") or []
+    found = []
+    for c in chats[:60]:
+        name = str(c.get("name") or "")[:200].strip()
+        unread = int(c.get("unread") or 0)
+        if not name or unread <= 0:
+            continue
+        found.append({"kind": "whatsapp", "external_id": "wa:" + name.lower()[:480],
+                      "from_name": name, "from_addr": None,
+                      "subject": f"{unread} unread message{'s' if unread != 1 else ''} from {name}",
+                      "snippet": str(c.get("preview") or "")[:300],
+                      "url": "https://web.whatsapp.com", "received_at": db.now(),
+                      "meta": {"unread": unread, "time": str(c.get("time") or "")[:40]}})
+    db.replace_items(u["id"], "whatsapp", found)
+    db.mark_connection(u["id"], "whatsapp", ok=True)
+    return jsonify({"ok": True, "items": len(found)})
+
+
+# ── Scheduler backup trigger ──────────────────────────────────────────────────
+@bp.route("/assistant/cron")
+def cron():
+    tok = os.environ.get("CRON_TOKEN", "")
+    if not tok or not secrets.compare_digest(request.args.get("token", ""), tok):
+        return ("forbidden", 403)
+    scan.run_all_async("cron")
+    return jsonify({"ok": True, "started": True})
+
+
+# ── Admin ──────────────────────────────────────────────────────────────────────
+ADMIN_TPL = """
+<h1>Assistant admin</h1>
+<p class="sub">Connection health for every user. You can see whether each assistant is working —
+never anyone's emails or to-dos.</p>
+<div class="banner"><div style="flex:1">
+  Encryption key: {% if vault_ok %}<span class="ok">configured</span>{% else %}<span class="bad">TOKEN_ENC_KEY missing</span>{% endif %} ·
+  Database: <b>{{ db_kind }}</b> ·
+  Drafting: {% if draft_on %}<span class="ok">on</span>{% else %}<span class="bad">ANTHROPIC_API_KEY missing</span>{% endif %} ·
+  Save to Outlook: {% if can_write %}<span class="ok">on</span>{% else %}off (needs Mail.ReadWrite){% endif %} ·
+  Scheduler: {% if sched %}<span class="ok">running</span>{% else %}<span class="bad">not running here</span>{% endif %}</div>
+  <form method="post" action="/assistant/admin/run"><input type="hidden" name="csrf" value="{{ csrf }}">
+    <button class="btn" type="submit">Run all now</button></form></div>
+
+<h2>Add a user</h2>
+<form method="post" action="/assistant/admin/add" class="bar"><input type="hidden" name="csrf" value="{{ csrf }}">
+  <input type="email" name="email" placeholder="name@thelsa.com" required>
+  <input type="text" name="name" placeholder="Full name">
+  <button class="btn" type="submit">Add</button>
+  <span class="sub" style="margin:0">They open the AI Assistant tile, sign in, and connect their mailbox.</span></form>
+
+<h2>Users</h2>
+<table><tr><th>User</th><th>Mailbox</th><th>WhatsApp</th><th>Moveware email</th><th>TIM (ClickUp)</th><th></th></tr>
+{% for r in rows %}<tr>
+  <td><b>{{ r.name or r.email }}</b><br>{{ r.email }}{% if r.role=='admin' %} · admin{% endif %}
+      {% if not r.active %}<br><span class="bad">deactivated</span>{% endif %}
+      {% if not r.consent %}<br><span class="sub">hasn't opened yet</span>{% endif %}</td>
+  <td>{% if r.microsoft %}<span class="{{ 'ok' if r.microsoft.status=='connected' else 'bad' }}">{{ r.microsoft.status }}</span><br>
+      last OK {{ stamp(r.microsoft.last_ok_at) }}{% if r.microsoft.last_error %}<br><span class="bad">{{ r.microsoft.last_error[:120] }}</span>{% endif %}
+      {% else %}—{% endif %}</td>
+  <td>{% if r.whatsapp %}{{ r.whatsapp.status }}<br>{{ stamp(r.whatsapp.last_ok_at) }}{% else %}—{% endif %}</td>
+  <td><form method="post" action="/assistant/admin/user/{{ r.id }}/moveware"><input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="email" name="mw" value="{{ r.moveware_email or '' }}" placeholder="same as login" style="width:170px">
+      <button class="btn small light" type="submit">Save</button></form></td>
+  <td><form method="post" action="/assistant/admin/user/{{ r.id }}/tim"><input type="hidden" name="csrf" value="{{ csrf }}">
+      <select name="scope" onchange="this.form.submit()">
+        {% for v, l in [('assigned','Assigned only'),('all','All TIM files'),('none','None')] %}
+        <option value="{{ v }}" {% if (r.tim_scope or 'assigned') == v %}selected{% endif %}>{{ l }}</option>{% endfor %}
+      </select></form></td>
+  <td><form method="post" action="/assistant/admin/user/{{ r.id }}/active"
+        {% if r.active %}onsubmit="return confirm('Deactivate and delete this user\\'s stored sign-in and data?')"{% endif %}>
+      <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="active" value="{{ '0' if r.active else '1' }}">
+      <button class="btn small {{ 'danger' if r.active else 'light' }}" type="submit">{{ 'Deactivate' if r.active else 'Reactivate' }}</button></form></td>
+</tr>{% endfor %}</table>
+
+<h2 style="margin-top:22px">Recent runs</h2>
+<table><tr><th>Started (MX)</th><th>Trigger</th><th>Users</th><th>Errors</th><th>Notes</th></tr>
+{% for r in runs %}<tr><td>{{ stamp(r.started_at) }}</td><td>{{ r.trigger }}</td><td>{{ r.users_scanned }}</td>
+  <td>{{ r.errors }}</td><td style="white-space:pre-wrap">{{ (r.note or '')[:400] }}</td></tr>{% endfor %}</table>"""
+
+
+@bp.route("/assistant/admin")
+@admin_required
+def admin(u):
+    by_user = {}
+    for r in db.connection_health():
+        e = by_user.setdefault(r["id"], {"id": r["id"], "email": r["email"], "name": r["name"],
+                                         "active": r["active"], "role": r["role"]})
+        if r["provider"]:
+            e[r["provider"]] = {"status": r["status"], "last_ok_at": r["last_ok_at"],
+                                "last_error": r["last_error"]}
+    for usr in db.list_users():
+        if usr["id"] in by_user:
+            by_user[usr["id"]]["consent"] = bool(usr["consent_at"])
+            by_user[usr["id"]]["moveware_email"] = usr["moveware_email"]
+            by_user[usr["id"]]["tim_scope"] = usr["tim_scope"]
+    return _render("Admin", ADMIN_TPL, u, rows=list(by_user.values()), runs=db.recent_runs(15),
+                   stamp=_stamp, vault_ok=vault.is_configured(),
+                   db_kind="Postgres" if db._db_url().startswith("postgresql") else "SQLite (temporary!)",
+                   draft_on=drafting.enabled(), can_write=graph.can_write_drafts(),
+                   sched=scan._sched is not None)
+
+
+@bp.route("/assistant/admin/add", methods=["POST"])
+@admin_required
+def admin_add(u):
+    _check_csrf()
+    email = (request.form.get("email") or "").strip().lower()
+    allowed = {d.strip().lower() for d in os.environ.get(
+        "ALLOWED_EMAIL_DOMAINS", "thelsa.com,inflectionpointnow.com").split(",") if d.strip()}
+    if "@" in email and email.rsplit("@", 1)[1] in allowed:
+        db.upsert_user(email, request.form.get("name") or None)
+    return redirect(url_for("assistant.admin"))
+
+
+@bp.route("/assistant/admin/user/<user_id>/moveware", methods=["POST"])
+@admin_required
+def admin_moveware(u, user_id):
+    _check_csrf()
+    db.set_moveware_email(user_id, request.form.get("mw"))
+    scan.scan_user_async(user_id)
+    return redirect(url_for("assistant.admin"))
+
+
+@bp.route("/assistant/admin/user/<user_id>/tim", methods=["POST"])
+@admin_required
+def admin_tim(u, user_id):
+    _check_csrf()
+    try:
+        db.set_tim_scope(user_id, request.form.get("scope", "assigned"))
+    except ValueError:
+        abort(400)
+    scan.scan_user_async(user_id)
+    return redirect(url_for("assistant.admin"))
+
+
+@bp.route("/assistant/admin/user/<user_id>/active", methods=["POST"])
+@admin_required
+def admin_active(u, user_id):
+    _check_csrf()
+    if user_id == u["id"]:
+        abort(400, "You can't deactivate yourself.")
+    db.set_active(user_id, request.form.get("active") == "1")
+    return redirect(url_for("assistant.admin"))
+
+
+@bp.route("/assistant/admin/run", methods=["POST"])
+@admin_required
+def admin_run(u):
+    _check_csrf()
+    scan.run_all_async("manual")
+    return redirect(url_for("assistant.admin"))

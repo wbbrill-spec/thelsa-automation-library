@@ -337,8 +337,12 @@ def login_microsoft():
     session["oauth_next"] = request.args.get("next", url_for("index"))
     state = secrets.token_urlsafe(24)
     session["ms_state"] = state
+    scopes = MS_SCOPES
+    if session.get("asst_connect"):  # AI Assistant "Connect mailbox" — may add Mail.ReadWrite
+        from assistant import graph as _asst_graph
+        scopes = _asst_graph.scopes()
     auth_url = _msal_app().get_authorization_request_url(
-        MS_SCOPES,
+        scopes,
         state=state,
         redirect_uri=MS_REDIRECT_URI,
         prompt="select_account",
@@ -359,9 +363,24 @@ def auth_callback_microsoft():
     if not code:
         return "Microsoft sign-in failed: no authorization code returned.", 400
 
-    result = _msal_app().acquire_token_by_authorization_code(
-        code, scopes=MS_SCOPES, redirect_uri=MS_REDIRECT_URI
-    )
+    asst_connect = session.pop("asst_connect", False)
+    asst_cache = None
+    if asst_connect:
+        # AI Assistant: keep the MSAL token cache (incl. the refresh token) so the
+        # scheduled scan can read this user's mail later. Stored ENCRYPTED only.
+        import msal
+        from assistant import graph as _asst_graph
+        asst_cache = msal.SerializableTokenCache()
+        result = msal.ConfidentialClientApplication(
+            MS_CLIENT_ID, authority=MS_AUTHORITY, client_credential=MS_CLIENT_SECRET,
+            token_cache=asst_cache,
+        ).acquire_token_by_authorization_code(
+            code, scopes=_asst_graph.scopes(), redirect_uri=MS_REDIRECT_URI
+        )
+    else:
+        result = _msal_app().acquire_token_by_authorization_code(
+            code, scopes=MS_SCOPES, redirect_uri=MS_REDIRECT_URI
+        )
     if "error" in result:
         return (f"Microsoft token exchange failed: "
                 f"{result.get('error_description', result.get('error'))}"), 400
@@ -384,6 +403,13 @@ def auth_callback_microsoft():
     session["ms_access_token"] = result.get("access_token")
     session.permanent = True
     logger.info(f"Login (Microsoft): {email}")
+    if asst_connect and asst_cache is not None:
+        try:
+            from assistant.web import on_microsoft_login
+            on_microsoft_login(email, name, asst_cache)
+            logger.info(f"AI Assistant mailbox connected: {email}")
+        except Exception as exc:
+            logger.error(f"AI Assistant connect failed for {email}: {exc}")
     return redirect(session.pop("oauth_next", url_for("index")))
 
 
@@ -472,9 +498,15 @@ app.register_blueprint(faim_bp)
 # Cross-Border Shipment Dashboard (TIM/ClickUp + TMS/Moveware, unified)
 from crossborder.web import crossborder_bp
 app.register_blueprint(crossborder_bp)
-# Personal AI Assistant — per-user, on-demand mailbox scan (multi-tenant Phase 1)
-from assistant_web import assistant_bp
+# AI Assistant — multi-tenant, per-user dashboard (mail + Moveware + WhatsApp),
+# refreshed 5x/day (06/09/12/15/18 Mexico City). Replaces the Phase-1 on-demand page.
+from assistant.web import bp as assistant_bp
 app.register_blueprint(assistant_bp)
+try:
+    from assistant.scan import start_scheduler as _asst_start_scheduler
+    _asst_start_scheduler()
+except Exception as _asst_exc:  # never block the library from booting
+    logger.warning("AI Assistant scheduler not started: %s", _asst_exc)
 
 
 # ── Entry point ─────────────────────────────────────────────────────────────────

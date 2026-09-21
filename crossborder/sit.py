@@ -488,18 +488,15 @@ def fetch_workbook_bytes() -> tuple[Optional[bytes], dict]:
         return None, {"source": "graph",
                       "error": "SIT_PLAN_DRIVE_ID plus SIT_PLAN_FOLDER_ID (or "
                                "SIT_PLAN_ITEM_ID) not set"}
-    try:
-        import ms_graph
-    except Exception as exc:  # noqa: BLE001
-        return None, {"source": "graph", "error": f"ms_graph unavailable: {exc}"}
-    if not ms_graph.have_ms_creds():
-        return None, {"source": "graph", "error": "no Graph credentials configured"}
-    token = ms_graph._get_token()
+    # GRAPH_* first: that app holds Files.Read.All. See crossborder/graph_auth.py
+    # for why this no longer goes through ms_graph._get_token().
+    from .graph_auth import get_token
+    token, auth = get_token()
     if not token:
-        return None, {"source": "graph", "error": "could not obtain Graph token"}
+        return None, {"source": "graph", **auth}
     import requests
     hdr = {"Authorization": f"Bearer {token}"}
-    info: dict = {"source": "graph"}
+    info: dict = {"source": "graph", "creds": auth.get("creds"), "app": auth.get("app")}
 
     # Operations writes a NEW workbook about three times a day rather than
     # overwriting one — "PLAN DE VIAJES 11 DE SEPTIEMBRE 2026 (1).xlsm" and so

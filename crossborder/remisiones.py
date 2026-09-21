@@ -463,15 +463,12 @@ def fetch_workbook_bytes() -> tuple[Optional[bytes], dict]:
     if path and os.path.exists(path):
         with open(path, "rb") as fh:
             return fh.read(), {"source": "file", "path": path}
-    try:
-        import ms_graph  # library module: app-only Graph token
-    except Exception as exc:  # noqa: BLE001
-        return None, {"source": "graph", "error": f"ms_graph unavailable: {exc}"}
-    if not ms_graph.have_ms_creds():
-        return None, {"source": "graph", "error": "no Graph credentials configured"}
-    token = ms_graph._get_token()
+    # GRAPH_* first: that app holds Files.Read.All. See crossborder/graph_auth.py
+    # for why this no longer goes through ms_graph._get_token().
+    from .graph_auth import get_token
+    token, auth = get_token()
     if not token:
-        return None, {"source": "graph", "error": "could not obtain Graph token"}
+        return None, {"source": "graph", **auth}
     import requests
     drive = os.environ.get("REMISIONES_DRIVE_ID", DEFAULT_DRIVE_ID)
     item = os.environ.get("REMISIONES_ITEM_ID", DEFAULT_ITEM_ID)
@@ -484,7 +481,7 @@ def fetch_workbook_bytes() -> tuple[Optional[bytes], dict]:
     if r.status_code != 200:
         return None, {"source": "graph", "status": r.status_code,
                       "error": r.text[:300] or "download refused (app needs Files.Read.All)"}
-    return r.content, {"source": "graph", "bytes": len(r.content)}
+    return r.content, {"source": "graph", "bytes": len(r.content), "creds": auth.get("creds"), "app": auth.get("app")}
 
 
 def load_latest_rows() -> tuple[list[RemisionRow], dict]:

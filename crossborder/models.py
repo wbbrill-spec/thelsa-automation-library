@@ -65,8 +65,14 @@ U_BOX_LIFT_VAN_EQUIV = TRUCK_53_LIFT_VANS / TRUCK_53_U_BOXES
 # cubic-metre volume (Moveware / Remisiones "cdm") into truck slots when no
 # explicit lift-van / U-box count exists. Confirm with the team (spec §12).
 LIFT_VAN_M3 = 5.7
-# A U-box (~95" x 56" x 83" outside) holds roughly 257 cuft ≈ 7.3 m³.
+# U-Box container (Bill, 2026-09-21): exterior 96" × 60" × 90", usable
+# capacity 257 cu ft / 7.3 m³, maximum contents weight 2,000 lb.
 U_BOX_M3 = 7.3
+U_BOX_CUFT = 257
+U_BOX_MAX_LB = 2000
+U_BOX_EXTERIOR_IN = (96, 60, 90)
+# In ClickUp, a job reference starting "AA" is a U-Box job (Bill, 2026-09-21).
+U_BOX_REF_PREFIX = "AA"
 CUFT_PER_M3 = 35.3147
 TIM_DELIVERY_WINDOW_DAYS = 30
 
@@ -311,6 +317,28 @@ class Shipment:
             return round(float(self.volume_m3), 2)
         return round((self.lift_vans or 0) * LIFT_VAN_M3 + (self.u_boxes or 0) * U_BOX_M3, 2)
 
+    # ── U-Box jobs (Bill, 2026-09-21) ──────────────────────────────────────
+    @property
+    def is_ubox_job(self) -> bool:
+        """A U-Box job: ClickUp reference starts with "AA", or a U-Box count is on record."""
+        ref = str(self.reference_number or "").strip().upper()
+        return ref.startswith(U_BOX_REF_PREFIX) or bool(self.u_boxes)
+
+    @property
+    def u_boxes_planned(self) -> int:
+        """U-Boxes this job ships in. 0 means a U-Box job whose count is unknown.
+
+        An explicit count (Remisiones "3 uboxes") wins. Otherwise a volume on an
+        AA job is read as boxes of 7.3 m³ usable each, rounded to the nearest
+        whole box with a minimum of one. With neither, the job is still marked a
+        U-Box job but left unsized — never guessed at one box.
+        """
+        if self.u_boxes:
+            return int(round(self.u_boxes))
+        if not self.is_ubox_job or not self.volume_m3:
+            return 0
+        return max(1, int(float(self.volume_m3) / U_BOX_M3 + 0.5))
+
     # ── lift-van loaded shipments (Bill, 2026-09-21) ──────────────────────
     @property
     def is_us_diplomatic(self) -> bool:
@@ -368,6 +396,8 @@ class Shipment:
         d["planning_m3"] = self.planning_m3
         d["is_open"] = self.is_open
         d["is_corporate"] = self.is_corporate
+        d["is_ubox_job"] = self.is_ubox_job
+        d["u_boxes_planned"] = self.u_boxes_planned
         d["is_us_diplomatic"] = self.is_us_diplomatic
         d["lift_van_loaded"] = self.lift_van_loaded
         d["lift_vans_planned"] = self.lift_vans_planned

@@ -289,6 +289,10 @@ const money = n => n == null ? "—" : "$" + Math.round(n).toLocaleString();
 const ES = {
   "Cross-Border": "Transfronterizo", "Shipments": "Envíos",
   "← Library": "← Biblioteca",
+  // ── U-Box ──
+  "U-Box job — number of boxes not on record yet": "Servicio U-Box — aún no se registra cuántos contenedores",
+  "Each: 7.3 m³ / 257 cu ft usable · max 2,000 lb contents · 96 × 60 × 90 in outside":
+    "Cada uno: 7.3 m³ / 257 pies³ útiles · máx. 2,000 lb de contenido · 96 × 60 × 90 pulg. exterior",
   // ── lift vans ──
   "lift vans": "lift vans", "gross": "bruto", "positions free": "posiciones libres",
   "US Embassy / Consulate — ships in lift vans; Moveware volume is gross":
@@ -582,7 +586,7 @@ function renderPlan() {
           ? `<b>${l.lift_vans} / ${l.lift_van_positions} ${tr("lift vans")}</b> · ${l.m3} m³ ${tr("gross")} · ${l.fill_pct}%${l.free_lift_van_positions ? ` · ${l.free_lift_van_positions} ${tr("positions free")}` : ""}`
           : `${l.m3} / ${l.truck_m3} m³ · ${l.fill_pct}%`}${l.kg ? ` · ${fmtN(l.kg)} kg` : ""}${
         (l.revenue || []).length ? ` · ${tr("revenue")} ${fmtMoneyBuckets(l.revenue)}` : ""}</span><span>${l.depart_by ? tr("depart by") + " " + fmtD(l.depart_by) : ""}</span></div>
-      ${l.shipments.map(it => `<div class="row" data-id="${esc(it.id)}"><div class="who"><b>${esc(it.customer)}</b>${it.anchor ? ' <span class="tag anchor">anchor</span>' : ""}${it.corporate_account ? ` <span class="corp">${esc(it.corporate_account)}</span>` : ""}${it.us_diplomatic ? ` <span class="tag lv" title="${tr("US Embassy / Consulate — ships in lift vans; Moveware volume is gross")}">${tr("lift vans")}</span>` : ""}${l.window_risk.includes(it.id) ? ' <span class="tag risk">by ' + fmtD(it.deadline) + '</span>' : ""}<br><span class="rs">${esc(it.source)} · ${esc(it.agent || "")}${it.reference ? " · " + esc(it.reference) : ""} · → ${esc(it.destination || "?")}${it.service ? " · " + esc(it.service) : ""}</span></div><div class="m3">${it.lift_vans ? `<b>${it.lift_vans} LV</b><br><span class="rs">${it.m3} m³ ${tr("gross")}</span>` : `${it.m3} m³`}${it.revenue != null ? `<br><span class="rs">${fmtMoney(it.revenue, it.revenue_currency, it.revenue_month)}</span>` : ""}</div></div>`).join("")}
+      ${l.shipments.map(it => `<div class="row" data-id="${esc(it.id)}"><div class="who"><b>${esc(it.customer)}</b>${it.anchor ? ' <span class="tag anchor">anchor</span>' : ""}${it.corporate_account ? ` <span class="corp">${esc(it.corporate_account)}</span>` : ""}${it.ubox ? ` <span class="tag lv">U-Box${it.u_boxes ? " ×" + it.u_boxes : ""}</span>` : ""}${it.us_diplomatic ? ` <span class="tag lv" title="${tr("US Embassy / Consulate — ships in lift vans; Moveware volume is gross")}">${tr("lift vans")}</span>` : ""}${l.window_risk.includes(it.id) ? ' <span class="tag risk">by ' + fmtD(it.deadline) + '</span>' : ""}<br><span class="rs">${esc(it.source)} · ${esc(it.agent || "")}${it.reference ? " · " + esc(it.reference) : ""} · → ${esc(it.destination || "?")}${it.service ? " · " + esc(it.service) : ""}</span></div><div class="m3">${it.lift_vans ? `<b>${it.lift_vans} LV</b><br><span class="rs">${it.m3} m³ ${tr("gross")}</span>` : `${it.m3} m³`}${it.revenue != null ? `<br><span class="rs">${fmtMoney(it.revenue, it.revenue_currency, it.revenue_month)}</span>` : ""}</div></div>`).join("")}
       ${(l.trucks||[]).length ? `<div class="fl" style="margin-top:6px"><span>${tr("On a truck already going")}: ${l.trucks.map(t => `<span class="tag ${t.fits?"truckfit":"truck"}" title="${esc(t.driver||"")}">${esc(t.unit)} · ${fmtD(t.date)} · ${t.spare_m3} m³ ${tr("free")}</span>`).join(" ")}</span></div>` : ""}
       ${opp && opp.advice ? `<div class="adv">${esc(opp.advice)}</div>` : ""}
     </div>`; }).join("") : `<div class="empty">${p.error ? "" : tr("No consolidatable shipments are ready right now.")}</div>`;
@@ -803,6 +807,10 @@ function openDrawer(id) {
       <b>${tr("Last progress")}</b><span>${s.last_progress_at ? esc(s.last_progress_at) + ` · ${s.days_since_progress} days ago` : "—"}</span>
       <b>${tr("Assigned")}</b><span>${esc((s.assignees || []).join(", ") || "—")}</span>
       <b>${tr("Origin → Dest.")}</b><span>${esc(s.origin || "?")} → ${esc(s.destination || "?")}${s.destination_hub !== "Unknown" ? ` (${esc(s.destination_hub)} hub)` : ""}</span>
+      ${s.is_ubox_job ? `<b>U-Box</b><span>${s.u_boxes_planned
+          ? `<b>${s.u_boxes_planned} U-Box${s.u_boxes_planned === 1 ? "" : "es"}</b>`
+          : `<span style="color:#9a5b00">${tr("U-Box job — number of boxes not on record yet")}</span>`}
+          <br><span style="color:#8a8f98;font-size:11px">${tr("Each: 7.3 m³ / 257 cu ft usable · max 2,000 lb contents · 96 × 60 × 90 in outside")}</span></span>` : ""}
       <b>${tr("Volume")}</b><span>${s.is_us_diplomatic && s.lift_vans_planned ? `<b>${s.lift_vans_planned} ${tr("lift vans")}</b> (${s.volume_m3} m³ ${tr("gross")} ÷ 5.7) · ` : ""}${s.lift_vans && !s.is_us_diplomatic ? s.lift_vans + " lift van(s) · " : ""}${s.u_boxes ? s.u_boxes + " U-Box(es) · " : ""}${s.volume_m3 ? s.volume_m3 + " m³ · " : ""}${esc(ex.volume_text || "")}${!(s.lift_vans || s.u_boxes || s.volume_m3 || ex.volume_text) ? "—" : ""}</span>
       <b>${tr("Revenue")}</b><span>${s.revenue != null
           ? fmtMoney(s.revenue, s.revenue_currency, s.revenue_month)

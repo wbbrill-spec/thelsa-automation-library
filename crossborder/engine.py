@@ -37,7 +37,7 @@ import os
 from dataclasses import dataclass, field
 
 from .models import (
-    LIFT_VAN_M3, TRUCK_53_LIFT_VANS, Hub, Shipment, Source, Stage, TIM_DELIVERY_WINDOW_DAYS,
+    LIFT_VAN_M3, TRUCK_53_LIFT_VANS, U_BOX_M3, Hub, Shipment, Source, Stage, TIM_DELIVERY_WINDOW_DAYS,
     TRUCK_53_KG, TRUCK_53_M3,
 )
 
@@ -176,6 +176,7 @@ class Load:
                 "destination": i.shipment.destination, "m3": i.m3, "kg": i.kg,
                 "lift_vans": i.lift_vans, "space_m3": round(i.space, 2),
                 "us_diplomatic": i.shipment.is_us_diplomatic,
+                "ubox": i.shipment.is_ubox_job, "u_boxes": i.shipment.u_boxes_planned,
                 "stage": i.shipment.stage.value, "ready": i.ready,
                 "ready_date": i.ready_date.isoformat() if i.ready_date else None,
                 "deadline": i.deadline.isoformat() if i.deadline else None,
@@ -281,7 +282,11 @@ def make_item(s: Shipment, today: dt.date) -> Item | None:
         reasons.append(f"{m3} m³ on record is not possible for one truck — read as cubic feet ({round(m3 / CUFT_PER_M3, 2)} m³); fix in the source")
         m3 = round(m3 / CUFT_PER_M3, 2)
     if m3 <= 0:
-        reasons.append("no volume on record — cannot be planned until a volume is entered")
+        if s.is_ubox_job:
+            reasons.append("U-Box job (AA reference) — number of U-Boxes not on record yet, so it cannot be planned")
+        else:
+            reasons.append("no volume on record — cannot be planned until a volume is entered")
+
     kg = float(s.weight or 0.0)
     if s.source is Source.TIM:
         ready = s.stage in READY_STAGES
@@ -298,6 +303,10 @@ def make_item(s: Shipment, today: dt.date) -> Item | None:
             reasons.append("no uplift date in Moveware")
         elif not ready:
             reasons.append(f"uplift scheduled {uplift.isoformat()} (beyond the {HORIZON_DAYS}-day horizon)")
+    if m3 > 0 and s.is_ubox_job:
+        n = s.u_boxes_planned
+        how = "count on record" if s.u_boxes else f"{s.volume_m3} m³ ÷ {U_BOX_M3} usable per box"
+        reasons.append(f"U-Box job — {n} U-Box{'es' if n != 1 else ''} ({how})")
     # Position-based capacity is applied to US Embassy / Consulate bookings — the
     # rule Bill gave (2026-09-21). TIM lift-van / U-box counts keep the volume
     # conversion they have always used; extending positions to them is a

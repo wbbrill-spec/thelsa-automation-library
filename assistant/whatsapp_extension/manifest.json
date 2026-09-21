@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "Thelsa AI Assistant — WhatsApp sync (beta)",
+  "version": "1.0.0",
+  "description": "Sends your unread WhatsApp chat list (names, unread counts, last-message preview) to your private Thelsa AI Assistant dashboard while WhatsApp Web is open.",
+  "permissions": ["storage", "alarms"],
+  "host_permissions": ["https://web.whatsapp.com/*", "__SERVER__/*"],
+  "background": {"service_worker": "background.js"},
+  "content_scripts": [{"matches": ["https://web.whatsapp.com/*"], "js": ["content.js"], "run_at": "document_idle"}],
+  "action": {"default_popup": "popup.html", "default_title": "Thelsa AI Assistant"}
+}

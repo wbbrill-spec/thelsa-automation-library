@@ -68,17 +68,55 @@ logging.basicConfig(level=logging.INFO,
 logger = logging.getLogger(__name__)
 
 # Server-side sessions keep each user's Graph access token OFF the client cookie
-# (the cookie holds only an opaque session id). Filesystem backend = no extra infra;
-# on a restart sessions are simply re-created on next login. Guarded so a missing
-# dependency degrades to default cookie sessions rather than failing to boot.
-try:
-    from flask_session import Session as _ServerSession
+# (the cookie holds only an opaque, signed session id).
+#
+# Where they are stored matters. Render's disk is wiped on every deploy, so the
+# original filesystem backend signed EVERY user out on EVERY push — from any
+# session, for any feature (2026-09-21). With DATABASE_URL set (Render Postgres,
+# the same database the AI Assistant uses) sessions live in the table
+# `web_sessions` and survive deploys and restarts. Without it (local dev, tests)
+# the filesystem backend is used as before. Any failure setting up the database
+# backend falls back to filesystem, never to cookie sessions, so a Graph token
+# can never end up in a browser cookie because the database was unreachable.
+def _session_db_url() -> str:
+    url = (os.environ.get("DATABASE_URL") or "").strip()
+    for prefix in ("postgres://", "postgresql://"):   # Render hands out postgres://
+        if url.startswith(prefix):
+            return "postgresql+psycopg://" + url[len(prefix):]
+    return url
+
+
+def _use_filesystem_sessions(reason: str = "") -> None:
     app.config["SESSION_TYPE"] = "filesystem"
     app.config["SESSION_FILE_DIR"] = str(BASE / "data" / "flask_session")
+    if reason:
+        logger.warning("Session store: filesystem (%s) — sign-ins will not survive a deploy.", reason)
+
+
+try:
+    from flask_session import Session as _ServerSession
     app.config["SESSION_PERMANENT"] = True
     app.config["SESSION_USE_SIGNER"] = True
-    _ServerSession(app)
-    logger.info("Server-side sessions active (filesystem).")
+    _db_url = _session_db_url()
+    if _db_url:
+        try:
+            from flask_sqlalchemy import SQLAlchemy as _FlaskSQLAlchemy
+            app.config["SQLALCHEMY_DATABASE_URI"] = _db_url
+            app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {"pool_pre_ping": True, "pool_recycle": 280}
+            app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+            app.config["SESSION_TYPE"] = "sqlalchemy"
+            app.config["SESSION_SQLALCHEMY"] = _FlaskSQLAlchemy(app)
+            app.config["SESSION_SQLALCHEMY_TABLE"] = "web_sessions"
+            app.config["SESSION_CLEANUP_N_REQUESTS"] = 500     # prune expired rows now and then
+            _ServerSession(app)
+            logger.info("Server-side sessions active (database: web_sessions) — sign-ins survive deploys.")
+        except Exception as _db_exc:  # noqa: BLE001
+            _use_filesystem_sessions(f"database session store unavailable: {type(_db_exc).__name__}: {_db_exc}")
+            _ServerSession(app)
+    else:
+        _use_filesystem_sessions("DATABASE_URL not set")
+        _ServerSession(app)
+        logger.info("Server-side sessions active (filesystem).")
 except Exception as _sess_exc:  # pragma: no cover
     logger.warning("Flask-Session not active (%s) — using default cookie sessions.", _sess_exc)
 

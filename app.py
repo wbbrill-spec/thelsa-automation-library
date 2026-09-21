@@ -26,6 +26,11 @@ Optional (enables "Sign in with Microsoft" — needed for @thelsa.com / M365 use
 
 Optional access control:
   ALLOWED_EMAIL_DOMAINS — comma-separated (default: "thelsa.com,inflectionpointnow.com")
+  ALLOWED_EMAILS        — comma-separated individual addresses allowed in addition to
+                          the domains (e.g. a team member's personal Gmail). Exact
+                          match only — never add a public domain such as gmail.com
+                          to ALLOWED_EMAIL_DOMAINS. Kept in Render, not in this
+                          (public) repo.
 """
 
 import base64
@@ -87,10 +92,21 @@ ALLOWED_DOMAINS = {
 }
 
 
+# Individual addresses allowed on top of the domains. Read from Render so personal
+# addresses never land in this public repository.
+ALLOWED_EMAILS = {
+    e.strip().lower()
+    for e in os.environ.get("ALLOWED_EMAILS", "").replace(";", ",").split(",")
+    if "@" in e
+}
+
+
 def _email_allowed(email: str) -> bool:
-    """True only if the email's domain is on the allow-list."""
+    """True if the exact address is allowed, or its domain is on the allow-list."""
     email = (email or "").lower().strip()
-    return "@" in email and email.rsplit("@", 1)[1] in ALLOWED_DOMAINS
+    if "@" not in email:
+        return False
+    return email in ALLOWED_EMAILS or email.rsplit("@", 1)[1] in ALLOWED_DOMAINS
 
 
 def _deny_page(email: str):

@@ -167,6 +167,7 @@ td a { color: #1967d2; text-decoration: none; }
 .prov { color: #8a6d3b; border-bottom: 1px dotted #c9a227; cursor: help; }
 .corp { display: inline-block; background: #eef2ff; color: #3b4cca; border-radius: 9px;
         padding: 1px 7px; font-size: 11px; font-weight: 600; }
+.tag.lv { background: #fff4e5; color: #9a5b00; }
 .corp.unnamed { background: #f3f4f6; color: #8a8f98; font-style: italic; }
 /* demo mode — simulated data must be impossible to mistake for the real board */
 #demobar { display: none; background: repeating-linear-gradient(135deg,#7c2d12,#7c2d12 14px,#9a3412 14px,#9a3412 28px); color: #fff; font-size: 12.5px; font-weight: 700; letter-spacing: .3px; padding: 9px 28px; display: none; align-items: center; gap: 12px; }
@@ -288,6 +289,10 @@ const money = n => n == null ? "—" : "$" + Math.round(n).toLocaleString();
 const ES = {
   "Cross-Border": "Transfronterizo", "Shipments": "Envíos",
   "← Library": "← Biblioteca",
+  // ── lift vans ──
+  "lift vans": "lift vans", "gross": "bruto", "positions free": "posiciones libres",
+  "US Embassy / Consulate — ships in lift vans; Moveware volume is gross":
+    "Embajada / Consulado de EE. UU. — viaja en lift vans; el volumen en Moveware es bruto",
   // ── money / FX ──
   "Pesos": "Pesos", "USD · books": "USD · libros",
   "Revenue": "Ingresos", "revenue": "ingresos", "Invoiced": "Facturado",
@@ -573,9 +578,11 @@ function renderPlan() {
     return `<div class="load ${l.light ? "light" : ""}">
       <h4>${esc(l.lane)} ${l.fill_pct >= 85 ? `<span class="tag full">${tr("Full")}</span>` : ""}${l.light ? `<span class="tag light">${tr("Running light")}</span>` : ""}${l.cross_silo ? '<span class="tag xs">TIM + TMS</span>' : ""}${l.window_risk.length ? `<span class="tag risk">${l.window_risk.length} ${tr("window risk")}</span>` : ""}${l.anchors > 1 ? `<span class="tag anchor">${tr("2 FTL jobs share")}</span>` : ""}</h4>
       <div class="fillbar"><i class="${cls}" style="width:${pct}%"></i></div>
-      <div class="fl"><span>${l.m3} / ${l.truck_m3} m³ · ${l.fill_pct}%${l.kg ? ` · ${fmtN(l.kg)} kg` : ""}${
+      <div class="fl"><span>${l.lift_vans
+          ? `<b>${l.lift_vans} / ${l.lift_van_positions} ${tr("lift vans")}</b> · ${l.m3} m³ ${tr("gross")} · ${l.fill_pct}%${l.free_lift_van_positions ? ` · ${l.free_lift_van_positions} ${tr("positions free")}` : ""}`
+          : `${l.m3} / ${l.truck_m3} m³ · ${l.fill_pct}%`}${l.kg ? ` · ${fmtN(l.kg)} kg` : ""}${
         (l.revenue || []).length ? ` · ${tr("revenue")} ${fmtMoneyBuckets(l.revenue)}` : ""}</span><span>${l.depart_by ? tr("depart by") + " " + fmtD(l.depart_by) : ""}</span></div>
-      ${l.shipments.map(it => `<div class="row" data-id="${esc(it.id)}"><div class="who"><b>${esc(it.customer)}</b>${it.anchor ? ' <span class="tag anchor">anchor</span>' : ""}${it.corporate_account ? ` <span class="corp">${esc(it.corporate_account)}</span>` : ""}${l.window_risk.includes(it.id) ? ' <span class="tag risk">by ' + fmtD(it.deadline) + '</span>' : ""}<br><span class="rs">${esc(it.source)} · ${esc(it.agent || "")}${it.reference ? " · " + esc(it.reference) : ""} · → ${esc(it.destination || "?")}${it.service ? " · " + esc(it.service) : ""}</span></div><div class="m3">${it.m3} m³${it.revenue != null ? `<br><span class="rs">${fmtMoney(it.revenue, it.revenue_currency, it.revenue_month)}</span>` : ""}</div></div>`).join("")}
+      ${l.shipments.map(it => `<div class="row" data-id="${esc(it.id)}"><div class="who"><b>${esc(it.customer)}</b>${it.anchor ? ' <span class="tag anchor">anchor</span>' : ""}${it.corporate_account ? ` <span class="corp">${esc(it.corporate_account)}</span>` : ""}${it.us_diplomatic ? ` <span class="tag lv" title="${tr("US Embassy / Consulate — ships in lift vans; Moveware volume is gross")}">${tr("lift vans")}</span>` : ""}${l.window_risk.includes(it.id) ? ' <span class="tag risk">by ' + fmtD(it.deadline) + '</span>' : ""}<br><span class="rs">${esc(it.source)} · ${esc(it.agent || "")}${it.reference ? " · " + esc(it.reference) : ""} · → ${esc(it.destination || "?")}${it.service ? " · " + esc(it.service) : ""}</span></div><div class="m3">${it.lift_vans ? `<b>${it.lift_vans} LV</b><br><span class="rs">${it.m3} m³ ${tr("gross")}</span>` : `${it.m3} m³`}${it.revenue != null ? `<br><span class="rs">${fmtMoney(it.revenue, it.revenue_currency, it.revenue_month)}</span>` : ""}</div></div>`).join("")}
       ${(l.trucks||[]).length ? `<div class="fl" style="margin-top:6px"><span>${tr("On a truck already going")}: ${l.trucks.map(t => `<span class="tag ${t.fits?"truckfit":"truck"}" title="${esc(t.driver||"")}">${esc(t.unit)} · ${fmtD(t.date)} · ${t.spare_m3} m³ ${tr("free")}</span>`).join(" ")}</span></div>` : ""}
       ${opp && opp.advice ? `<div class="adv">${esc(opp.advice)}</div>` : ""}
     </div>`; }).join("") : `<div class="empty">${p.error ? "" : tr("No consolidatable shipments are ready right now.")}</div>`;
@@ -796,7 +803,7 @@ function openDrawer(id) {
       <b>${tr("Last progress")}</b><span>${s.last_progress_at ? esc(s.last_progress_at) + ` · ${s.days_since_progress} days ago` : "—"}</span>
       <b>${tr("Assigned")}</b><span>${esc((s.assignees || []).join(", ") || "—")}</span>
       <b>${tr("Origin → Dest.")}</b><span>${esc(s.origin || "?")} → ${esc(s.destination || "?")}${s.destination_hub !== "Unknown" ? ` (${esc(s.destination_hub)} hub)` : ""}</span>
-      <b>${tr("Volume")}</b><span>${s.lift_vans ? s.lift_vans + " lift van(s) · " : ""}${s.u_boxes ? s.u_boxes + " U-Box(es) · " : ""}${s.volume_m3 ? s.volume_m3 + " m³ · " : ""}${esc(ex.volume_text || "")}${!(s.lift_vans || s.u_boxes || s.volume_m3 || ex.volume_text) ? "—" : ""}</span>
+      <b>${tr("Volume")}</b><span>${s.is_us_diplomatic && s.lift_vans_planned ? `<b>${s.lift_vans_planned} ${tr("lift vans")}</b> (${s.volume_m3} m³ ${tr("gross")} ÷ 5.7) · ` : ""}${s.lift_vans && !s.is_us_diplomatic ? s.lift_vans + " lift van(s) · " : ""}${s.u_boxes ? s.u_boxes + " U-Box(es) · " : ""}${s.volume_m3 ? s.volume_m3 + " m³ · " : ""}${esc(ex.volume_text || "")}${!(s.lift_vans || s.u_boxes || s.volume_m3 || ex.volume_text) ? "—" : ""}</span>
       <b>${tr("Revenue")}</b><span>${s.revenue != null
           ? fmtMoney(s.revenue, s.revenue_currency, s.revenue_month)
             + (s.revenue_month ? ` <span style="color:#8a8f98;font-size:11px">· ${esc(s.revenue_month)} ${tr("rate")}`

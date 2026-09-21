@@ -70,6 +70,16 @@ U_BOX_M3 = 7.3
 CUFT_PER_M3 = 35.3147
 TIM_DELIVERY_WINDOW_DAYS = 30
 
+# US Embassy / Consulate — matched on accent-folded, lower-cased account names.
+# Needs BOTH a mission word and a US marker, so "Embajada de Canadá" is excluded.
+_US_MISSION_RE = re.compile(
+    r"(?=.*\b(embajada|embassy|consulado|consulate)\b)"
+    r"(?=.*(estados unidos|united states|\bu\.\s?s\.|\busa\b|\bus\b|\be\.?\s?u\.?\s?a\b))")
+
+
+def _fold(text: str) -> str:
+    return unicodedata.normalize("NFKD", str(text or "")).encode("ascii", "ignore").decode().lower()
+
 # Bill's rule (2026-09-09): a 53 ft freight trailer carries about 20,000 lb of
 # household goods; at a density factor of 6.5 lb/cuft that is ~3,077 cuft ≈ 88 m³
 # of usable space. The consolidation engine plans in m³ against this number and
@@ -301,6 +311,46 @@ class Shipment:
             return round(float(self.volume_m3), 2)
         return round((self.lift_vans or 0) * LIFT_VAN_M3 + (self.u_boxes or 0) * U_BOX_M3, 2)
 
+    # ── lift-van loaded shipments (Bill, 2026-09-21) ──────────────────────
+    @property
+    def is_us_diplomatic(self) -> bool:
+        """A US Embassy or US Consulate booking.
+
+        Matched on the corporate account and the bill-to — e.g.
+        "EMBAJADA DE LOS ESTADOS UNIDOS DE AMERICA",
+        "U.S. Consulate General Matamoros". Other countries' missions are NOT
+        included: the rule Bill gave is specifically about US bookings.
+        """
+        names = " | ".join(x for x in (self.corporate_account, str((self.extra or {}).get("bill_to") or "")) if x)
+        return bool(names) and bool(_US_MISSION_RE.search(_fold(names)))
+
+    @property
+    def lift_van_loaded(self) -> bool:
+        """Ships in lift vans: an explicit lift-van count, or a US diplomatic booking."""
+        return bool(self.lift_vans) or self.is_us_diplomatic
+
+    @property
+    def lift_vans_planned(self) -> int:
+        """How many lift vans this shipment occupies on a trailer.
+
+        An explicit count wins. For US Embassy / Consulate bookings Moveware
+        holds the GROSS volume including the lift vans, so the count is
+        gross m³ ÷ 5.7 (Bill, 2026-09-21), rounded to the NEAREST whole van —
+        the live files sit just above whole multiples (35 m³ → 6.14, 52 → 9.12,
+        30 → 5.26), which is what n vans measured externally looks like.
+        Rounding up instead would call every 35 m³ file 7 vans rather than 6.
+        CB_LV_ROUNDING=up switches to the conservative reading.
+        """
+        if self.lift_vans:
+            return int(self.lift_vans)
+        if not self.is_us_diplomatic or not self.volume_m3:
+            return 0
+        raw = float(self.volume_m3) / LIFT_VAN_M3
+        if (os.environ.get("CB_LV_ROUNDING") or "").strip().lower() == "up":
+            import math
+            return max(1, math.ceil(raw - 1e-9))
+        return max(1, int(raw + 0.5))
+
     def days_to_delivery(self, today: Optional[dt.date] = None) -> Optional[int]:
         if not self.delivery_date:
             return None
@@ -318,5 +368,8 @@ class Shipment:
         d["planning_m3"] = self.planning_m3
         d["is_open"] = self.is_open
         d["is_corporate"] = self.is_corporate
+        d["is_us_diplomatic"] = self.is_us_diplomatic
+        d["lift_van_loaded"] = self.lift_van_loaded
+        d["lift_vans_planned"] = self.lift_vans_planned
         d["corporate_account_named"] = self.corporate_account_named
         return d

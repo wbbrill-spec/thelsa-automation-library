@@ -37,8 +37,16 @@ import os
 from dataclasses import dataclass, field
 
 from .models import (
-    Hub, Shipment, Source, Stage, TIM_DELIVERY_WINDOW_DAYS, TRUCK_53_KG, TRUCK_53_M3,
+    LIFT_VAN_M3, TRUCK_53_LIFT_VANS, Hub, Shipment, Source, Stage, TIM_DELIVERY_WINDOW_DAYS,
+    TRUCK_53_KG, TRUCK_53_M3,
 )
+
+# A lift van is a rigid crate: it takes a whole floor position whatever its
+# contents, and a 53 ft trailer has 13 of them (Bill, 2026-09-21). So a lift-van
+# shipment consumes positions × (88 ÷ 13) m³ of trailer — not its gross m³ — and
+# 13 vans exactly fill a trailer. Loose freight still consumes its own m³, which
+# keeps mixed loads (vans plus loose) on one consistent scale.
+LV_SLOT_M3 = TRUCK_53_M3 / TRUCK_53_LIFT_VANS
 
 READY_STAGES = {Stage.GREEN_LIGHT, Stage.TO_BORDER, Stage.CUSTOMS}
 COMING_STAGES = {Stage.BOOKED, Stage.DOCS_PENDING}
@@ -80,6 +88,12 @@ class Item:
     anchor: bool = False
     reasons: list[str] = field(default_factory=list)
     sized: bool = True
+    lift_vans: int = 0                # >0 → lift-van loaded; capacity counts positions
+    space: float = 0.0                # trailer m³ this item actually consumes
+
+    def __post_init__(self):
+        if not self.space:
+            self.space = round(self.lift_vans * LV_SLOT_M3, 4) if self.lift_vans else self.m3
 
     @property
     def id(self) -> str:
@@ -103,12 +117,26 @@ class Load:
         return round(sum(i.kg for i in self.items), 1)
 
     @property
+    def space(self) -> float:
+        """Trailer capacity consumed — lift vans count as whole positions."""
+        return round(sum(i.space for i in self.items), 4)
+
+    @property
+    def lift_vans(self) -> int:
+        return sum(i.lift_vans for i in self.items)
+
+    @property
     def fill(self) -> float:
-        return round(self.m3 / TRUCK_53_M3, 3)
+        return round(self.space / TRUCK_53_M3, 3)
 
     @property
     def spare_m3(self) -> float:
-        return round(max(0.0, TRUCK_53_M3 - self.m3), 2)
+        return round(max(0.0, TRUCK_53_M3 - self.space), 2)
+
+    @property
+    def free_lift_van_positions(self) -> int:
+        # 0.05 m³ tolerance so rounding never costs a whole lift-van position.
+        return int((max(0.0, TRUCK_53_M3 - self.space) + 0.05) // LV_SLOT_M3)
 
     @property
     def depart_by(self) -> dt.date | None:
@@ -121,7 +149,7 @@ class Load:
         return max(ds) if ds else None
 
     def fits(self, it: Item) -> bool:
-        return self.m3 + it.m3 <= TRUCK_53_M3 + 1e-6 and self.kg + it.kg <= TRUCK_53_KG + 1e-6
+        return self.space + it.space <= TRUCK_53_M3 + 1e-6 and self.kg + it.kg <= TRUCK_53_KG + 1e-6
 
     def to_dict(self, today: dt.date) -> dict:
         srcs = {s.value: sum(1 for i in self.items if i.shipment.source is s) for s in Source}
@@ -129,6 +157,8 @@ class Load:
         return {
             "lane": self.lane, "direction": self.direction, "hub": self.hub,
             "truck_m3": TRUCK_53_M3, "m3": self.m3, "kg": self.kg, "fill_pct": round(self.fill * 100),
+            "space_m3": round(self.space, 2), "lift_vans": self.lift_vans, "lift_van_positions": TRUCK_53_LIFT_VANS,
+            "free_lift_van_positions": self.free_lift_van_positions,
             "spare_m3": self.spare_m3, "light": self.fill < MIN_FILL_TO_SUGGEST,
             "anchor": self.anchor.id if self.anchor else None,
             "anchors": sum(1 for i in self.items if i.anchor),
@@ -144,6 +174,8 @@ class Load:
                 "id": i.id, "source": i.shipment.source.value, "customer": i.shipment.customer_name,
                 "agent": i.shipment.agent, "reference": i.shipment.reference_number,
                 "destination": i.shipment.destination, "m3": i.m3, "kg": i.kg,
+                "lift_vans": i.lift_vans, "space_m3": round(i.space, 2),
+                "us_diplomatic": i.shipment.is_us_diplomatic,
                 "stage": i.shipment.stage.value, "ready": i.ready,
                 "ready_date": i.ready_date.isoformat() if i.ready_date else None,
                 "deadline": i.deadline.isoformat() if i.deadline else None,
@@ -266,12 +298,27 @@ def make_item(s: Shipment, today: dt.date) -> Item | None:
             reasons.append("no uplift date in Moveware")
         elif not ready:
             reasons.append(f"uplift scheduled {uplift.isoformat()} (beyond the {HORIZON_DAYS}-day horizon)")
-    anchor = _service(s) in FULL_SERVICES or m3 >= TRUCK_53_M3 * ANCHOR_FRACTION
+    # Position-based capacity is applied to US Embassy / Consulate bookings — the
+    # rule Bill gave (2026-09-21). TIM lift-van / U-box counts keep the volume
+    # conversion they have always used; extending positions to them is a
+    # separate decision, not something to change silently here.
+    lift_vans = s.lift_vans_planned if (s.is_us_diplomatic and m3 > 0) else 0
+    space = round(lift_vans * LV_SLOT_M3, 4) if lift_vans else m3
+    if lift_vans:
+        why = (f"{m3} m³ gross ÷ {LIFT_VAN_M3}" if s.is_us_diplomatic and not s.lift_vans
+               else "lift-van count on record")
+        reasons.append(f"{lift_vans} lift van{'s' if lift_vans != 1 else ''} ({why}) — "
+                       f"takes {lift_vans} of {TRUCK_53_LIFT_VANS} trailer positions")
+        if lift_vans > TRUCK_53_LIFT_VANS:
+            reasons.append(f"more than {TRUCK_53_LIFT_VANS} lift vans — needs more than one trailer")
+    anchor = _service(s) in FULL_SERVICES or space >= TRUCK_53_M3 * ANCHOR_FRACTION
     if anchor:
         reasons.append("full-truck job — anchors its own trailer" if _service(s) in FULL_SERVICES
-                       else f"{m3} m³ is ≥ {int(ANCHOR_FRACTION * 100)}% of a trailer — anchors its own trailer")
+                       else (f"{lift_vans} lift vans is ≥ {int(ANCHOR_FRACTION * 100)}% of a trailer — anchors its own trailer"
+                             if lift_vans else
+                             f"{m3} m³ is ≥ {int(ANCHOR_FRACTION * 100)}% of a trailer — anchors its own trailer"))
     it = Item(shipment=s, m3=m3, kg=kg, ready=ready, ready_date=ready_date, deadline=deadline,
-              anchor=anchor, reasons=reasons)
+              anchor=anchor, reasons=reasons, lift_vans=lift_vans, space=space)
     it.sized = m3 > 0
     return it
 
@@ -280,7 +327,7 @@ def make_item(s: Shipment, today: dt.date) -> Item | None:
 def _urgency(it: Item, today: dt.date):
     """Sort key: soonest deadline first, then biggest volume first."""
     dl = (it.deadline - today).days if it.deadline else 10_000
-    return (dl, -it.m3)
+    return (dl, -it.space)
 
 
 def pack_lane(lane: str, direction: str, hub: str, items: list[Item], today: dt.date) -> list[Load]:
@@ -290,8 +337,8 @@ def pack_lane(lane: str, direction: str, hub: str, items: list[Item], today: dt.
     # Anchors (FTL / half-trailer jobs) open trailers — but two anchors that fit
     # together share one: that is exactly the "trailer running light" case Bill
     # wants surfaced (two 35 m³ FTL exports on the same lane = one 70 m³ truck).
-    for a in sorted([i for i in items if i.anchor], key=lambda i: (_urgency(i, today), -i.m3)):
-        target = next((ld for ld in sorted(loads, key=lambda l: -l.m3) if ld.fits(a)), None)
+    for a in sorted([i for i in items if i.anchor], key=lambda i: (_urgency(i, today), -i.space)):
+        target = next((ld for ld in sorted(loads, key=lambda l: -l.space) if ld.fits(a)), None)
         if target is None:
             loads.append(Load(lane=lane, direction=direction, hub=hub, items=[a], anchor=a))
         else:
@@ -302,7 +349,7 @@ def pack_lane(lane: str, direction: str, hub: str, items: list[Item], today: dt.
         target = None
         # Prefer the fullest trailer that still fits (best-fit), so light trailers
         # are topped up before a new one is opened.
-        for ld in sorted(loads, key=lambda l: -l.m3):
+        for ld in sorted(loads, key=lambda l: -l.space):
             if ld.fits(it):
                 target = ld
                 break
@@ -339,12 +386,12 @@ def plan(shipments: list[Shipment], today: dt.date | None = None) -> dict:
     for ld in loads:
         if ld.fill >= MIN_FILL_TO_SUGGEST:
             continue
-        soon = sorted(coming_by_lane.get(ld.lane, []), key=lambda i: (i.ready_date or dt.date.max, -i.m3))
-        addable, m3 = [], 0.0
+        soon = sorted(coming_by_lane.get(ld.lane, []), key=lambda i: (i.ready_date or dt.date.max, -i.space))
+        addable, m3 = [], 0.0          # m3 here is trailer SPACE added (lift vans as positions)
         for it in soon:
-            if m3 + it.m3 <= ld.spare_m3:
+            if m3 + it.space <= ld.spare_m3 + 1e-6:
                 addable.append(it)
-                m3 += it.m3
+                m3 += it.space
         opportunities.append({
             "lane": ld.lane, "hub": ld.hub, "direction": ld.direction,
             "trailer_m3": ld.m3, "fill_pct": round(ld.fill * 100), "spare_m3": ld.spare_m3,
@@ -353,11 +400,11 @@ def plan(shipments: list[Shipment], today: dt.date | None = None) -> dict:
             "coming": [{"id": i.id, "customer": i.shipment.customer_name, "source": i.shipment.source.value,
                         "m3": i.m3, "ready_date": i.ready_date.isoformat() if i.ready_date else None,
                         "why_not_yet": i.reasons} for i in addable],
-            "would_reach_pct": round((ld.m3 + m3) / TRUCK_53_M3 * 100),
+            "would_reach_pct": round((ld.space + m3) / TRUCK_53_M3 * 100),
             "advice": _advice(ld, addable, m3, today),
         })
 
-    loads_sorted = sorted(loads, key=lambda l: (-(l.anchor is not None), l.depart_by or dt.date.max, -l.m3))
+    loads_sorted = sorted(loads, key=lambda l: (-(l.anchor is not None), l.depart_by or dt.date.max, -l.space))
     out_loads = [l.to_dict(today) for l in loads_sorted]
     return {
         "as_of": today.isoformat(), "truck_m3": TRUCK_53_M3, "truck_kg": TRUCK_53_KG,
@@ -390,15 +437,30 @@ def _group_ids(items: list[Item]) -> dict:
     return out
 
 
+def _used(ld: Load) -> str:
+    if ld.lift_vans:
+        loose = round(ld.space - ld.lift_vans * LV_SLOT_M3, 1)
+        return (f"{ld.lift_vans} of {TRUCK_53_LIFT_VANS} lift van positions"
+                + (f" plus {loose} m³ loose" if loose > 0.05 else ""))
+    return f"{ld.m3} m³ of {TRUCK_53_M3}"
+
+
+def _free(ld: Load) -> str:
+    if ld.lift_vans:
+        n = ld.free_lift_van_positions
+        return f"{n} lift van position{'s' if n != 1 else ''} ({ld.spare_m3} m³)"
+    return f"{ld.spare_m3} m³"
+
+
 def _advice(ld: Load, addable: list[Item], add_m3: float, today: dt.date) -> str:
     dep = f" It must leave by {ld.depart_by.isoformat()} to protect a delivery window." if ld.depart_by else ""
     if ld.anchor and not addable:
         return (f"Trailer for {ld.anchor.shipment.customer_name} is running at {round(ld.fill*100)}% "
-                f"({ld.m3} m³ of {TRUCK_53_M3}); {ld.spare_m3} m³ is free but nothing else on this lane is ready.{dep}")
+                f"({_used(ld)}); {_free(ld)} is free but nothing else on this lane is ready.{dep}")
     if addable:
         names = ", ".join(f"{i.shipment.customer_name} ({i.m3} m³, {i.ready_date.isoformat() if i.ready_date else 'date TBC'})" for i in addable[:4])
-        return (f"{round(ld.fill*100)}% full with {ld.spare_m3} m³ free. Waiting for {names} would take it to "
-                f"{round((ld.m3 + add_m3) / TRUCK_53_M3 * 100)}%.{dep}")
+        return (f"{round(ld.fill*100)}% full with {_free(ld)} free. Waiting for {names} would take it to "
+                f"{round((ld.space + add_m3) / TRUCK_53_M3 * 100)}%.{dep}")
     return f"Only {round(ld.fill*100)}% full and nothing else is coming on this lane — send direct or hold for new bookings.{dep}"
 
 
@@ -416,12 +478,15 @@ def email_body(p: dict, site: str = "https://thelsa.inflectionpointnow.com/cross
     for n, ld in enumerate(p["loads"], 1):
         tag = " · LIGHT" if ld["light"] else (" · FULL" if ld["fill_pct"] >= 85 else "")
         xs = " · TIM + TMS" if ld["cross_silo"] else ""
-        L.append(f"TRAILER {n} — {ld['lane']} — {ld['m3']} m³ ({ld['fill_pct']}%){tag}{xs}")
+        size = (f"{ld['lift_vans']} of {ld['lift_van_positions']} lift van positions · {ld['m3']} m³ gross"
+                if ld.get("lift_vans") else f"{ld['m3']} m³")
+        L.append(f"TRAILER {n} — {ld['lane']} — {size} ({ld['fill_pct']}%){tag}{xs}")
         if ld["depart_by"]:
             L.append(f"  Depart by {ld['depart_by']} (earliest delivery-window deadline on board)")
         for it in ld["shipments"]:
             flag = " *WINDOW RISK*" if it["id"] in ld["window_risk"] else ""
             L.append(f"  - [{it['source']}] {it['customer']} — {it['agent'] or ''} {it['reference'] or ''} → {it['destination'] or '?'} · {it['m3']} m³"
+                     + (f" · {it['lift_vans']} lift van{'s' if it['lift_vans'] != 1 else ''}" if it.get("lift_vans") else "")
                      + (f" · {it['service']}" if it["service"] else "") + (" · ANCHOR" if it["anchor"] else "") + flag)
         L.append("")
     if p["opportunities"]:

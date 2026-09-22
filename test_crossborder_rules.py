@@ -62,7 +62,7 @@ def test_show_all_reports_without_removing(monkeypatch):
 
 # ── D3: door-to-door moves ship direct ──────────────────────────────────────
 def test_door_to_door_moves_are_never_offered_for_consolidation(monkeypatch):
-    dtd = ship(1, fmt="DTD")
+    dtd = ship(1, extra={"service": "Door to Door Import"})
     assert dtd.is_door_to_door
     assert "door-to-door" in rules.consolidation_block(dtd)
     assert engine.make_item(dtd, TODAY) is None
@@ -70,13 +70,54 @@ def test_door_to_door_moves_are_never_offered_for_consolidation(monkeypatch):
     kept, _ = rules.board_exclusions([dtd])
     assert len(kept) == 1
     monkeypatch.setenv("CB_CONSOLIDATE_DTD", "1")
-    assert engine.make_item(ship(1, fmt="DTD"), TODAY) is not None
+    assert engine.make_item(ship(1, extra={"service": "Door to Door Import"}), TODAY) is not None
 
 
 def test_a_source_that_spells_door_to_door_out_is_recognised():
     assert ship(1, fmt="", extra={"service": "Door to Door Import"}).is_door_to_door
     assert ship(2, fmt="", extra={"service": "Puerta a puerta"}).is_door_to_door
     assert not ship(3, fmt="DA").is_door_to_door
+
+
+def test_the_clickup_checklist_length_no_longer_decides_door_to_door():
+    """Fernanda, 23 Sep: the finished import template is the 13-step one.
+
+    The dashboard used to read a 17-step checklist as "DTD Impo" and keep it
+    out of the consolidation suggestions. On the live workspace that matched
+    exactly two lists — an export bound for Los Angeles and one old Intermove
+    file — and no door-to-door move at all. A checklist length is not a
+    service type.
+    """
+    assert not ship(1, fmt="DTD").is_door_to_door
+    assert not ship(2, fmt="DA").is_door_to_door
+    assert engine.make_item(ship(3, fmt="DTD"), TODAY) is not None
+
+
+def test_a_clickup_file_bound_for_the_united_states_is_an_export():
+    """The workspace holds the occasional export among the TIM imports.
+
+    "EXPO - Brad Sutton - TIM-54108-26" is bound for Los Angeles, CA, and was
+    being planned onto the McAllen -> Monterrey crossing trailer — backwards.
+    The destination settles it; a Mexican destination is never mistaken for
+    one, which is what the Hub check guards.
+    """
+    us = ship(1, "Brad Sutton", hub=Hub.UNKNOWN, direction=None)
+    us.destination, us.destination_hub = "Los Angeles, CA", Hub.UNKNOWN
+    us.extra = {"method": "ROAD", "service": "LTL"}
+    assert engine._direction(us) == "export"
+    assert engine.lane_for(us)[0] == "Export → California"
+
+    for mx in ("Los Cabos", "Monterrey, NL", "Guadalajara, Jal.", ""):
+        s2 = ship(2, "Mexicano", hub=Hub.UNKNOWN, direction=None)
+        s2.destination, s2.destination_hub = mx, Hub.UNKNOWN
+        s2.extra = {"method": "ROAD", "service": "LTL"}
+        assert engine._direction(s2) == "import", mx
+
+
+def test_a_moveware_direction_still_wins_over_the_destination():
+    s = ship(1, source=Source.TMS, hub=Hub.UNKNOWN, direction="import")
+    s.destination, s.destination_hub = "Houston, TX", Hub.UNKNOWN
+    assert engine._direction(s) == "import"
 
 
 # ── D6: Fernanda's consolidation note ───────────────────────────────────────

@@ -49,8 +49,24 @@ class Hub(str, Enum):
     GUADALAJARA = "Guadalajara"
     MERIDA = "Mérida"
     QUERETARO = "Querétaro"
+    SAN_LUIS_POTOSI = "San Luis Potosí"
     TORREON = "Torreón"
     UNKNOWN = "Unknown"
+
+
+class Leg(str, Enum):
+    """Which leg of the journey a shipment is planned on (Edgar/Fernanda, 22 Sep).
+
+    An import is TWO truck movements, not one: everyone's freight crosses the
+    border together on one trailer (McAllen → Monterrey), and only then splits
+    onto the trucks going to each city. Planning them as one movement — which
+    the board did until 2026-09-22 — invents a separate trailer per destination
+    city and misses the crossing consolidation entirely.
+    """
+    CROSSING = "crossing"     # US warehouse → Mexican entry hub, everyone together
+    ONWARD = "onward"         # entry hub → the customer's city
+    EXPORT = "export"         # Mexico → US/Canada
+    DOMESTIC = "domestic"     # inside Mexico (TRS / Plan de Viajes)
 
 
 # ── Capacity constants (spec §5, from the logistics training) ───────────────────
@@ -59,6 +75,12 @@ TRUCK_53_LIFT_VANS = 13
 TRUCK_53_U_BOXES = 10
 TRUCK_36_LIFT_VANS = 7
 TRUCK_36_U_BOXES = 3
+# A Thelsa-owned truck is NOT a 53 ft trailer. Fernanda (22 Sep): "about 75 m³,
+# but only about three U-Boxes fit" — the boxes are tall and rigid, so the limit
+# is the floor plan, not the volume. That is why she hires a 53 ft trailer for a
+# U-Box load. CB_THELSA_TRUCK_U_BOXES overrides once the team measures it.
+THELSA_TRUCK_U_BOXES = int(os.environ.get("CB_THELSA_TRUCK_U_BOXES", str(TRUCK_36_U_BOXES)) or TRUCK_36_U_BOXES)
+THELSA_TRUCK_M3 = float(os.environ.get("CB_THELSA_TRUCK_M3", "75") or 75)
 # 13 lift vans ≡ 10 U-boxes on the baseline truck → one U-box takes 1.3 slots.
 U_BOX_LIFT_VAN_EQUIV = TRUCK_53_LIFT_VANS / TRUCK_53_U_BOXES
 # Usable volume of one lift van (~87" x 55" x 87" ≈ 200 cuft). Used to turn a
@@ -108,7 +130,14 @@ _HUB_CITIES: dict[Hub, list[str]] = {
         "monterrey", "san pedro garza garcia", "san pedro", "apodaca", "guadalupe",
         "santa catarina", "escobedo", "san nicolas", "nuevo leon", "saltillo",
         "ramos arizpe", "reynosa", "matamoros", "nuevo laredo", "tamaulipas",
-        "ciudad victoria", "tampico", "san luis potosi", "coahuila", "monclova",
+        "ciudad victoria", "tampico", "coahuila", "monclova",
+    ],
+    # San Luis Potosí used to sit in the Monterrey list, which made the board
+    # read it as Monterrey freight. It is not: it is a DROP ON THE WAY to Mexico
+    # City (Bill/Fernanda, 22 Sep). It gets its own hub so the board tells the
+    # truth, and DETOUR_STOPS below is what puts it on the CDMX trailer.
+    Hub.SAN_LUIS_POTOSI: [
+        "san luis potosi", "slp", "soledad de graciano sanchez", "matehuala",
     ],
     Hub.MEXICO_CITY: [
         "mexico city", "ciudad de mexico", "cdmx", "distrito federal", "df",
@@ -165,6 +194,34 @@ def hub_for_destination(destination: Optional[str]) -> Hub:
         if f" {tok} " in text:
             return hub
     return Hub.UNKNOWN
+
+
+# ── the border crossing and the corridors out of it ─────────────────────────────
+# Fernanda's import routine (training 21 Sep, confirmed with Edgar 22 Sep):
+# collect everyone's freight at the McAllen warehouse, cross it to Monterrey on
+# ONE trailer, then split it onto the trucks running to each city.
+CROSSING_ORIGIN = os.environ.get("CB_CROSSING_ORIGIN", "McAllen").strip() or "McAllen"
+ENTRY_HUB = Hub.MONTERREY
+
+# Cities that are a STOP on a corridor rather than a destination of their own.
+# Fernanda asks the supplier for a drop in San Luis Potosí or Querétaro on the
+# Monterrey → Mexico City run, so that freight belongs on the CDMX trailer and
+# must never open a trailer of its own.
+DETOUR_STOPS: dict[Hub, dict] = {
+    Hub.SAN_LUIS_POTOSI: {"stop": "San Luis Potosí", "corridor_to": Hub.MEXICO_CITY},
+    Hub.QUERETARO: {"stop": "Querétaro", "corridor_to": Hub.MEXICO_CITY},
+}
+
+
+def detour_for_hub(hub: Hub) -> Optional[dict]:
+    """{'stop', 'corridor_to'} when this hub is a drop on a longer run, else None.
+
+    CB_NO_DETOURS=1 turns the behaviour off and gives every hub its own trailer
+    again — the escape hatch if the team decides a stop is not reliable.
+    """
+    if os.environ.get("CB_NO_DETOURS", "") in ("1", "true", "yes"):
+        return None
+    return DETOUR_STOPS.get(hub)
 
 
 # ── Unit helpers ────────────────────────────────────────────────────────────────
@@ -379,6 +436,58 @@ class Shipment:
             return max(1, math.ceil(raw - 1e-9))
         return max(1, int(raw + 0.5))
 
+    # ── where it is on the journey (Edgar/Fernanda, 2026-09-22) ───────────
+    @property
+    def has_crossed(self) -> bool:
+        """True once the freight is over the border and inside Mexico.
+
+        This is the hinge of the two-stage import plan: before it, the shipment
+        belongs on the combined McAllen → Monterrey crossing trailer; after it,
+        on a truck from the hub to the customer's city.
+        """
+        if self.milestones.get("crossed") or self.milestones.get("at_hub"):
+            return True
+        return self.stage in (Stage.AT_HUB, Stage.ONWARD, Stage.OUT_FOR_DELIVERY,
+                              Stage.DELIVERED, Stage.CLOSED)
+
+    # ── door-to-door loose-loaded moves (Fernanda, 2026-09-22) ────────────
+    @property
+    def is_door_to_door(self) -> bool:
+        """A door-to-door loose-loaded move — shipped direct, never consolidated.
+
+        These are private moves of roughly 8 m³ that already fill most of a
+        truck, and Fernanda's rule is "there is no point making them wait".
+        In ClickUp they are the 17-step "DTD Impo" checklist, which `tim.py`
+        records as process_format "DTD"; a source that spells it out in a
+        service or process field is honoured too.
+        """
+        if str(self.process_format or "").strip().upper() == "DTD":
+            return True
+        text = _fold(" ".join(str((self.extra or {}).get(k) or "")
+                              for k in ("service", "process", "process_format", "service_description")))
+        return bool(re.search(r"\bdtd\b|door\s*to\s*door|puerta\s*a\s*puerta", text))
+
+    # ── consolidation grouping (Fernanda's ClickUp note, 2026-09-22) ──────
+    @property
+    def consolidation(self) -> dict:
+        """Fernanda's note about this shipment, parsed — see grouping.py."""
+        g = (self.extra or {}).get("consolidation")
+        return g if isinstance(g, dict) else {}
+
+    @property
+    def group_name(self) -> str:
+        return str(self.consolidation.get("group") or "")
+
+    @property
+    def is_grouped(self) -> bool:
+        """Already put on a truck with other files — off the suggestion list."""
+        return bool(self.consolidation.get("grouped"))
+
+    @property
+    def do_not_consolidate(self) -> bool:
+        """Marked urgent / ships alone / moving with another carrier."""
+        return bool(self.consolidation.get("do_not_consolidate"))
+
     def days_to_delivery(self, today: Optional[dt.date] = None) -> Optional[int]:
         if not self.delivery_date:
             return None
@@ -402,4 +511,10 @@ class Shipment:
         d["lift_van_loaded"] = self.lift_van_loaded
         d["lift_vans_planned"] = self.lift_vans_planned
         d["corporate_account_named"] = self.corporate_account_named
+        d["has_crossed"] = self.has_crossed
+        d["is_door_to_door"] = self.is_door_to_door
+        d["consolidation"] = self.consolidation
+        d["group_name"] = self.group_name
+        d["is_grouped"] = self.is_grouped
+        d["do_not_consolidate"] = self.do_not_consolidate
         return d

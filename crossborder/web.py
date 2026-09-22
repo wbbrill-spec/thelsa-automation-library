@@ -17,7 +17,13 @@ Routes:
   /crossborder                     the dashboard page (dashboard.py).
   /crossborder/api/shipments       JSON: normalized shipments + status +
                                    diagnostics (cached 5 min; ?refresh=1 to force).
-  /crossborder/api/plan            JSON: the consolidation engine's suggested loads.
+  /crossborder/api/plan            JSON: the consolidation engine's suggested loads,
+                                   in two stages (border crossing, then onward),
+                                   plus consolidations a coordinator already made.
+  /crossborder/api/plan-history    JSON: Plan de Viajes services that vanished or
+                                   changed date since the last republication.
+  /crossborder/api/rules           JSON: which operational rules are live and what
+                                   they are currently excluding (open this in training).
   /crossborder/plan/draft  (POST)  create the suggested-load email as a DRAFT in
                                    the Thelsa mailbox (never sends). Also runs
                                    daily at PLAN_EMAIL_HOUR when PLAN_EMAIL_ENABLED=1.
@@ -37,7 +43,8 @@ import time
 
 from flask import Blueprint, jsonify, redirect, request, session, url_for
 
-from . import alerts, clickup, demo, engine, fx, remisiones, sit, tim, tms
+from . import (alerts, clickup, demo, engine, fx, grouping, models, plan_history,
+               remisiones, rules, sit, tim, tms)
 from .dashboard import DASHBOARD_HTML
 from .models import Source
 
@@ -51,21 +58,10 @@ _CACHE_TTL = int(os.environ.get("CROSSBORDER_CACHE_TTL", "300") or 300)
 _LOCK = threading.Lock()
 
 
-def exclude_us_diplomatic(shipments):
-    """Drop US Embassy / US Consulate shipments from the board (Bill, 2026-09-22).
-
-    Decided with Edgar, Fernanda and Sara: the Embassy pays for a dedicated,
-    sealed 53' trailer, does its own consolidation and uses its own customs
-    broker — the team never consolidates this freight, so it has no place on
-    the board, the load planner, the alerts or the revenue view. Detection is
-    Shipment.is_us_diplomatic (corporate account or bill-to names a US
-    Embassy / Consulate). CROSSBORDER_SHOW_DIPLOMATIC=1 brings them back.
-    Returns (kept, number removed).
-    """
-    if os.environ.get("CROSSBORDER_SHOW_DIPLOMATIC", "") in ("1", "true", "yes"):
-        return list(shipments), 0
-    kept = [s for s in shipments if not s.is_us_diplomatic]
-    return kept, len(shipments) - len(kept)
+# The board-level exclusion rules live in rules.py, where the team's decisions
+# are written down together. Kept here as a name because the rest of this module
+# and its tests call it.
+exclude_us_diplomatic = rules.exclude_us_diplomatic
 
 
 def _refresh_worker(include_completed: bool, prog: dict):
@@ -91,6 +87,12 @@ def _refresh_worker(include_completed: bool, prog: dict):
             tms_ships, excluded = exclude_us_diplomatic(tms_ships)
             shipments = shipments + tms_ships
             diag["tms"] = {**tdiag, "excluded_us_diplomatic": excluded}
+        # Everything else the team asked to keep off the board — today that is
+        # commercial / new-furniture freight (Edgar, 22 Sep). Applied to both
+        # sources at once, and always reported so a drop in the count is never
+        # a mystery.
+        shipments, excl = rules.board_exclusions(shipments)
+        diag["excluded"] = excl
         # SIT "Plan de Viajes" — the Mexican onward leg (truck, driver, dates)
         # and the real trucks the engine can offer. A SIT failure must never
         # cost us the board, same rule as Moveware and Remisiones.
@@ -216,6 +218,15 @@ def _sit_cached():
         if age is not None and age < _SIT_TTL:
             return list(_SIT_CACHE["trips"]), dict(_SIT_CACHE["fleet"]), {**_SIT_CACHE["diag"], "cache_age_s": int(age)}
     trips, fleet, info = sit.load_plan()
+    if trips:
+        # Remember what this republication of the plan said, so the board can
+        # show a service that later vanishes or moves — the thing the team
+        # currently keeps screenshots to prove (training, 21 Sep).
+        try:
+            info["history"] = plan_history.record(trips, workbook=str(info.get("file") or ""))
+        except Exception as exc:  # noqa: BLE001 — a record-keeping nicety, never load-bearing
+            log.warning("plan history failed: %s", exc)
+            info["history"] = {"error": f"{type(exc).__name__}: {exc}"}
     with _LOCK:
         # Keep the last good plan rather than blanking the onward leg on a blip.
         if trips or not _SIT_CACHE["trips"]:
@@ -406,6 +417,8 @@ def api_shipments():
     return jsonify({"count": len(shipments), "status": status, "fx": fx.describe(),
                     "diagnostics": {"remisiones": diag.get("remisiones"), "requests_made": diag.get("requests_made"),
                                     "errors": diag.get("errors"), "demo": diag.get("demo"), "sit": diag.get("sit"),
+                                    "excluded": diag.get("excluded"),
+                                    "consolidation_notes": diag.get("consolidation_notes"),
                                     "tms": {k: v for k, v in (diag.get("tms") or {}).items()
                                             if k in ("env", "count", "error", "rows_seen", "cross_border", "by_direction",
                                                      "details_fetched", "requests_made", "by_stage", "excluded_us_diplomatic",
@@ -451,6 +464,59 @@ def api_trucks():
         diag = dict(_SIT_CACHE.get("diag") or {})
     return jsonify({"count": len(trucks), "spare_by_hub": sit.spare_by_hub(trucks),
                     "diagnostics": diag, "trucks": trucks})
+
+
+@crossborder_bp.route("/crossborder/api/plan-history")
+@_login_required
+def api_plan_history():
+    """What changed in the Plan de Viajes since the last republication.
+
+    Services that vanish or move date are what the team screenshots today.
+    ?kind=vanished,date_changed narrows it; ?limit=N caps the list.
+    """
+    kinds = [k.strip() for k in (request.args.get("kind") or "").split(",") if k.strip()]
+    try:
+        limit = max(1, min(int(request.args.get("limit", "50") or 50), 500))
+    except ValueError:
+        limit = 50
+    try:
+        out = plan_history.history(limit=limit, kinds=kinds or None)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("plan history read failed")
+        return jsonify({"error": f"{type(exc).__name__}: {exc}", "events": []}), 200
+    return jsonify(out)
+
+
+@crossborder_bp.route("/crossborder/api/rules")
+@_login_required
+def api_rules():
+    """Which operational rules are live right now, and what they are doing.
+
+    This is the page to open in a training session: it says in one place what
+    the dashboard leaves out and why, rather than leaving the team to infer it
+    from a shipment count.
+    """
+    shipments, diag, status = load_shipments()
+    return jsonify({
+        "board_exclusions": diag.get("excluded") or {},
+        "labels": rules.EXCLUSION_LABELS,
+        "commercial_patterns": rules.commercial_patterns(),
+        "consolidation_note_format": grouping.SUGGESTED_FORMAT,
+        "settings": {
+            "entry_hub": engine.ENTRY_HUB.value,
+            "crossing_origin": engine.CROSSING_ORIGIN,
+            "detour_stops": {h.value: d["stop"] for h, d in models.DETOUR_STOPS.items()},
+            "thelsa_truck_u_boxes": engine.THELSA_TRUCK_U_BOXES,
+            "trailer_u_boxes": engine.TRUCK_53_U_BOXES,
+            "trailer_lift_vans": engine.TRUCK_53_LIFT_VANS,
+            "exports_ship_alone": not engine._hold_exports(),
+            "consolidate_door_to_door": os.environ.get("CB_CONSOLIDATE_DTD", "") in ("1", "true", "yes"),
+            "show_us_diplomatic": os.environ.get("CROSSBORDER_SHOW_DIPLOMATIC", "") in ("1", "true", "yes"),
+        },
+        "consolidation_notes": (diag.get("consolidation_notes")
+                                or (diag.get("tim") or {}).get("consolidation_notes")),
+        "status": status,
+    })
 
 
 @crossborder_bp.route("/crossborder/api/invoices/<job_id>")

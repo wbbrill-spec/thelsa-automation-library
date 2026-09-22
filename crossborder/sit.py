@@ -64,7 +64,8 @@ import unicodedata
 from dataclasses import dataclass, field
 from typing import Optional
 
-from .models import Hub, Source, hub_for_destination, norm_text, parse_date, to_number
+from .models import (THELSA_TRUCK_U_BOXES, Hub, Source, hub_for_destination, norm_text,
+                     parse_date, to_number)
 
 PLAN_SHEET = "Plan de Viajes"
 FLEET_SHEET = "Programación Unidades"
@@ -84,9 +85,42 @@ FIRST_DATA_ROW = 4
 # either end. Normalized (accent- and space-stripped) before lookup, which also
 # folds the spelling variants operations types by hand: TRAN F COMP /
 # TRAN FCOMP / TRANS F COMP / TRAN FCOM, DESEMPAQUE / DESEPAQUE.
-LINE_HAUL_TYPES = {"for", "cargafor", "tranfcomp", "transfcomp", "tranfcom",
-                   "entfcomp", "intc", "intd", "loc"}
+#
+# Which of these count for consolidation (Fernanda, 22 Sep 2026)
+# --------------------------------------------------------------
+# FORÁNEO is long distance — one side of the country to the other (Monterrey →
+# Mexico City, Guadalajara → Veracruz, Mérida → Mexico City). RADIALES are the
+# 2–3 hour runs out of a city (Mexico City → Puebla); they are NOT local, and
+# the team consolidates them too. LOCAL moves do not count: a move across town
+# is not a truck anyone else's freight can join.
+#
+# The codes below are read off the 2026-09-11 workbook plus the names Fernanda
+# used. Worth re-checking against a live plan — CB_SIT_LOCAL_TYPES and
+# CB_SIT_LINE_HAUL_EXTRA adjust either set without a code change.
+FORANEO_TYPES = {"for", "cargafor", "foraneo", "foraneos"}
+RADIAL_TYPES = {"rad", "radial", "radiales", "radialc", "radiald"}
+TRANSFER_TYPES = {"tranfcomp", "transfcomp", "tranfcom", "entfcomp", "intc", "intd"}
+LOCAL_TYPES = {"loc", "local", "locales"}
+LINE_HAUL_TYPES = FORANEO_TYPES | RADIAL_TYPES | TRANSFER_TYPES
+# Every movement code, local included — used only to recognise the TIPO column
+# when reading the fleet sheet, never to decide what can be consolidated.
+ALL_MOVEMENT_TYPES = LINE_HAUL_TYPES | LOCAL_TYPES
 SERVICE_TYPES = {"desempaque", "desepaque", "huacal", "suelto", "muebles"}
+
+
+def _env_set(name: str) -> set:
+    raw = (os.environ.get(name) or "").replace(";", ",")
+    return {re.sub(r"[^a-z]", "", norm_text(x)) for x in raw.split(",") if x.strip()}
+
+
+def local_types() -> set:
+    return _env_set("CB_SIT_LOCAL_TYPES") or LOCAL_TYPES
+
+
+def consolidatable_types() -> set:
+    """Foráneo + radiales (+ transfers), minus anything named as local."""
+    return (LINE_HAUL_TYPES | _env_set("CB_SIT_LINE_HAUL_EXTRA")) - local_types()
+
 
 DEFAULT_UNIT_CAP_M3 = 85.0
 
@@ -152,7 +186,28 @@ class Trip:
 
     @property
     def is_line_haul(self) -> bool:
-        return _type_key(self.tipo) in LINE_HAUL_TYPES
+        """A truck movement other people's freight could ride on.
+
+        Foráneo and radiales both count (Fernanda, 22 Sep); local moves do not.
+        """
+        return _type_key(self.tipo) in consolidatable_types()
+
+    @property
+    def is_local(self) -> bool:
+        return _type_key(self.tipo) in local_types()
+
+    @property
+    def service_class(self) -> str:
+        k = _type_key(self.tipo)
+        if k in FORANEO_TYPES:
+            return "foraneo"
+        if k in RADIAL_TYPES:
+            return "radial"
+        if k in TRANSFER_TYPES:
+            return "transfer"
+        if k in local_types():
+            return "local"
+        return "other"
 
     @property
     def is_thelsa(self) -> bool:
@@ -173,7 +228,7 @@ class Trip:
             "unload_date": self.unload_date.isoformat() if self.unload_date else None,
             "m3": self.m3, "branch": self.branch, "dest_branch": self.dest_branch,
             "unit": self.unit, "driver": self.driver, "notes": self.notes,
-            "line_haul": self.is_line_haul,
+            "line_haul": self.is_line_haul, "service_class": self.service_class,
         }
 
 
@@ -303,7 +358,7 @@ def parse_fleet_sheet(rows: list[list]) -> dict[str, Unit]:
         # blank, so identify the type first and take the plaza from what's left
         # (MTY, GDL, VHSA, "MC. ALLEN" …), never the eco code or a number.
         tail = cells[1:]
-        tipo = next((c for c in tail if _type_key(c) in LINE_HAUL_TYPES), "")
+        tipo = next((c for c in tail if _type_key(c) in ALL_MOVEMENT_TYPES), "")
         plaza = next((c for c in tail
                       if c != tipo and c.upper() != eco.upper()
                       and not _cap(c) and re.fullmatch(r"[A-Za-z. ]{2,12}", c)), "")
@@ -590,6 +645,14 @@ def offer_trucks(loads: list[dict], trucks: list[dict],
     for ld in loads:
         hub = ld.get("hub")
         depart = parse_date(ld.get("depart_by"))
+        boxes = int(ld.get("u_boxes") or 0)
+        # A Thelsa truck takes about three U-Boxes, not ten (Fernanda, 22 Sep):
+        # the boxes are rigid and tall, so the limit is the floor, not the cubic
+        # metres. Offering her own truck for a five-box load would send a driver
+        # to the yard for nothing, which is exactly the kind of suggestion that
+        # makes a team stop trusting the board.
+        box_limit = int(ld.get("thelsa_truck_u_boxes") or THELSA_TRUCK_U_BOXES)
+        too_many_boxes = boxes > box_limit
         cands = []
         for t in trucks:
             if truck_hub(t) != hub or hub == Hub.UNKNOWN.value:
@@ -602,10 +665,17 @@ def offer_trucks(loads: list[dict], trucks: list[dict],
             spare = float(t.get("spare_m3") or 0)
             if spare <= 0:
                 continue
-            cands.append({"unit": t.get("unit"), "date": t.get("date"),
-                          "driver": t.get("driver", ""), "spare_m3": spare,
-                          "fill_pct": t.get("fill_pct"),
-                          "fits": spare >= float(ld.get("m3") or 0)})
+            fits = spare >= float(ld.get("m3") or 0) and not too_many_boxes
+            c = {"unit": t.get("unit"), "date": t.get("date"),
+                 "driver": t.get("driver", ""), "spare_m3": spare,
+                 "fill_pct": t.get("fill_pct"), "fits": fits}
+            if too_many_boxes:
+                c["why_not"] = (f"{boxes} U-Boxes — a Thelsa truck holds about "
+                                f"{box_limit}; this needs a hired 53 ft trailer")
+            cands.append(c)
         cands.sort(key=lambda c: (not c["fits"], c["date"], -c["spare_m3"]))
-        out.append({**ld, "trucks": cands[:4]})
+        row = {**ld, "trucks": cands[:4]}
+        if too_many_boxes:
+            row["needs_hired_trailer"] = True
+        out.append(row)
     return out

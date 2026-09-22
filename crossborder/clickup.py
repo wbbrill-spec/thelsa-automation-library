@@ -157,6 +157,14 @@ class ClickUpClient:
     def list_detail(self, list_id: str) -> dict:
         return self.get(f"list/{list_id}")
 
+    def list_comments(self, list_id: str) -> list[dict]:
+        """Comments left on the shipment list itself.
+
+        This is where Fernanda writes her consolidation note (decision D6,
+        2026-09-22), so it is worth one extra request per list. Read-only.
+        """
+        return self.get(f"list/{list_id}/comment").get("comments", [])
+
     def inspect_list(self, list_id: str) -> dict:
         """Everything about one list, for validating the real ClickUp structure:
         list metadata, its custom-field definitions, and every task (open and

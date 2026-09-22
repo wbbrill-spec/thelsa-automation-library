@@ -114,6 +114,46 @@ def _cc_list() -> list[str]:
     return [a.strip() for a in raw.replace(";", ",").split(",") if a.strip()]
 
 
+# ── supervisor visibility (change 11, from the 21 Sep training) ──────────────
+# Fernanda and Sara each get their own list, but nothing rolled up: if an item
+# sits for a fortnight, only the person who is already behind can see it. Gustavo
+# asked to see the same picture. CB_ALERT_SUPERVISORS takes names, addresses, or
+# "Name:address" pairs; a name with no address on file routes to the fallback
+# inbox with a line saying who it was meant for, rather than to a guessed one.
+DEFAULT_SUPERVISOR = "Gustavo"
+
+
+def supervisors() -> list[tuple[str, str, bool]]:
+    """[(name, email, address_is_known)] for everyone who sees the roll-up."""
+    raw = (os.environ.get("CB_ALERT_SUPERVISORS") or DEFAULT_SUPERVISOR).strip()
+    if raw in ("-", "none", "off"):
+        return []
+    emails = _env_map("CB_ALERT_EMAILS")
+    out: list[tuple[str, str, bool]] = []
+    for entry in [x.strip() for x in raw.replace(";", ",").split(",") if x.strip()]:
+        if ":" in entry and "@" in entry.split(":", 1)[1]:
+            name, addr = entry.split(":", 1)
+            out.append((name.strip(), addr.strip(), True))
+        elif "@" in entry:
+            out.append((entry.split("@")[0].replace(".", " ").title(), entry, True))
+        else:
+            addr = emails.get(norm_text(entry)) or KNOWN_EMAILS.get(norm_text(entry))
+            out.append((entry, addr or _fallback_inbox(), bool(addr)))
+    return out
+
+
+def supervisor_cc() -> list[str]:
+    """Supervisors copied on each person's own alert, when that is wanted.
+
+    Off by default: a supervisor who is copied on every individual email stops
+    reading them. The roll-up below is the useful version. CB_ALERT_SUPERVISOR_CC=1
+    turns copying on as well.
+    """
+    if (os.environ.get("CB_ALERT_SUPERVISOR_CC") or "") not in ("1", "true", "yes"):
+        return []
+    return [e for _, e, known in supervisors() if known]
+
+
 def _fallback_inbox() -> str:
     return (os.environ.get("CB_ALERT_FALLBACK")
             or os.environ.get("ALERT_EMAIL")
@@ -310,7 +350,7 @@ def build_alerts(shipments: list[Shipment], today: Optional[dt.date] = None) -> 
         b["rows"].append(_row(s, issues, today))
 
     order = {f: i for i, f in enumerate(ALERT_FLAGS)}
-    cc = _cc_list()
+    cc = _cc_list() + supervisor_cc()
     alerts = []
     for b in sorted(by_owner.values(), key=lambda x: (-len(x["rows"]), x["owner"])):
         rows = sorted(b["rows"], key=lambda r: (order.get(r["top_issue"], 99),
@@ -331,7 +371,70 @@ def build_alerts(shipments: list[Shipment], today: Optional[dt.date] = None) -> 
             "subject": subject, "body": alert_body(b["owner"], rows, b["resolved"]),
             "shipment_count": n, "by_issue": counts, "shipments": rows,
         })
-    return alerts
+    return alerts + supervisor_alerts(alerts)
+
+
+# ── the roll-up ──────────────────────────────────────────────────────────────
+def supervisor_body(name: str, per_owner: list[dict], resolved: bool,
+                    site: str = SITE) -> str:
+    """One message: what each coordinator is carrying, oldest problem first."""
+    total = sum(a["shipment_count"] for a in per_owner)
+    L = [f"Hola {name or 'equipo'},", "",
+         f"Resumen del tablero transfronterizo: {total} embarque"
+         f"{'s' if total != 1 else ''} requiere{'n' if total != 1 else ''} atención, "
+         f"repartidos entre {len(per_owner)} coordinador"
+         f"{'es' if len(per_owner) != 1 else ''}. Es un resumen; no reserva ni "
+         "cancela nada.", ""]
+    for a in per_owner:
+        head = ", ".join(f"{v} {FLAG_LABEL.get(k, (k, k))[0].lower()}"
+                         for k, v in a["by_issue"].items())
+        L.append(f"{a['owner']} — {a['shipment_count']} ({head})")
+        L.extend(_lines(a["shipments"][:8], "es"))
+        if a["shipment_count"] > 8:
+            L.append(f"      … y {a['shipment_count'] - 8} más")
+        L.append("")
+    en = [f"Hi {name or 'team'},", "",
+          f"Cross-border board summary: {total} shipment{'s' if total != 1 else ''} "
+          f"need{'' if total != 1 else 's'} attention across {len(per_owner)} "
+          f"coordinator{'s' if len(per_owner) != 1 else ''}. Informational only.", ""]
+    for a in per_owner:
+        en.append(f"{a['owner']} — {a['shipment_count']}")
+    parts = ["\n".join(L), f"Tablero en vivo: {site}", "", "— — — — —", "",
+             "\n".join(en), "", f"Live board: {site}", ""]
+    if not resolved:
+        parts.append(f"[No email on file for {name} — routed here so it is not lost. "
+                     "Add them to CB_ALERT_EMAILS or CB_ALERT_SUPERVISORS.]")
+        parts.append("")
+    parts.append("— Thelsa Automation Library · Cross-Border Dashboard")
+    return "\n".join(parts)
+
+
+def supervisor_alerts(per_owner: list[dict]) -> list[dict]:
+    """A roll-up of everyone's outstanding items, one per supervisor.
+
+    The coordinators' own alerts are unchanged — this is an extra message, so
+    nobody loses the list they already work from.
+    """
+    people = supervisors()
+    if not people or not per_owner:
+        return []
+    total = sum(a["shipment_count"] for a in per_owner)
+    out = []
+    for name, email, known in people:
+        out.append({
+            "owner": name, "to": email, "cc": _cc_list(), "resolved": known,
+            "supervisor": True,
+            "subject": (f"[Transfronterizo] Resumen: {total} embarque"
+                        f"{'s' if total != 1 else ''} en seguimiento / "
+                        f"{total} shipment{'s' if total != 1 else ''} needing attention "
+                        f"({len(per_owner)} coordinators)"),
+            "body": supervisor_body(name, per_owner, known),
+            "shipment_count": total,
+            "by_issue": {k: sum(a["by_issue"].get(k, 0) for a in per_owner)
+                         for k in {k for a in per_owner for k in a["by_issue"]}},
+            "shipments": [r for a in per_owner for r in a["shipments"]],
+        })
+    return out
 
 
 # ── de-dupe state (scheduler only) ───────────────────────────────────────────

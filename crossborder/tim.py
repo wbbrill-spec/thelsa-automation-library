@@ -31,6 +31,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
+from . import grouping
 from .clickup import ClickUpClient, ClickUpError
 from .models import Shipment, Source, Stage, norm_text, parse_date
 
@@ -111,7 +112,8 @@ def _step_number(name: str) -> Optional[int]:
 
 
 def build_shipment(lst: dict, tasks: list[dict], *, folder: Optional[str], space: str,
-                   team_id: str, completed: bool, today: Optional[dt.date] = None) -> Shipment:
+                   team_id: str, completed: bool, today: Optional[dt.date] = None,
+                   comments: Optional[list[dict]] = None) -> Shipment:
     """Turn one shipment list + its tasks into a unified Shipment."""
     today = today or dt.date.today()
     meta = parse_list_name(lst.get("name", ""), folder)
@@ -171,7 +173,7 @@ def build_shipment(lst: dict, tasks: list[dict], *, folder: Optional[str], space
             flags.append("in_progress")
 
     list_id = str(lst.get("id"))
-    return Shipment(
+    s = Shipment(
         id=f"TIM:{list_id}",
         source=Source.TIM,
         source_ref=list_id,
@@ -198,7 +200,31 @@ def build_shipment(lst: dict, tasks: list[dict], *, folder: Optional[str], space
         milestones=milestones,
         last_progress_at=last_progress,
         days_since_progress=days_since,
+        # Where the list lives, so the commercial / new-furniture rule can
+        # recognise Uso's lists once they exist (rules.py) without another walk.
+        extra={"folder": folder or "", "space": space or "",
+               "list_name": lst.get("name", "")},
     )
+    # Fernanda's consolidation note, if she left one (decision D6, 22 Sep).
+    grouping.apply_note(s, grouping.note_texts(lst, comments, tasks))
+    return s
+
+
+def today_utc_ms() -> int:
+    return int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000)
+
+
+def _recently_touched(tasks: list[dict], cutoff_ms: int) -> bool:
+    """Has anything on this shipment moved recently enough to be worth a look?"""
+    if not cutoff_ms:
+        return True
+    for t in tasks or []:
+        try:
+            if int(t.get("date_updated") or 0) >= cutoff_ms:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
 
 
 def _find_space(spaces: list[dict], wanted: str, prefix: bool = False) -> Optional[dict]:
@@ -257,12 +283,31 @@ def fetch_tim_shipments(client: Optional[ClickUpClient] = None,
 
     # 2) Pull each list's tasks in parallel (the shared rate limiter keeps us
     #    under ClickUp's 100 req/min); ~70 lists ≈ 10–15 s instead of a minute.
+    # Fernanda's consolidation note lives in a comment on the list, which costs
+    # one extra request per list. Spending that on every list would roughly
+    # double the walk, so it is spent only on lists that are still moving —
+    # a file nobody has touched in a month is not being consolidated today.
+    notes_on = (os.environ.get("CB_GROUP_NOTES", "1") or "1").lower() in ("1", "true", "yes")
+    note_days = int(os.environ.get("CB_GROUP_NOTE_DAYS", "45") or 45)
+    note_cutoff = (today_utc_ms() - note_days * 86_400_000) if note_days else 0
+    note_stats = {"checked": 0, "found": 0}
+
     def fetch(job):
         lst, folder_name, space, is_completed = job
         try:
             tasks = client.list_tasks(lst["id"], include_closed=True)
-            return build_shipment(lst, tasks, folder=folder_name, space=space.get("name", ""),
-                                  team_id=team_id, completed=is_completed), None
+            comments = None
+            if notes_on and not is_completed and _recently_touched(tasks, note_cutoff):
+                try:
+                    comments = client.list_comments(lst["id"])
+                    note_stats["checked"] += 1
+                except Exception as exc:  # noqa: BLE001 — a missing note is not an outage
+                    log.debug("list comments unavailable for %s: %s", lst.get("name"), exc)
+            s = build_shipment(lst, tasks, folder=folder_name, space=space.get("name", ""),
+                               team_id=team_id, completed=is_completed, comments=comments)
+            if s.consolidation:
+                note_stats["found"] += 1
+            return s, None
         except Exception as exc:  # noqa: BLE001 — one bad list must not sink the fleet
             return None, {"list": lst.get("name"), "error": f"{type(exc).__name__}: {exc}"}
 
@@ -283,4 +328,6 @@ def fetch_tim_shipments(client: Optional[ClickUpClient] = None,
     shipments.sort(key=lambda s: (s.agent, s.customer_name))
     diag["requests_made"] = client.requests_made
     diag["count"] = len(shipments)
+    diag["consolidation_notes"] = {**note_stats, "enabled": notes_on,
+                                   "window_days": note_days}
     return shipments, diag

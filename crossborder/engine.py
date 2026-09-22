@@ -9,11 +9,22 @@ anything — its output is a suggestion list for a human to approve.
 Unit of planning: cubic metres against TRUCK_53_M3 (88 m³ — Bill's rule:
 20,000 lb of household goods at 6.5 lb/cuft ≈ 3,077 cuft ≈ 88 m³).
 
-Rules (spec §6 + Bill 2026-09-09):
-  1. Lane = direction + corridor. Imports (US/CA → MX) are grouped by
-     destination hub (Monterrey entry hub → onward hubs); exports (MX → US/CA)
-     by destination state/province. Sea and air jobs are excluded — they are
-     not truck freight.
+Rules (spec §6 + Bill 2026-09-09, revised with Edgar/Fernanda 2026-09-22):
+  0. AN IMPORT IS TWO MOVEMENTS, NOT ONE. Stage 1 is the border crossing:
+     everybody's freight leaves the McAllen warehouse on ONE trailer to
+     Monterrey, whatever city it is bound for. Stage 2 is the onward truck from
+     Monterrey to each city, where San Luis Potosí and Querétaro are drops on
+     the Mexico City run rather than destinations of their own. Planning these
+     as a single movement — which this engine did until 22 Sep — invented a
+     trailer per city and missed the crossing consolidation entirely.
+  1. Lane = leg + corridor. Stage 1 has one lane; stage 2 has one per corridor
+     out of the hub; exports are grouped by destination state/province. Sea and
+     air jobs are excluded — they are not truck freight.
+  1b. Exports never wait (Fernanda): each is its own load, ready to go, with
+     any same-lane pairing offered as an option the coordinator may take.
+  1c. Freight a coordinator has ALREADY consolidated (read from her ClickUp
+     note — see grouping.py) leaves the suggestions and becomes a truck others
+     can add to.
   2. An FTL job (or any job ≥ 50 % of a trailer) is an ANCHOR: it already has a
      truck. If it is under 88 m³ the remaining space is offered to other
      shipments on the same lane — this is the "trailer running light" check.
@@ -36,9 +47,11 @@ import datetime as dt
 import os
 from dataclasses import dataclass, field
 
+from . import grouping, rules
 from .models import (
-    LIFT_VAN_M3, TRUCK_53_LIFT_VANS, TRUCK_53_U_BOXES, U_BOX_M3, Hub, Shipment, Source, Stage, TIM_DELIVERY_WINDOW_DAYS,
-    TRUCK_53_KG, TRUCK_53_M3,
+    CROSSING_ORIGIN, ENTRY_HUB, LIFT_VAN_M3, THELSA_TRUCK_M3, THELSA_TRUCK_U_BOXES,
+    TRUCK_53_LIFT_VANS, TRUCK_53_U_BOXES, U_BOX_M3, Hub, Leg, Shipment, Source, Stage,
+    TIM_DELIVERY_WINDOW_DAYS, TRUCK_53_KG, TRUCK_53_M3, detour_for_hub,
 )
 
 # A lift van is a rigid crate: it takes a whole floor position whatever its
@@ -53,6 +66,10 @@ UB_SLOT_M3 = TRUCK_53_M3 / TRUCK_53_U_BOXES
 
 READY_STAGES = {Stage.GREEN_LIGHT, Stage.TO_BORDER, Stage.CUSTOMS}
 COMING_STAGES = {Stage.BOOKED, Stage.DOCS_PENDING}
+# Freight sitting in the Mexican hub waiting for its onward truck. It has
+# already crossed, so it is ready by definition — there is no document or
+# customs step left between it and the truck to its city.
+AT_HUB_STAGES = {Stage.AT_HUB, Stage.ONWARD}
 ANCHOR_FRACTION = float(os.environ.get("PLAN_ANCHOR_FRACTION", "0.5") or 0.5)
 MIN_FILL_TO_SUGGEST = float(os.environ.get("PLAN_MIN_FILL", "0.6") or 0.6)      # a load below this is "light"
 HORIZON_DAYS = int(os.environ.get("PLAN_HORIZON_DAYS", "10") or 10)
@@ -94,6 +111,8 @@ class Item:
     lift_vans: int = 0                # >0 → lift-van loaded; capacity counts positions
     u_boxes: int = 0                  # >0 → U-Box job; capacity counts positions
     space: float = 0.0                # trailer m³ this item actually consumes
+    leg: Leg = Leg.CROSSING           # which movement this item is planned on
+    detour_stop: str = ""             # dropped short of the lane's end point
 
     def __post_init__(self):
         if not self.space:
@@ -116,6 +135,9 @@ class Load:
     hub: str
     items: list[Item] = field(default_factory=list)
     anchor: Item | None = None
+    leg: Leg = Leg.CROSSING
+    ships_alone: bool = False          # an export: it leaves without waiting
+    group: str = ""                    # an existing consolidation, not a suggestion
 
     @property
     def m3(self) -> float:
@@ -168,11 +190,37 @@ class Load:
     def fits(self, it: Item) -> bool:
         return self.space + it.space <= TRUCK_53_M3 + 1e-6 and self.kg + it.kg <= TRUCK_53_KG + 1e-6
 
+    @property
+    def detour_stops(self) -> list[str]:
+        """Cities this trailer drops at before its final hub, in no fixed order."""
+        seen: list[str] = []
+        for i in self.items:
+            if i.detour_stop and i.detour_stop not in seen:
+                seen.append(i.detour_stop)
+        return seen
+
+    @property
+    def thelsa_truck_ok(self) -> bool:
+        """Could one of Thelsa's own trucks carry this, or does it need a 53 ft?
+
+        Fernanda's constraint (22 Sep): a Thelsa truck takes about three
+        U-Boxes, not ten, whatever the cubic metres say. Offering her own truck
+        for a five-box load would send her to the yard for nothing.
+        """
+        if self.u_boxes > THELSA_TRUCK_U_BOXES:
+            return False
+        return self.space <= THELSA_TRUCK_M3 + 1e-6
+
     def to_dict(self, today: dt.date) -> dict:
         srcs = {s.value: sum(1 for i in self.items if i.shipment.source is s) for s in Source}
         risk = [i for i in self.items if i.deadline and (i.deadline - today).days <= WINDOW_RISK_DAYS]
         return {
             "lane": self.lane, "direction": self.direction, "hub": self.hub,
+            "leg": self.leg.value, "leg_label": LEG_LABELS.get(self.leg, self.leg.value),
+            "ships_alone": self.ships_alone, "group": self.group,
+            "detour_stops": self.detour_stops,
+            "thelsa_truck_ok": self.thelsa_truck_ok,
+            "thelsa_truck_u_boxes": THELSA_TRUCK_U_BOXES,
             "truck_m3": TRUCK_53_M3, "m3": self.m3, "kg": self.kg, "fill_pct": round(self.fill * 100),
             "space_m3": round(self.space, 2), "lift_vans": self.lift_vans, "lift_van_positions": TRUCK_53_LIFT_VANS,
             "free_lift_van_positions": self.free_lift_van_positions,
@@ -193,6 +241,7 @@ class Load:
                 "id": i.id, "source": i.shipment.source.value, "customer": i.shipment.customer_name,
                 "agent": i.shipment.agent, "reference": i.shipment.reference_number,
                 "destination": i.shipment.destination, "m3": i.m3, "kg": i.kg,
+                "hub": i.shipment.destination_hub.value, "detour_stop": i.detour_stop,
                 "lift_vans": i.lift_vans, "space_m3": round(i.space, 2),
                 "us_diplomatic": i.shipment.is_us_diplomatic,
                 "ubox": i.shipment.is_ubox_job, "u_boxes": i.shipment.u_boxes_planned,
@@ -254,17 +303,64 @@ def _direction(s: Shipment) -> str:
     return "import"          # every TIM shipment is a US → MX small shipment
 
 
-def lane_for(s: Shipment) -> tuple[str, str]:
-    """(lane label, hub/region label)."""
+LEG_LABELS = {
+    Leg.CROSSING: f"Stage 1 — border crossing ({CROSSING_ORIGIN} → {ENTRY_HUB.value})",
+    Leg.ONWARD: f"Stage 2 — onward from {ENTRY_HUB.value}",
+    Leg.EXPORT: "Export",
+    Leg.DOMESTIC: "Domestic Mexico",
+}
+
+
+def leg_for(s: Shipment) -> Leg:
+    """Which movement this shipment is waiting for right now.
+
+    An import is planned twice in its life: once on the trailer that takes
+    everybody's freight across the border together, and again on the truck that
+    carries it from the hub to its city. Which one it needs depends only on
+    whether it has crossed yet.
+    """
     dirn = _direction(s)
-    if dirn in ("import", "domestic"):
-        hub = s.destination_hub.value if s.destination_hub is not Hub.UNKNOWN else "Unassigned hub"
-        # Domestic (SIT / TRS) trips consolidate into the same hub lanes as the
-        # imports do, but never share a trailer with a cross-border load.
-        label = "Import" if dirn == "import" else "Domestic"
-        return f"{label} → {hub}", hub
-    region = export_region(s)
-    return f"Export → {region}", region
+    if dirn == "export":
+        return Leg.EXPORT
+    if dirn == "domestic":
+        return Leg.DOMESTIC
+    return Leg.ONWARD if s.has_crossed else Leg.CROSSING
+
+
+def lane_for(s: Shipment) -> tuple[str, str, Leg]:
+    """(lane label, hub/region label, leg).
+
+    The lane is the unit of consolidation: two shipments share a trailer only
+    if they share a lane. Stage 1 has exactly one lane — everything crossing
+    the border goes together, whatever city it is bound for afterwards. Stage 2
+    has one lane per corridor out of the hub, with San Luis Potosí and Querétaro
+    folded into the Mexico City corridor as drops on the way.
+    """
+    leg = leg_for(s)
+    if leg is Leg.EXPORT:
+        region = export_region(s)
+        return f"Export → {region}", region, leg
+    if leg is Leg.CROSSING:
+        return f"{CROSSING_ORIGIN} → {ENTRY_HUB.value} (crossing)", ENTRY_HUB.value, leg
+
+    hub = s.destination_hub
+    if hub is Hub.UNKNOWN:
+        label = "Unassigned hub"
+        return (f"{ENTRY_HUB.value} → {label}" if leg is Leg.ONWARD else f"Domestic → {label}"), label, leg
+    detour = detour_for_hub(hub)
+    # The stop is deliberately NOT part of the lane name: San Luis Potosí and
+    # Querétaro freight has to land in the SAME lane as the Mexico City freight,
+    # or the two never share the truck they are supposed to share. Which cities
+    # a trailer drops at is reported per load (Load.detour_stops).
+    end = detour["corridor_to"] if detour else hub
+    prefix = ENTRY_HUB.value if leg is Leg.ONWARD else "Domestic"
+    return f"{prefix} → {end.value}", end.value, leg
+
+
+def detour_stop_for(s: Shipment) -> str:
+    """The city this shipment is dropped at, when it rides a longer run."""
+    d = detour_for_hub(s.destination_hub)
+    return d["stop"] if d else ""
 
 
 def export_region(s: Shipment) -> str:
@@ -287,14 +383,31 @@ def export_region(s: Shipment) -> str:
     return {"US": "United States", "CA": "Canada"}.get(country, country or "?")
 
 
+def screen(s: Shipment) -> str:
+    """Why this shipment is not a consolidation candidate at all, or "".
+
+    Returning the reason rather than a bare False is what lets the board answer
+    "why isn't my file on a truck?" without anyone reading the code.
+    """
+    if not s.is_open:
+        return "closed or delivered"
+    if _method(s) not in TRUCK_METHODS or _service(s) in NON_TRUCK_SERVICES:
+        return f"not truck freight ({_service(s) or _method(s) or 'method not set'})"
+    if s.stage not in READY_STAGES | COMING_STAGES | AT_HUB_STAGES:
+        return f"stage {s.stage.value} — past the point of planning a truck"
+    blocked = rules.consolidation_block(s)
+    if blocked:
+        return blocked
+    if leg_for(s) is Leg.ONWARD and s.destination_hub is ENTRY_HUB:
+        return (f"delivers locally from the {ENTRY_HUB.value} hub — there is no "
+                "onward line haul to share")
+    return ""
+
+
 def make_item(s: Shipment, today: dt.date) -> Item | None:
     """Return an Item for a consolidation-eligible shipment, else None."""
-    if not s.is_open:
+    if screen(s):
         return None
-    if _method(s) not in TRUCK_METHODS or _service(s) in NON_TRUCK_SERVICES:
-        return None
-    if s.stage not in READY_STAGES | COMING_STAGES:
-        return None                      # already at hub / delivering / closed
     m3 = s.planning_m3
     reasons: list[str] = []
     if m3 > IMPLAUSIBLE_M3:
@@ -307,7 +420,20 @@ def make_item(s: Shipment, today: dt.date) -> Item | None:
             reasons.append("no volume on record — cannot be planned until a volume is entered")
 
     kg = float(s.weight or 0.0)
-    if s.source is Source.TIM:
+    leg = leg_for(s)
+    if leg is Leg.ONWARD:
+        # Already across the border and sitting in the hub: nothing stands
+        # between it and a truck except the truck.
+        ready = True
+        ready_date = (s.milestones.get("at_hub") or s.milestones.get("crossed")
+                      or s.clearance_date or today)
+        deadline = s.delivery_date
+        if s.source is Source.TIM and not deadline:
+            base = s.milestones.get("green_light") or s.ready_date
+            deadline = (base + dt.timedelta(days=TIM_DELIVERY_WINDOW_DAYS)) if base else None
+        reasons.append(f"in the {ENTRY_HUB.value} hub — waiting for the truck to "
+                       f"{s.destination or 'its city'}")
+    elif s.source is Source.TIM:
         ready = s.stage in READY_STAGES
         ready_date = s.milestones.get("green_light") or s.ready_date
         deadline = (ready_date + dt.timedelta(days=TIM_DELIVERY_WINDOW_DAYS)) if ready_date else None
@@ -354,8 +480,18 @@ def make_item(s: Shipment, today: dt.date) -> Item | None:
                              f"{u_boxes} U-Boxes is ≥ {int(ANCHOR_FRACTION * 100)}% of a trailer — anchors its own trailer"
                              if u_boxes else
                              f"{m3} m³ is ≥ {int(ANCHOR_FRACTION * 100)}% of a trailer — anchors its own trailer"))
+    detour = detour_stop_for(s) if leg in (Leg.ONWARD, Leg.DOMESTIC) else ""
+    if detour:
+        reasons.append(f"dropped at {detour} on the way — rides the corridor truck "
+                       "rather than opening a trailer of its own")
+    if leg is Leg.CROSSING and s.destination_hub is not Hub.UNKNOWN and s.destination_hub is not ENTRY_HUB:
+        reasons.append(f"crosses with everyone else, then goes on to {s.destination_hub.value}")
+    if u_boxes and u_boxes > THELSA_TRUCK_U_BOXES:
+        reasons.append(f"more than {THELSA_TRUCK_U_BOXES} U-Boxes — a Thelsa truck cannot "
+                       "take this; it needs a hired 53 ft trailer")
     it = Item(shipment=s, m3=m3, kg=kg, ready=ready, ready_date=ready_date, deadline=deadline,
-              anchor=anchor, reasons=reasons, lift_vans=lift_vans, u_boxes=u_boxes, space=space)
+              anchor=anchor, reasons=reasons, lift_vans=lift_vans, u_boxes=u_boxes, space=space,
+              leg=leg, detour_stop=detour)
     it.sized = m3 > 0
     return it
 
@@ -367,9 +503,30 @@ def _urgency(it: Item, today: dt.date):
     return (dl, -it.space)
 
 
-def pack_lane(lane: str, direction: str, hub: str, items: list[Item], today: dt.date) -> list[Load]:
+def _hold_exports() -> bool:
+    return (os.environ.get("CB_HOLD_EXPORTS") or "").strip().lower() in ("1", "true", "yes")
+
+
+def pack_exports(lane: str, hub: str, items: list[Item], today: dt.date) -> list[Load]:
+    """One load per export — exports do not wait (Fernanda, 22 Sep).
+
+    Exports are infrequent, so holding one back for a second customer means
+    holding it indefinitely. Fernanda ships a single U-Box on Thelsa's own
+    truck at the border rather than wait. Each export is therefore its own
+    load, ready to go now; where two happen to be going the same way the plan
+    offers the pairing as an option, and the coordinator decides.
+    """
+    return [Load(lane=lane, direction="export", hub=hub, items=[it],
+                 anchor=it if it.anchor else None, leg=Leg.EXPORT, ships_alone=True)
+            for it in sorted(items, key=lambda i: _urgency(i, today))]
+
+
+def pack_lane(lane: str, direction: str, hub: str, items: list[Item], today: dt.date,
+              leg: Leg = Leg.CROSSING) -> list[Load]:
     """Anchors first (each gets its own trailer), then first-fit-decreasing
     by urgency for the rest; a new trailer opens only when nothing fits."""
+    if leg is Leg.EXPORT and not _hold_exports():
+        return pack_exports(lane, hub, items, today)
     loads: list[Load] = []
     # Anchors (FTL / half-trailer jobs) open trailers — but two anchors that fit
     # together share one: that is exactly the "trailer running light" case Bill
@@ -377,7 +534,7 @@ def pack_lane(lane: str, direction: str, hub: str, items: list[Item], today: dt.
     for a in sorted([i for i in items if i.anchor], key=lambda i: (_urgency(i, today), -i.space)):
         target = next((ld for ld in sorted(loads, key=lambda l: -l.space) if ld.fits(a)), None)
         if target is None:
-            loads.append(Load(lane=lane, direction=direction, hub=hub, items=[a], anchor=a))
+            loads.append(Load(lane=lane, direction=direction, hub=hub, items=[a], anchor=a, leg=leg))
         else:
             target.items.append(a)
             a.reasons.append("shares a trailer with another full-truck job — confirm both customers accept a shared trailer")
@@ -391,7 +548,7 @@ def pack_lane(lane: str, direction: str, hub: str, items: list[Item], today: dt.
                 target = ld
                 break
         if target is None:
-            target = Load(lane=lane, direction=direction, hub=hub)
+            target = Load(lane=lane, direction=direction, hub=hub, leg=leg)
             loads.append(target)
         target.items.append(it)
     return loads
@@ -405,15 +562,15 @@ def plan(shipments: list[Shipment], today: dt.date | None = None) -> dict:
     ready = [i for i in items if i.ready and i.sized]
     coming = [i for i in items if not i.ready and i.sized]
     by_lane: dict[str, list[Item]] = {}
-    meta: dict[str, tuple[str, str]] = {}
+    meta: dict[str, tuple[str, str, Leg]] = {}
     for it in ready:
-        lane, hub = lane_for(it.shipment)
+        lane, hub, leg = lane_for(it.shipment)
         by_lane.setdefault(lane, []).append(it)
-        meta[lane] = (_direction(it.shipment), hub)
+        meta[lane] = (_direction(it.shipment), hub, leg)
     loads: list[Load] = []
     for lane, its in by_lane.items():
-        dirn, hub = meta[lane]
-        loads.extend(pack_lane(lane, dirn, hub, its, today))
+        dirn, hub, leg = meta[lane]
+        loads.extend(pack_lane(lane, dirn, hub, its, today, leg=leg))
 
     # Opportunities: light trailers + what is coming on the same lane.
     coming_by_lane: dict[str, list[Item]] = {}
@@ -441,14 +598,24 @@ def plan(shipments: list[Shipment], today: dt.date | None = None) -> dict:
             "advice": _advice(ld, addable, m3, today),
         })
 
-    loads_sorted = sorted(loads, key=lambda l: (-(l.anchor is not None), l.depart_by or dt.date.max, -l.space))
+    # Legs run in order: nothing can take the onward truck until it has crossed,
+    # so stage 1 is shown first whatever each load's departure date says.
+    leg_order = {Leg.CROSSING: 0, Leg.ONWARD: 1, Leg.EXPORT: 2, Leg.DOMESTIC: 3}
+    loads_sorted = sorted(loads, key=lambda l: (leg_order.get(l.leg, 9),
+                                                -(l.anchor is not None),
+                                                l.depart_by or dt.date.max, -l.space))
     out_loads = [l.to_dict(today) for l in loads_sorted]
+    _add_export_pairings(loads_sorted, out_loads)
+    excluded_detail = _excluded_detail(shipments)
     return {
         "as_of": today.isoformat(), "truck_m3": TRUCK_53_M3, "truck_kg": TRUCK_53_KG,
         "min_fill_pct": round(MIN_FILL_TO_SUGGEST * 100), "horizon_days": HORIZON_DAYS,
         "eligible": len(items), "ready": len(ready), "coming": len(coming), "unsized": len(unsized),
         "excluded": len([s for s in shipments if s.is_open]) - len(items),
+        "excluded_detail": excluded_detail,
         "unsized_by_lane": _group_ids(unsized),
+        "legs": _legs_summary(out_loads),
+        "groups": existing_groups(shipments, ready, today),
         "loads": out_loads,
         "opportunities": sorted(opportunities, key=lambda o: -o["spare_m3"]),
         "coming_by_lane": {k: [{"id": i.id, "customer": i.shipment.customer_name, "source": i.shipment.source.value,
@@ -462,6 +629,9 @@ def plan(shipments: list[Shipment], today: dt.date | None = None) -> dict:
             "window_risk": sum(len(l["window_risk"]) for l in out_loads),
             "avg_fill_pct": round(sum(l["fill_pct"] for l in out_loads) / len(out_loads)) if out_loads else 0,
             "planned_m3": round(sum(l["m3"] for l in out_loads), 1),
+            "crossing_trailers": sum(1 for l in out_loads if l.get("leg") == Leg.CROSSING.value),
+            "onward_trailers": sum(1 for l in out_loads if l.get("leg") == Leg.ONWARD.value),
+            "exports_alone": sum(1 for l in out_loads if l.get("ships_alone")),
         },
     }
 
@@ -472,6 +642,160 @@ def _group_ids(items: list[Item]) -> dict:
         out.setdefault(lane_for(i.shipment)[0], []).append({"id": i.id, "customer": i.shipment.customer_name,
                                                              "source": i.shipment.source.value, "stage": i.shipment.stage.value})
     return out
+
+
+def _legs_summary(out_loads: list[dict]) -> list[dict]:
+    """Trailers and fill per leg — the headline of the two-stage import plan."""
+    order = [Leg.CROSSING, Leg.ONWARD, Leg.EXPORT, Leg.DOMESTIC]
+    out = []
+    for leg in order:
+        mine = [l for l in out_loads if l.get("leg") == leg.value]
+        if not mine:
+            continue
+        out.append({
+            "leg": leg.value, "label": LEG_LABELS[leg], "trailers": len(mine),
+            "shipments": sum(len(l["shipments"]) for l in mine),
+            "m3": round(sum(l["m3"] for l in mine), 1),
+            "avg_fill_pct": round(sum(l["fill_pct"] for l in mine) / len(mine)),
+            "light": sum(1 for l in mine if l["light"]),
+        })
+    return out
+
+
+def _excluded_detail(shipments: list[Shipment]) -> list[dict]:
+    """Open shipments the planner left alone, grouped by the reason why.
+
+    Without this the board can only say "37 excluded", which is exactly the
+    number somebody will query in the training session.
+    """
+    buckets: dict[str, dict] = {}
+    for s in shipments or []:
+        if not s.is_open:
+            continue
+        why = screen(s)
+        if not why:
+            continue
+        # Collapse the variable part ("stage at_hub — …") so the list stays short.
+        key = why.split(" (")[0].split(" — ")[0]
+        b = buckets.setdefault(key, {"reason": key, "count": 0, "examples": []})
+        b["count"] += 1
+        if len(b["examples"]) < 5:
+            b["examples"].append({"id": s.id, "customer": s.customer_name,
+                                  "source": s.source.value, "why": why})
+    return sorted(buckets.values(), key=lambda b: -b["count"])
+
+
+def _add_export_pairings(loads: list[Load], out_loads: list[dict]) -> None:
+    """Offer, but never assume, that two exports going the same way share a truck.
+
+    Exports ship on their own (Fernanda, 22 Sep). Where two are ready on the
+    same lane and would physically fit together, that is worth a coordinator's
+    thirty seconds — so it is offered as an option on the card, and the load
+    plan still says each one leaves by itself.
+    """
+    by_lane: dict[str, list[tuple[Load, dict]]] = {}
+    for ld, od in zip(loads, out_loads):
+        if ld.leg is Leg.EXPORT and ld.ships_alone:
+            by_lane.setdefault(ld.lane, []).append((ld, od))
+    for lane, pairs in by_lane.items():
+        if len(pairs) < 2:
+            continue
+        for ld, od in pairs:
+            others = []
+            for other, _ in pairs:
+                if other is ld:
+                    continue
+                if ld.space + other.space <= TRUCK_53_M3 + 1e-6 and ld.kg + other.kg <= TRUCK_53_KG + 1e-6:
+                    names = ", ".join(i.shipment.customer_name for i in other.items)
+                    others.append({"customers": names,
+                                   "ids": [i.id for i in other.items],
+                                   "space_m3": round(other.space, 2),
+                                   "combined_fill_pct": round((ld.space + other.space) / TRUCK_53_M3 * 100)})
+            if others:
+                od["optional_pairings"] = others
+                od["pairing_advice"] = (
+                    "Exports do not wait — this one is ready to go on its own. "
+                    f"If it suits the customers, it could share with: "
+                    + "; ".join(f"{o['customers']} (together {o['combined_fill_pct']}% of a trailer)"
+                                for o in others[:3]))
+
+
+def existing_groups(shipments: list[Shipment], ready: list[Item],
+                    today: dt.date | None = None) -> list[dict]:
+    """Consolidations Fernanda has ALREADY made, and what could still join them.
+
+    This is decision D6 from the 22 Sep meeting. A file she has put on a truck
+    must stop appearing in the suggestions — it is spoken for — but the truck
+    itself becomes the most useful thing on the board, because Sara can see a
+    trailer being filled and add her freight to it instead of booking another.
+    """
+    today = today or dt.date.today()
+    by_key: dict[str, dict] = {}
+    for s in shipments or []:
+        if not (s.is_open and s.is_grouped):
+            continue
+        key = grouping.group_key(s)
+        if not key:
+            continue
+        lane, hub, leg = lane_for(s)
+        g = by_key.setdefault(key, {
+            "key": key, "name": s.group_name or "", "lane": lane, "hub": hub,
+            "leg": leg.value, "leg_label": LEG_LABELS.get(leg, leg.value),
+            "members": [], "note": s.consolidation.get("note", ""),
+            "third_party": s.consolidation.get("third_party", ""),
+            "space_m3": 0.0, "m3": 0.0, "lift_vans": 0, "u_boxes": 0,
+        })
+        it = make_item(s, today)
+        space = it.space if it else s.planning_m3
+        g["members"].append({
+            "id": s.id, "source": s.source.value, "customer": s.customer_name,
+            "reference": s.reference_number, "destination": s.destination,
+            "m3": s.planning_m3, "space_m3": round(space, 2),
+            "u_boxes": s.u_boxes_planned, "lift_vans": s.lift_vans_planned,
+            "stage": s.stage.value, "url": s.url,
+        })
+        g["space_m3"] = round(g["space_m3"] + space, 2)
+        g["m3"] = round(g["m3"] + (s.planning_m3 or 0), 2)
+        g["u_boxes"] += s.u_boxes_planned
+        g["lift_vans"] += s.lift_vans_planned
+        if not g["name"] and s.group_name:
+            g["name"] = s.group_name
+
+    out = []
+    for g in by_key.values():
+        spare = round(max(0.0, TRUCK_53_M3 - g["space_m3"]), 2)
+        joinable = [i for i in ready
+                    if lane_for(i.shipment)[0] == g["lane"]
+                    and i.space <= spare + 1e-6
+                    and not i.shipment.is_grouped]
+        joinable.sort(key=lambda i: -i.space)
+        g.update({
+            "customers": len(g["members"]),
+            "spare_m3": spare,
+            "fill_pct": round(g["space_m3"] / TRUCK_53_M3 * 100),
+            "free_u_box_positions": int((spare + 0.05) // UB_SLOT_M3),
+            "free_lift_van_positions": int((spare + 0.05) // LV_SLOT_M3),
+            "thelsa_truck_ok": g["u_boxes"] <= THELSA_TRUCK_U_BOXES and g["space_m3"] <= THELSA_TRUCK_M3 + 1e-6,
+            "could_join": [{"id": i.id, "customer": i.shipment.customer_name,
+                            "source": i.shipment.source.value, "space_m3": round(i.space, 2),
+                            "destination": i.shipment.destination} for i in joinable[:6]],
+        })
+        g["advice"] = _group_advice(g)
+        out.append(g)
+    return sorted(out, key=lambda g: -g["spare_m3"])
+
+
+def _group_advice(g: dict) -> str:
+    who = ", ".join(m["customer"] for m in g["members"][:4])
+    head = (f"{g['customers']} file{'s' if g['customers'] != 1 else ''} already "
+            f"consolidated ({who}) — {g['fill_pct']}% of a trailer.")
+    if g["third_party"]:
+        head += f" Moving with {g['third_party']}."
+    if g["could_join"]:
+        names = ", ".join(c["customer"] for c in g["could_join"][:3])
+        return head + (f" {g['spare_m3']} m³ is still free — {names} "
+                       "could go on the same truck.")
+    return head + f" {g['spare_m3']} m³ free, nothing else ready on this lane."
 
 
 def _used(ld: Load) -> str:
@@ -517,9 +841,24 @@ def email_body(p: dict, site: str = "https://thelsa.inflectionpointnow.com/cross
          f"Planning unit: 53 ft trailer = {p['truck_m3']} m³ / {p['truck_kg']} kg. "
          f"{p['ready']} shipments ready, {p['coming']} coming, {p['excluded']} open shipments not truck freight or already delivering.",
          ""]
+    if p.get("legs"):
+        L.append("BY LEG")
+        for lg in p["legs"]:
+            L.append(f"  {lg['label']}: {lg['trailers']} trailer(s), "
+                     f"{lg['shipments']} shipments, {lg['avg_fill_pct']}% average fill")
+        L.append("")
+    if p.get("groups"):
+        L.append("ALREADY CONSOLIDATED (a coordinator has put these together)")
+        for g in p["groups"]:
+            L.append(f"- {g['lane']}{(' · ' + g['name']) if g['name'] else ''}: {g['advice']}")
+        L.append("")
     if not p["loads"]:
         L.append("No consolidatable shipments are ready today.")
+    last_leg = None
     for n, ld in enumerate(p["loads"], 1):
+        if ld.get("leg") != last_leg:
+            last_leg = ld.get("leg")
+            L.append(f"== {ld.get('leg_label') or last_leg} ==")
         tag = " · LIGHT" if ld["light"] else (" · FULL" if ld["fill_pct"] >= 85 else "")
         xs = " · TIM + TMS" if ld["cross_silo"] else ""
         size = (f"{ld['lift_vans']} of {ld['lift_van_positions']} lift van positions · {ld['m3']} m³ gross"
@@ -527,6 +866,14 @@ def email_body(p: dict, site: str = "https://thelsa.inflectionpointnow.com/cross
                 f"{ld['u_boxes']} of {ld['u_box_positions']} U-Box positions · {ld['m3']} m³"
                 if ld.get("u_boxes") else f"{ld['m3']} m³")
         L.append(f"TRAILER {n} — {ld['lane']} — {size} ({ld['fill_pct']}%){tag}{xs}")
+        if ld.get("detour_stops"):
+            L.append(f"  Drops on the way: {', '.join(ld['detour_stops'])}")
+        if ld.get("ships_alone"):
+            L.append("  Export — goes on its own, not held for consolidation"
+                     + (f". {ld['pairing_advice']}" if ld.get("pairing_advice") else ""))
+        if ld.get("u_boxes") and not ld.get("thelsa_truck_ok"):
+            L.append(f"  Needs a hired 53 ft trailer — more than {ld.get('thelsa_truck_u_boxes')} "
+                     "U-Boxes will not fit on a Thelsa truck")
         if ld["depart_by"]:
             L.append(f"  Depart by {ld['depart_by']} (earliest delivery-window deadline on board)")
         for it in ld["shipments"]:

@@ -96,6 +96,22 @@ main { max-width: 1500px; margin: 0 auto; padding: 22px 24px 60px; }
 .load .row .who { flex: 1; min-width: 0; }
 .load .row .m3 { white-space: nowrap; color: #333; font-weight: 600; }
 .load .adv { font-size: 12px; color: #92400e; background: #fff8ec; border-radius: 8px; padding: 8px 10px; margin-top: 8px; line-height: 1.45; }
+.load .adv.info { color: #1e4d7b; background: #eef5fc; }
+.leghead { grid-column: 1 / -1; font-size: 12px; font-weight: 800; letter-spacing: .02em; color: #333; text-transform: uppercase; margin: 6px 0 -2px; display: flex; align-items: baseline; gap: 10px; }
+.leghead .sub { font-weight: 500; text-transform: none; letter-spacing: 0; color: #777; font-size: 11px; }
+.load.grouped { border-color: #1e7e34; box-shadow: 0 0 0 1px #e6f4ea inset; }
+.tag.leg { background: #eef1f5; color: #333; }
+.tag.alone { background: #e8f0fe; color: #1967d2; }
+.tag.detour { background: #f3e8ff; color: #7b1fa2; }
+.tag.hired { background: #fff4e5; color: #b45309; }
+.tag.grp { background: #e6f4ea; color: #1e7e34; }
+.planchg { font-size: 12px; padding: 6px 0; border-bottom: 1px solid #f0f0f0; display: flex; gap: 10px; }
+.planchg:last-child { border-bottom: 0; }
+.planchg .k { width: 110px; font-weight: 700; flex: none; }
+.planchg .k.vanished { color: #c0392b; }
+.planchg .k.date_changed { color: #b45309; }
+.planchg .k.unit_changed { color: #1967d2; }
+.planchg .at { color: #999; white-space: nowrap; }
 .load .rs { color: #999; font-size: 11px; }
 .trucks { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; margin-top: 10px; }
 .truck { background: #fff; border: 1px solid #e8e8e8; border-radius: 10px; padding: 10px 12px; font-size: 12px; }
@@ -224,8 +240,18 @@ body.demo header { border-bottom-color: #7c2d12; }
       <button class="btn" id="plan-draft">✉ Draft today's load email</button>
       <span class="plan-stats" id="plan-msg"></span>
     </div>
+    <div id="grouphead" class="plan-head" style="display:none">
+      <div class="section"><span data-i18n="Already consolidated">Already consolidated</span> <span class="cnt" id="cnt-groups">0</span></div>
+      <span class="plan-stats" data-i18n="Trucks a coordinator is already filling — add freight to these before booking another.">Trucks a coordinator is already filling — add freight to these before booking another.</span>
+    </div>
+    <div class="loads" id="groups"></div>
     <div class="loads" id="loads"></div>
     <div id="coming" class="note" style="display:none"></div>
+    <div id="planchangehead" class="plan-head" style="display:none">
+      <div class="section"><span data-i18n="Plan de Viajes changes">Plan de Viajes changes</span> <span class="cnt" id="cnt-planchanges">0</span></div>
+      <span class="plan-stats" data-i18n="Services that disappeared or moved date since the last republication.">Services that disappeared or moved date since the last republication.</span>
+    </div>
+    <div id="planchanges" class="panel" style="display:none"></div>
   <div id="sparehead" class="plan-head" style="display:none">
     <div class="section"><span data-i18n="Trucks with space">Trucks with space</span> <span class="cnt" id="cnt-trucks">0</span></div>
     <span class="plan-stats" id="spare-stats"></span>
@@ -328,6 +354,23 @@ const ES = {
   "Clear": "Limpiar", "include completed": "incluir completados",
   "Board": "Tablero", "Table": "Tabla", "↻ Refresh": "↻ Actualizar",
   "Pipeline": "Flujo", "Suggested loads": "Cargas sugeridas",
+  // Two-stage imports, detours, exports and existing consolidations
+  // (Edgar / Fernanda, 22 Sep 2026).
+  "Stage 1 — border crossing (McAllen → Monterrey)": "Etapa 1 — cruce fronterizo (McAllen → Monterrey)",
+  "Stage 2 — onward from Monterrey": "Etapa 2 — distribución desde Monterrey",
+  "Export": "Exportación", "Domestic Mexico": "Nacional México",
+  "trailer": "tráiler", "trailers": "tráileres", "avg fill": "llenado prom.",
+  "Ships on its own": "Sale por su cuenta", "drops at": "baja en",
+  "needs a hired 53' trailer": "requiere tráiler de 53' contratado",
+  "Already consolidated": "Ya consolidado",
+  "Trucks a coordinator is already filling — add freight to these before booking another.":
+    "Camiones que una coordinadora ya está llenando — súmale carga antes de contratar otro.",
+  "file": "expediente", "files": "expedientes", "consolidated": "consolidados",
+  "Could still join this truck": "Aún podría subir a este camión", "note": "nota",
+  "Plan de Viajes changes": "Cambios en el Plan de Viajes",
+  "Services that disappeared or moved date since the last republication.":
+    "Servicios que desaparecieron o cambiaron de fecha desde la última publicación.",
+  "disappeared": "desapareció", "date changed": "cambió de fecha", "truck changed": "cambió de unidad",
   "✉ Draft today's load email": "✉ Borrador del correo de cargas de hoy",
   "Needs attention": "Requiere atención",
   "Hub load (open imports, m³ vs one 53' trailer)": "Carga por hub (importaciones abiertas, m³ vs. un tráiler de 53')",
@@ -540,6 +583,7 @@ async function load(force) {
   renderDemoBar(DIAG.demo);
   buildFilters(); render();
   loadPlan();
+  loadPlanChanges();
 }
 
 // A standing, unmissable banner whenever any row on the page is simulated.
@@ -575,12 +619,22 @@ function renderPlan() {
   const s = p.summary || {};
   $("#plan-stats").textContent = p.error ? p.error : `53' trailer = ${p.truck_m3} m³ · ${p.ready} ready · ${p.coming} coming · ${p.unsized || 0} without volume · avg fill ${s.avg_fill_pct || 0}% · ${s.light || 0} light · ${s.cross_silo || 0} TIM+TMS`;
   const oppByLane = Object.fromEntries((p.opportunities || []).map(o => [o.lane, o]));
+  const legStats = Object.fromEntries((p.legs || []).map(g => [g.leg, g]));
+  let lastLeg = null;
   $("#loads").innerHTML = loads.length ? loads.map((l, n) => {
     const pct = Math.min(100, l.fill_pct);
     const cls = l.fill_pct >= 85 ? "ok" : (l.light ? "lt" : "");
     const opp = oppByLane[l.lane];
-    return `<div class="load ${l.light ? "light" : ""}">
-      <h4>${esc(l.lane)} ${l.fill_pct >= 85 ? `<span class="tag full">${tr("Full")}</span>` : ""}${l.light ? `<span class="tag light">${tr("Running light")}</span>` : ""}${l.cross_silo ? '<span class="tag xs">TIM + TMS</span>' : ""}${l.window_risk.length ? `<span class="tag risk">${l.window_risk.length} ${tr("window risk")}</span>` : ""}${l.anchors > 1 ? `<span class="tag anchor">${tr("2 FTL jobs share")}</span>` : ""}</h4>
+    // An import is planned twice — the crossing, then the truck out of the hub.
+    // The heading is what stops the two being read as one list of trailers.
+    let head = "";
+    if (l.leg && l.leg !== lastLeg) {
+      lastLeg = l.leg;
+      const g = legStats[l.leg];
+      head = `<div class="leghead">${esc(tr(l.leg_label || l.leg))}${g ? `<span class="sub">${g.trailers} ${g.trailers === 1 ? tr("trailer") : tr("trailers")} · ${g.shipments} ${tr("shpt")} · ${tr("avg fill")} ${g.avg_fill_pct}%</span>` : ""}</div>`;
+    }
+    return `${head}<div class="load ${l.light ? "light" : ""}">
+      <h4>${esc(l.lane)} ${l.fill_pct >= 85 ? `<span class="tag full">${tr("Full")}</span>` : ""}${l.light && !l.ships_alone ? `<span class="tag light">${tr("Running light")}</span>` : ""}${l.ships_alone ? `<span class="tag alone">${tr("Ships on its own")}</span>` : ""}${(l.detour_stops || []).length ? `<span class="tag detour">${tr("drops at")} ${esc(l.detour_stops.join(", "))}</span>` : ""}${l.u_boxes && !l.thelsa_truck_ok ? `<span class="tag hired">${tr("needs a hired 53' trailer")}</span>` : ""}${l.cross_silo ? '<span class="tag xs">TIM + TMS</span>' : ""}${l.window_risk.length ? `<span class="tag risk">${l.window_risk.length} ${tr("window risk")}</span>` : ""}${l.anchors > 1 ? `<span class="tag anchor">${tr("2 FTL jobs share")}</span>` : ""}</h4>
       <div class="fillbar"><i class="${cls}" style="width:${pct}%"></i></div>
       <div class="fl"><span>${l.lift_vans
           ? `<b>${l.lift_vans} / ${l.lift_van_positions} ${tr("lift vans")}</b> · ${l.m3} m³ ${tr("gross")} · ${l.fill_pct}%${l.free_lift_van_positions ? ` · ${l.free_lift_van_positions} ${tr("positions free")}` : ""}`
@@ -590,9 +644,11 @@ function renderPlan() {
         (l.revenue || []).length ? ` · ${tr("revenue")} ${fmtMoneyBuckets(l.revenue)}` : ""}</span><span>${l.depart_by ? tr("depart by") + " " + fmtD(l.depart_by) : ""}</span></div>
       ${l.shipments.map(it => `<div class="row" data-id="${esc(it.id)}"><div class="who"><b>${esc(it.customer)}</b>${it.anchor ? ' <span class="tag anchor">anchor</span>' : ""}${it.corporate_account ? ` <span class="corp">${esc(it.corporate_account)}</span>` : ""}${it.ubox ? ` <span class="tag lv">U-Box${it.u_boxes ? " ×" + it.u_boxes : ""}</span>` : ""}${it.us_diplomatic ? ` <span class="tag lv" title="${tr("US Embassy / Consulate — ships in lift vans; Moveware volume is gross")}">${tr("lift vans")}</span>` : ""}${l.window_risk.includes(it.id) ? ' <span class="tag risk">by ' + fmtD(it.deadline) + '</span>' : ""}<br><span class="rs">${esc(it.source)} · ${esc(it.agent || "")}${it.reference ? " · " + esc(it.reference) : ""} · → ${esc(it.destination || "?")}${it.service ? " · " + esc(it.service) : ""}</span></div><div class="m3">${it.lift_vans ? `<b>${it.lift_vans} LV</b><br><span class="rs">${it.m3} m³ ${tr("gross")}</span>` : `${it.m3} m³`}${it.revenue != null ? `<br><span class="rs">${fmtMoney(it.revenue, it.revenue_currency, it.revenue_month)}</span>` : ""}</div></div>`).join("")}
       ${(l.trucks||[]).length ? `<div class="fl" style="margin-top:6px"><span>${tr("On a truck already going")}: ${l.trucks.map(t => `<span class="tag ${t.fits?"truckfit":"truck"}" title="${esc(t.driver||"")}">${esc(t.unit)} · ${fmtD(t.date)} · ${t.spare_m3} m³ ${tr("free")}</span>`).join(" ")}</span></div>` : ""}
-      ${opp && opp.advice ? `<div class="adv">${esc(opp.advice)}</div>` : ""}
+      ${l.pairing_advice ? `<div class="adv info">${esc(l.pairing_advice)}</div>` : ""}
+      ${opp && opp.advice && !l.ships_alone ? `<div class="adv">${esc(opp.advice)}</div>` : ""}
     </div>`; }).join("") : `<div class="empty">${p.error ? "" : tr("No consolidatable shipments are ready right now.")}</div>`;
-  document.querySelectorAll("#loads .row").forEach(el => el.onclick = () => openDrawer(el.dataset.id));
+  renderGroups(p);
+  document.querySelectorAll("#loads .row, #groups .row").forEach(el => el.onclick = () => openDrawer(el.dataset.id));
   const cb = p.coming_by_lane || {}; const lanes = Object.keys(cb).filter(k => !src || cb[k].some(i => i.source === src));
   const ub = p.unsized_by_lane || {}; const ulanes = Object.keys(ub).filter(k => !src || ub[k].some(i => i.source === src));
   const parts = [];
@@ -601,6 +657,43 @@ function renderPlan() {
   $("#coming").style.display = parts.length ? "" : "none";
   $("#coming").innerHTML = parts.join("<br><br>");
   renderTrucks(p);
+}
+
+// Consolidations a coordinator has already made, read from her note on the
+// ClickUp list. These are not suggestions — they are trucks being filled right
+// now, and the useful move is to put more freight on one rather than book
+// another (decision D6 with Edgar, 22 Sep).
+function renderGroups(p) {
+  const gs = p.groups || [];
+  $("#grouphead").style.display = gs.length ? "" : "none";
+  $("#cnt-groups").textContent = gs.length;
+  $("#groups").innerHTML = gs.map(g => {
+    const pct = Math.min(100, g.fill_pct);
+    const cls = g.fill_pct >= 85 ? "ok" : (g.fill_pct < 60 ? "lt" : "");
+    return `<div class="load grouped">
+      <h4>${esc(g.name || g.lane)} <span class="tag grp">${g.customers} ${g.customers === 1 ? tr("file") : tr("files")} ${tr("consolidated")}</span>${g.third_party ? `<span class="tag detour">${esc(g.third_party)}</span>` : ""}${g.spare_m3 > 0 ? `<span class="tag xs">${g.spare_m3} m³ ${tr("free")}</span>` : ""}</h4>
+      <div class="fl"><span>${esc(g.leg_label ? tr(g.leg_label) : g.lane)}</span><span>${g.fill_pct}%</span></div>
+      <div class="fillbar"><i class="${cls}" style="width:${pct}%"></i></div>
+      ${g.members.map(m => `<div class="row" data-id="${esc(m.id)}"><div class="who"><b>${esc(m.customer)}</b><br><span class="rs">${esc(m.source)}${m.reference ? " · " + esc(m.reference) : ""} · → ${esc(m.destination || "?")}</span></div><div class="m3">${m.m3 || 0} m³</div></div>`).join("")}
+      ${g.could_join && g.could_join.length ? `<div class="adv">${tr("Could still join this truck")}: ${g.could_join.map(c => `${esc(c.customer)} (${c.space_m3} m³)`).join(", ")}</div>` : ""}
+      ${g.note ? `<div class="fl" style="margin-top:6px"><span class="rs">${tr("note")}: ${esc(g.note)}</span></div>` : ""}
+    </div>`; }).join("");
+}
+
+// The Plan de Viajes is republished about three times a day and services
+// sometimes vanish or move. The team's defence today is screenshots; this panel
+// is the dashboard keeping the receipts instead (training, 21 Sep).
+async function loadPlanChanges() {
+  let h = null;
+  try { h = await fetch(`/crossborder/api/plan-history?limit=12&kind=vanished,date_changed,unit_changed`).then(r => r.json()); }
+  catch (e) { return; }
+  const ev = (h && h.events) || [];
+  $("#planchangehead").style.display = ev.length ? "" : "none";
+  $("#planchanges").style.display = ev.length ? "" : "none";
+  $("#cnt-planchanges").textContent = ev.length;
+  const label = {vanished: tr("disappeared"), date_changed: tr("date changed"), unit_changed: tr("truck changed")};
+  $("#planchanges").innerHTML = ev.map(e =>
+    `<div class="planchg"><span class="k ${esc(e.kind)}">${esc(label[e.kind] || e.kind)}</span><span>${esc(e.detail || "")}</span><span class="at">${esc((e.at || "").replace("T", " ").slice(0, 16))}</span></div>`).join("");
 }
 
 // TRS already runs trucks to these hubs with space left on them. This panel is

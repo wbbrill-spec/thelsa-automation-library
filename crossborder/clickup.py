@@ -158,12 +158,19 @@ class ClickUpClient:
         return self.get(f"list/{list_id}")
 
     def list_comments(self, list_id: str) -> list[dict]:
-        """Comments left on the shipment list itself.
-
-        This is where Fernanda writes her consolidation note (decision D6,
-        2026-09-22), so it is worth one extra request per list. Read-only.
-        """
+        """Comments left on the shipment list itself. Read-only."""
         return self.get(f"list/{list_id}/comment").get("comments", [])
+
+    def task_comments(self, task_id: str) -> list[dict]:
+        """Comments left on one checklist step.
+
+        This is where the consolidation note actually lives. Fernanda's first
+        live note (22 Sep 2026) was a comment on step 5, "Confirmar Recepción
+        en Bodega" — not on the list. There is no bulk endpoint for task
+        comments, so `tim.py` picks a handful of steps per shipment rather than
+        asking for all thirteen. Read-only.
+        """
+        return self.get(f"task/{task_id}/comment").get("comments", [])
 
     def inspect_list(self, list_id: str) -> dict:
         """Everything about one list, for validating the real ClickUp structure:

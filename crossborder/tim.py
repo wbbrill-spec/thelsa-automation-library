@@ -214,6 +214,48 @@ def today_utc_ms() -> int:
     return int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000)
 
 
+# Where a consolidation note gets written. Fernanda's first live note (22 Sep
+# 2026) was a comment on step 5, "Confirmar Recepción en Bodega" — the moment
+# the freight lands in the border warehouse and she decides what crosses with
+# what. These are the steps around that decision. ClickUp has no bulk endpoint
+# for task comments, so asking about all thirteen steps of every shipment would
+# roughly quadruple the walk; asking about these four or five costs little and
+# covers where the note is actually left.
+NOTE_STEP_KEYWORDS = [
+    "confirmar recepcion en bodega",      # 5 — where Fernanda wrote hers
+    "descarga en bodega",                 # 9 — the Monterrey hub
+    "importacion y cruce",                # 7 — booking the crossing
+    "luz verde",                          # 4
+    "logistica de entrega",               # 10
+]
+NOTE_STEPS_MAX = int(os.environ.get("CB_GROUP_NOTE_STEPS", "5") or 5)
+
+
+def note_candidate_tasks(tasks: list[dict], current_step: str = "") -> list[dict]:
+    """The handful of steps worth asking ClickUp for comments on."""
+    steps = [t for t in tasks or [] if not t.get("parent") and t.get("id")]
+    picked: list[dict] = []
+    seen: set = set()
+    for needle in NOTE_STEP_KEYWORDS:
+        for t in steps:
+            if t["id"] in seen:
+                continue
+            if needle in norm_text(t.get("name")):
+                picked.append(t)
+                seen.add(t["id"])
+                break
+    # Whatever step the file is sitting on right now, mapped or not — a note is
+    # most likely on the step somebody is actually working.
+    if current_step:
+        cur = norm_text(current_step)
+        for t in steps:
+            if t["id"] not in seen and norm_text(t.get("name")) == cur:
+                picked.append(t)
+                seen.add(t["id"])
+                break
+    return picked[:NOTE_STEPS_MAX]
+
+
 def _recently_touched(tasks: list[dict], cutoff_ms: int) -> bool:
     """Has anything on this shipment moved recently enough to be worth a look?"""
     if not cutoff_ms:
@@ -290,21 +332,35 @@ def fetch_tim_shipments(client: Optional[ClickUpClient] = None,
     notes_on = (os.environ.get("CB_GROUP_NOTES", "1") or "1").lower() in ("1", "true", "yes")
     note_days = int(os.environ.get("CB_GROUP_NOTE_DAYS", "45") or 45)
     note_cutoff = (today_utc_ms() - note_days * 86_400_000) if note_days else 0
-    note_stats = {"checked": 0, "found": 0}
+    note_stats = {"checked": 0, "found": 0, "task_reads": 0}
 
     def fetch(job):
         lst, folder_name, space, is_completed = job
         try:
             tasks = client.list_tasks(lst["id"], include_closed=True)
-            comments = None
-            if notes_on and not is_completed and _recently_touched(tasks, note_cutoff):
+            # Build first, then decide whether this file is worth asking about:
+            # a delivered or closed shipment is not being consolidated today.
+            s = build_shipment(lst, tasks, folder=folder_name, space=space.get("name", ""),
+                               team_id=team_id, completed=is_completed)
+            worth_reading = (notes_on and not is_completed
+                             and s.stage not in (Stage.DELIVERED, Stage.CLOSED)
+                             and _recently_touched(tasks, note_cutoff))
+            if worth_reading:
+                texts: list[str] = []
                 try:
-                    comments = client.list_comments(lst["id"])
-                    note_stats["checked"] += 1
+                    texts.extend(grouping.note_texts({}, client.list_comments(lst["id"])))
                 except Exception as exc:  # noqa: BLE001 — a missing note is not an outage
                     log.debug("list comments unavailable for %s: %s", lst.get("name"), exc)
-            s = build_shipment(lst, tasks, folder=folder_name, space=space.get("name", ""),
-                               team_id=team_id, completed=is_completed, comments=comments)
+                # The note actually lives on a checklist step, so ask about the
+                # few steps where the consolidation decision gets made.
+                for t in note_candidate_tasks(tasks, s.current_step):
+                    try:
+                        texts.extend(grouping.note_texts({}, client.task_comments(t["id"])))
+                        note_stats["task_reads"] += 1
+                    except Exception as exc:  # noqa: BLE001
+                        log.debug("task comments unavailable for %s: %s", t.get("name"), exc)
+                note_stats["checked"] += 1
+                grouping.apply_note(s, texts + grouping.note_texts(lst, None, tasks))
             if s.consolidation:
                 note_stats["found"] += 1
             return s, None

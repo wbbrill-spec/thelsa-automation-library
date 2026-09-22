@@ -479,6 +479,17 @@ class Shipment:
         return str(self.consolidation.get("group") or "")
 
     @property
+    def consolidated_with(self) -> list:
+        """The other files on this truck, as the board names them.
+
+        ["TMS - 110719", "TIM - 121722", …] — source and job number, which is
+        what a coordinator needs to go and look one up (Bill, 2026-09-22).
+        Filled by grouping.resolve_groups once every source has been merged.
+        """
+        g = (self.extra or {}).get("consolidation_group")
+        return list(g.get("consolidated_with") or []) if isinstance(g, dict) else []
+
+    @property
     def is_grouped(self) -> bool:
         """Already put on a truck with other files — off the suggestion list."""
         return bool(self.consolidation.get("grouped"))
@@ -515,6 +526,7 @@ class Shipment:
         d["is_door_to_door"] = self.is_door_to_door
         d["consolidation"] = self.consolidation
         d["group_name"] = self.group_name
+        d["consolidated_with"] = self.consolidated_with
         d["is_grouped"] = self.is_grouped
         d["do_not_consolidate"] = self.do_not_consolidate
         return d

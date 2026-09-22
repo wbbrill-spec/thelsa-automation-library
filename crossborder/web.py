@@ -93,6 +93,15 @@ def _refresh_worker(include_completed: bool, prog: dict):
         # a mystery.
         shipments, excl = rules.board_exclusions(shipments)
         diag["excluded"] = excl
+        # Link each consolidation note to the files it names. This has to run
+        # after every source has been merged: Fernanda writes one note naming
+        # seven other customers, and some of those are Moveware files, so the
+        # names can only be resolved once TIM and TMS are on the same board.
+        try:
+            diag["consolidation_groups"] = grouping.resolve_groups(shipments)
+        except Exception as exc:  # noqa: BLE001 — never lose the board over a note
+            log.exception("consolidation grouping failed")
+            diag["consolidation_groups"] = {"error": f"{type(exc).__name__}: {exc}"}
         # SIT "Plan de Viajes" — the Mexican onward leg (truck, driver, dates)
         # and the real trucks the engine can offer. A SIT failure must never
         # cost us the board, same rule as Moveware and Remisiones.
@@ -419,6 +428,7 @@ def api_shipments():
                                     "errors": diag.get("errors"), "demo": diag.get("demo"), "sit": diag.get("sit"),
                                     "excluded": diag.get("excluded"),
                                     "consolidation_notes": diag.get("consolidation_notes"),
+                                    "consolidation_groups": diag.get("consolidation_groups"),
                                     "tms": {k: v for k, v in (diag.get("tms") or {}).items()
                                             if k in ("env", "count", "error", "rows_seen", "cross_border", "by_direction",
                                                      "details_fetched", "requests_made", "by_stage", "excluded_us_diplomatic",
@@ -513,8 +523,8 @@ def api_rules():
             "consolidate_door_to_door": os.environ.get("CB_CONSOLIDATE_DTD", "") in ("1", "true", "yes"),
             "show_us_diplomatic": os.environ.get("CROSSBORDER_SHOW_DIPLOMATIC", "") in ("1", "true", "yes"),
         },
-        "consolidation_notes": (diag.get("consolidation_notes")
-                                or (diag.get("tim") or {}).get("consolidation_notes")),
+        "consolidation_notes": diag.get("consolidation_notes"),
+        "consolidation_groups": diag.get("consolidation_groups"),
         "status": status,
     })
 

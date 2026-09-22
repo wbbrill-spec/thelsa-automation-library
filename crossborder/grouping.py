@@ -36,14 +36,26 @@ on one is a truck that leaves without it.
 """
 from __future__ import annotations
 
+import difflib
 import os
 import re
 import unicodedata
 from typing import Optional
 
-__all__ = ["parse_note", "note_texts", "apply_note", "group_key", "SUGGESTED_FORMAT"]
+__all__ = ["parse_note", "note_texts", "apply_note", "group_key", "resolve_groups",
+           "SUGGESTED_FORMAT", "MAX_NAMES", "NAME_THRESHOLD"]
 
 SUGGESTED_FORMAT = "[CONSOLIDADO] grupo: <nombre> | con: <cliente>, <cliente> | tercero: <transportista>"
+
+# How many customers one note may name. Fernanda's first live note (22 Sep)
+# named seven; a consolidated import runs to five or six customers and
+# occasionally more, so this is set well clear of real practice.
+MAX_NAMES = int(os.environ.get("CB_GROUP_MAX_NAMES", "12") or 12)
+
+# How close a name in the note has to be to a customer on the board.
+# Deliberately strict: putting the wrong file on a truck is worse than
+# leaving a name unmatched and saying so.
+NAME_THRESHOLD = float(os.environ.get("CB_GROUP_NAME_THRESHOLD", "0.84") or 0.84)
 
 # Carriers the team names when freight moves with somebody else (training,
 # 21 Sep). CB_THIRD_PARTY_CARRIERS adds to the list without a code change.
@@ -111,7 +123,10 @@ def _names(chunk: str) -> list[str]:
         if _fold(n) not in seen:
             seen.add(_fold(n))
             uniq.append(n)
-    return uniq[:6]
+    # Fernanda's first real note (22 Sep) named SEVEN other customers on one
+    # import. A cap of six silently dropped the last one, which is the worst
+    # possible failure here — a file quietly left off a truck it is on.
+    return uniq[:MAX_NAMES]
 
 
 def parse_note(text: Optional[str]) -> Optional[dict]:
@@ -228,13 +243,156 @@ def apply_note(shipment, texts: list[str], source: str = "clickup") -> Optional[
     return None
 
 
+# ── turning the names in a note into real files on the board ────────────────
+# How Fernanda actually works (her first live note, 22 Sep 2026):
+#
+#     on "Ana Saldivar - GoArmstrong - …", step 5:
+#     "importación junto con:
+#      jorge loredo, sandra guadalupe, carol ann ashworth, christian latino,
+#      orlando perez, daniel moya, giovanna bartel"
+#
+# She writes the note ONCE, on one file, and names the others. The other seven
+# files carry nothing. So a group is not "the shipments that have a note" — it
+# is one note's file plus everyone it names, resolved against the board. Those
+# seven must come off the suggestion list too, or the planner will cheerfully
+# propose a second truck for freight that is already on the first.
+
+
+def _match_name(name: str, pool: list, exclude_ids: set) -> tuple:
+    """(shipment, score) for the closest customer on the board, or (None, score)."""
+    target = _fold(name)
+    if not target:
+        return None, 0.0
+    best, score = None, 0.0
+    for s in pool:
+        if s.id in exclude_ids:
+            continue
+        cand = _fold(getattr(s, "customer_name", ""))
+        if not cand:
+            continue
+        r = difflib.SequenceMatcher(None, target, cand).ratio()
+        # "jorge loredo" against "Jorge Loredo Martinez" is the same person;
+        # a containment hit counts as a strong match even though the ratio dips.
+        if target in cand or cand in target:
+            r = max(r, 0.95)
+        if r > score:
+            best, score = s, r
+    return (best, score) if score >= NAME_THRESHOLD else (None, score)
+
+
+def _label(s) -> str:
+    """How a file is named on the board: 'TMS - 110719' / 'TIM - 121722'."""
+    src = getattr(getattr(s, "source", None), "value", "") or "?"
+    ref = str(getattr(s, "reference_number", "") or "").strip() or str(getattr(s, "source_ref", "") or "").strip()
+    return f"{src} - {ref}" if ref else f"{src} - {getattr(s, 'customer_name', '?')}"
+
+
+def resolve_groups(shipments: list) -> dict:
+    """Link every consolidation note to the files it names. Mutates shipments.
+
+    Returns diagnostics: how many notes were read, how many files ended up in a
+    group, and — importantly — which names could NOT be matched to anything on
+    the board, so an unmatched customer is a visible fact rather than a silent
+    omission.
+    """
+    ships = [s for s in shipments or [] if getattr(s, "is_open", True)]
+    by_id = {s.id: s for s in ships}
+    carriers = [s for s in ships if s.consolidation and s.consolidation.get("grouped")]
+    diag = {"notes": len(carriers), "groups": 0, "members": 0,
+            "matched": 0, "unmatched": [], "linked": 0}
+    if not carriers:
+        return diag
+
+    # 1. Each note gives a set of files: its own, plus everyone it names.
+    sets: list[dict] = []
+    for s in carriers:
+        c = s.consolidation
+        members = {s.id}
+        named: list[dict] = []
+        for name in c.get("with") or []:
+            hit, score = _match_name(name, ships, {s.id})
+            if hit is not None:
+                members.add(hit.id)
+                named.append({"name": name, "id": hit.id, "score": round(score, 2)})
+                diag["matched"] += 1
+            else:
+                named.append({"name": name, "id": None, "score": round(score, 2)})
+                diag["unmatched"].append(f"{name} (best {score:.2f}, note on {s.customer_name})")
+        sets.append({"carrier": s.id, "members": members, "named": named,
+                     "note": c.get("note", ""), "third_party": c.get("third_party", ""),
+                     "label": c.get("group", ""),
+                     "do_not_consolidate": bool(c.get("do_not_consolidate"))})
+
+    # 2. Two notes that name each other are ONE truck, not two. Merge any sets
+    #    that share a file.
+    merged: list[dict] = []
+    for cur in sets:
+        hit = next((m for m in merged if m["members"] & cur["members"]), None)
+        if hit is None:
+            merged.append({**cur, "carriers": [cur["carrier"]], "members": set(cur["members"]),
+                           "named": list(cur["named"])})
+            continue
+        hit["members"] |= cur["members"]
+        hit["carriers"].append(cur["carrier"])
+        hit["named"].extend(cur["named"])
+        hit["note"] = hit["note"] or cur["note"]
+        hit["third_party"] = hit["third_party"] or cur["third_party"]
+        hit["label"] = hit["label"] or cur["label"]
+        hit["do_not_consolidate"] = hit["do_not_consolidate"] or cur["do_not_consolidate"]
+
+    # 3. Write the group onto every file in it, including the ones that were
+    #    only named by somebody else's note.
+    for n, g in enumerate(merged, 1):
+        members = [by_id[i] for i in g["members"] if i in by_id]
+        if len(members) < 2 and not g["third_party"]:
+            # A note naming nobody we can find is still a note — keep it on its
+            # own file so the board shows it, but it is not a truck yet.
+            pass
+        gid = g["label"] or f"G{n}"
+        roster = [{"id": m.id, "source": m.source.value, "customer": m.customer_name,
+                   "reference": m.reference_number, "label": _label(m),
+                   "carrier": m.id in g["carriers"]} for m in members]
+        for m in members:
+            others = [r["label"] for r in roster if r["id"] != m.id]
+            m.extra = dict(m.extra or {})
+            m.extra["consolidation_group"] = {
+                "id": gid, "members": roster, "consolidated_with": others,
+                "note": g["note"], "third_party": g["third_party"],
+                "named": g["named"], "carriers": g["carriers"],
+            }
+            if not m.consolidation:
+                # Named by someone else's note. Say so plainly — whose note it
+                # was matters when a coordinator wants to check.
+                who = ", ".join(by_id[c].customer_name for c in g["carriers"] if c in by_id)
+                m.extra["consolidation"] = {
+                    "grouped": True,
+                    "do_not_consolidate": g["do_not_consolidate"],
+                    "group": gid, "with": [], "third_party": g["third_party"],
+                    "note": g["note"], "source": f"named in {who}'s note",
+                    "why": f"named in {who}'s consolidation note",
+                }
+                if "grouped" not in (m.status_flags or []):
+                    m.status_flags = list(m.status_flags or []) + ["grouped"]
+                diag["linked"] += 1
+            else:
+                m.extra["consolidation"] = {**m.consolidation, "group": gid}
+        diag["members"] += len(members)
+    diag["groups"] = len(merged)
+    diag["unmatched"] = diag["unmatched"][:20]
+    return diag
+
+
 def group_key(shipment) -> str:
     """The key that puts two grouped shipments on the same truck card.
 
-    A written group label wins. Without one, the names in the note tie the
-    files together: "consolidado con Ana Ruiz" on Ana's file and on Luis's file
-    should be one truck, so the key is the sorted set of everyone involved.
+    A group resolved against the board wins outright — that is the real one.
+    Otherwise a written group label, and failing that the names in the note:
+    "consolidado con Ana Ruiz" on Ana's file and on Luis's file should be one
+    truck, so the key is the sorted set of everyone involved.
     """
+    g = (shipment.extra or {}).get("consolidation_group")
+    if isinstance(g, dict) and g.get("id"):
+        return f"group:{_fold(g['id'])}"
     c = shipment.consolidation
     if not c:
         return ""

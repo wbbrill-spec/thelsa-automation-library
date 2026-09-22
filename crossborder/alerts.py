@@ -63,6 +63,9 @@ DEFAULT_OWNER = TIM_OWNER        # back-compat alias
 KNOWN_EMAILS: dict[str, str] = {
     "fernanda mora": "fernandamora@thelsa.com",
     "sara reyes": "sarareyes@thelsa.com",
+    # Supervisor for the roll-up below (Bill, 2026-09-22).
+    "gustavo": "gustavogonzalez@thelsa.com",
+    "gustavo gonzalez": "gustavogonzalez@thelsa.com",
 }
 
 # Priority order — the most urgent reason a shipment appears in someone's list.
@@ -120,7 +123,7 @@ def _cc_list() -> list[str]:
 # asked to see the same picture. CB_ALERT_SUPERVISORS takes names, addresses, or
 # "Name:address" pairs; a name with no address on file routes to the fallback
 # inbox with a line saying who it was meant for, rather than to a guessed one.
-DEFAULT_SUPERVISOR = "Gustavo"
+DEFAULT_SUPERVISOR = "Gustavo Gonzalez"
 
 
 def supervisors() -> list[tuple[str, str, bool]]:

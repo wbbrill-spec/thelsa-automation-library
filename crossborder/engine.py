@@ -750,6 +750,11 @@ def existing_groups(shipments: list[Shipment], ready: list[Item],
         g["members"].append({
             "id": s.id, "source": s.source.value, "customer": s.customer_name,
             "reference": s.reference_number, "destination": s.destination,
+            # "TMS - 110719" — source and job number, what a coordinator needs
+            # in order to go and look the other file up (Bill, 2026-09-22).
+            "label": grouping._label(s),
+            "consolidated_with": s.consolidated_with,
+            "carrier": bool(s.consolidation.get("with")),
             "m3": s.planning_m3, "space_m3": round(space, 2),
             "u_boxes": s.u_boxes_planned, "lift_vans": s.lift_vans_planned,
             "stage": s.stage.value, "url": s.url,
@@ -760,6 +765,9 @@ def existing_groups(shipments: list[Shipment], ready: list[Item],
         g["lift_vans"] += s.lift_vans_planned
         if not g["name"] and s.group_name:
             g["name"] = s.group_name
+        gg = (s.extra or {}).get("consolidation_group") or {}
+        if gg.get("named") and not g.get("unmatched"):
+            g["unmatched"] = [n["name"] for n in gg["named"] if not n.get("id")]
 
     out = []
     for g in by_key.values():
@@ -791,6 +799,12 @@ def _group_advice(g: dict) -> str:
             f"consolidated ({who}) — {g['fill_pct']}% of a trailer.")
     if g["third_party"]:
         head += f" Moving with {g['third_party']}."
+    if g.get("unmatched"):
+        # A name in the note that matches nothing on the board is the one thing
+        # here worth interrupting somebody about: either the file is not in
+        # ClickUp or Moveware yet, or it is spelled differently.
+        head += (" Named in the note but not found on the board: "
+                 + ", ".join(g["unmatched"]) + ".")
     if g["could_join"]:
         names = ", ".join(c["customer"] for c in g["could_join"][:3])
         return head + (f" {g['spare_m3']} m³ is still free — {names} "

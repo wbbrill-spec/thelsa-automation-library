@@ -96,7 +96,8 @@ main { max-width: 1500px; margin: 0 auto; padding: 22px 24px 60px; }
 .load .row .who { flex: 1; min-width: 0; }
 .load .row .m3 { white-space: nowrap; color: #333; font-weight: 600; }
 .load .adv { font-size: 12px; color: #92400e; background: #fff8ec; border-radius: 8px; padding: 8px 10px; margin-top: 8px; line-height: 1.45; }
-.load .adv.info { color: #1e4d7b; background: #eef5fc; }
+.load .adv.info, .adv.info { color: #1e4d7b; background: #eef5fc; border-radius: 8px; padding: 8px 10px; font-size: 12px; line-height: 1.45; }
+.card .cons { font-size: 10px; font-weight: 700; color: #1e7e34; background: #e6f4ea; border-radius: 6px; padding: 3px 6px; margin-top: 4px; }
 .leghead { grid-column: 1 / -1; font-size: 12px; font-weight: 800; letter-spacing: .02em; color: #333; text-transform: uppercase; margin: 6px 0 -2px; display: flex; align-items: baseline; gap: 10px; }
 .leghead .sub { font-weight: 500; text-transform: none; letter-spacing: 0; color: #777; font-size: 11px; }
 .load.grouped { border-color: #1e7e34; box-shadow: 0 0 0 1px #e6f4ea inset; }
@@ -371,6 +372,9 @@ const ES = {
   "Services that disappeared or moved date since the last republication.":
     "Servicios que desaparecieron o cambiaron de fecha desde la última publicación.",
   "disappeared": "desapareció", "date changed": "cambió de fecha", "truck changed": "cambió de unidad",
+  "with": "con", "the note is on this file": "la nota está en este expediente",
+  "Not for consolidation": "No consolidar", "Moving with": "Se mueve con",
+  "Named in the note but not found on the board": "Mencionados en la nota pero no encontrados en el tablero",
   "✉ Draft today's load email": "✉ Borrador del correo de cargas de hoy",
   "Needs attention": "Requiere atención",
   "Hub load (open imports, m³ vs one 53' trailer)": "Carga por hub (importaciones abiertas, m³ vs. un tráiler de 53')",
@@ -674,7 +678,8 @@ function renderGroups(p) {
       <h4>${esc(g.name || g.lane)} <span class="tag grp">${g.customers} ${g.customers === 1 ? tr("file") : tr("files")} ${tr("consolidated")}</span>${g.third_party ? `<span class="tag detour">${esc(g.third_party)}</span>` : ""}${g.spare_m3 > 0 ? `<span class="tag xs">${g.spare_m3} m³ ${tr("free")}</span>` : ""}</h4>
       <div class="fl"><span>${esc(g.leg_label ? tr(g.leg_label) : g.lane)}</span><span>${g.fill_pct}%</span></div>
       <div class="fillbar"><i class="${cls}" style="width:${pct}%"></i></div>
-      ${g.members.map(m => `<div class="row" data-id="${esc(m.id)}"><div class="who"><b>${esc(m.customer)}</b><br><span class="rs">${esc(m.source)}${m.reference ? " · " + esc(m.reference) : ""} · → ${esc(m.destination || "?")}</span></div><div class="m3">${m.m3 || 0} m³</div></div>`).join("")}
+      ${g.members.map(m => `<div class="row" data-id="${esc(m.id)}"><div class="who"><b>${esc(m.customer)}</b> <span class="tag grp">${esc(m.label)}</span>${m.carrier ? ` <span class="tag xs" title="${tr("the note is on this file")}">${tr("note")}</span>` : ""}<br><span class="rs">→ ${esc(m.destination || "?")}${(m.consolidated_with || []).length ? ` · ${tr("with")} ${esc(m.consolidated_with.join(", "))}` : ""}</span></div><div class="m3">${m.m3 || 0} m³</div></div>`).join("")}
+      ${(g.unmatched || []).length ? `<div class="adv">${tr("Named in the note but not found on the board")}: ${esc(g.unmatched.join(", "))}</div>` : ""}
       ${g.could_join && g.could_join.length ? `<div class="adv">${tr("Could still join this truck")}: ${g.could_join.map(c => `${esc(c.customer)} (${c.space_m3} m³)`).join(", ")}</div>` : ""}
       ${g.note ? `<div class="fl" style="margin-top:6px"><span class="rs">${tr("note")}: ${esc(g.note)}</span></div>` : ""}
     </div>`; }).join("");
@@ -802,6 +807,28 @@ function renderKpis() {
   });
 }
 
+// "Already consolidated with TMS - 110719, TIM - 121722" (Bill, 2026-09-22).
+// Naming the other files by source and job number is the point: a coordinator
+// who sees this has to be able to go and open them.
+function consolidatedLine(s) {
+  if (!s.is_grouped) return "";
+  const w = s.consolidated_with || [];
+  return `<div class="cons">${tr("Already consolidated")}${w.length ? ` ${tr("with")} ${esc(w.join(", "))}` : ""}</div>`;
+}
+
+function consolidatedBlock(s) {
+  const c = s.consolidation || {};
+  if (!s.is_grouped && !s.do_not_consolidate) return "";
+  const w = s.consolidated_with || [];
+  const head = s.is_grouped ? tr("Already consolidated") : tr("Not for consolidation");
+  return `<div class="adv info" style="margin-bottom:14px">
+    <b>${head}</b>${w.length ? ` — ${tr("with")} ${esc(w.join(", "))}` : ""}
+    ${c.third_party ? `<br>${tr("Moving with")} ${esc(c.third_party)}` : ""}
+    ${c.note ? `<br><span class="rs">${tr("note")}: ${esc(c.note)}</span>` : ""}
+    ${c.source ? `<br><span class="rs">${esc(c.source)}</span>` : ""}
+  </div>`;
+}
+
 function cardHtml(s) {
   const flags = s.status_flags.filter(f => f !== "in_progress");
   const prim = ALERT_FLAGS.find(f => s.status_flags.includes(f)) || (s.status_flags.includes("in_progress") ? "in_progress" : "");
@@ -812,6 +839,7 @@ function cardHtml(s) {
     <div class="ag">${esc(s.agent || "?")}${s.reference_number ? " · " + esc(s.reference_number) : ""}</div>
     ${s.destination ? `<div class="dest">→ ${esc(s.destination)}${s.destination_hub && s.destination_hub !== "Unknown" ? ` <span style="color:#999">(${esc(s.destination_hub)})</span>` : ""}</div>` : ""}
     <div class="meta">${vol ? `<span class="tag vol">${esc(vol)}</span>` : ""}${flags.map(f => `<span class="tag ${f}">${esc(tr(FLAG_LABEL[f] || f))}</span>`).join("")}</div>
+    ${consolidatedLine(s)}
     ${s.current_step ? `<div class="step">${esc(s.current_step)}${s.days_since_progress != null ? ` · ${s.days_since_progress}d` : ""}</div>` : ""}
     ${s.steps_total ? `<div class="bar"><i style="width:${pct}%"></i></div>` : ""}
   </div>`;
@@ -896,6 +924,7 @@ function openDrawer(id) {
   $("#dbody").innerHTML = `<h2>${esc(s.customer_name)}${isDemo(s) ? ' <span class="src demo">DEMO</span>' : ""}</h2>
     <div class="sub">${s.source !== "TIM" ? `<span class="src">${esc(s.source)}</span> ` : ""}${esc(s.agent || "?")}${s.reference_number ? " · " + esc(s.reference_number) : ""}${s.url ? ` · <a href="${esc(s.url)}" target="_blank" style="color:#1967d2">${tr("open in ClickUp ↗")}</a>` : " · " + tr("Moveware job")}</div>
     <div class="meta" style="margin-bottom:14px">${s.status_flags.map(f => `<span class="tag ${f}">${esc(tr(FLAG_LABEL[f] || f))}</span>`).join(" ")}</div>
+    ${consolidatedBlock(s)}
     <div class="kv">
       <b>${tr("Stage")}</b><span>${esc(STAGE_LABEL[s.stage] || s.stage)}</span>
       <b>${tr("Current step")}</b><span>${s.steps_total ? `${esc(s.current_step || "—")} (${s.steps_done}/${s.steps_total}, ${s.process_format || "?"})` : esc(s.source_status || "—") + (ex.direction ? ` · ${esc(ex.direction)}` : "") + (ex.method ? ` · ${esc(ex.method)}` : "")}</span>

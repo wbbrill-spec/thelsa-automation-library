@@ -258,26 +258,56 @@ def apply_note(shipment, texts: list[str], source: str = "clickup") -> Optional[
 # propose a second truck for freight that is already on the first.
 
 
-def _match_name(name: str, pool: list, exclude_ids: set) -> tuple:
-    """(shipment, score) for the closest customer on the board, or (None, score)."""
+def _name_score(target: str, cand: str) -> float:
+    """How likely two written names are the same person.
+
+    A whole-string ratio alone is not enough for the names these notes carry.
+    Measured against Fernanda's live notes on 2026-09-22:
+
+      "christian latino"  vs "Christian Latino <second surname>"  → 0.80 whole-string
+      "chistian latino"   vs the same (she typed it twice, once mistyped)
+      "giovanna bartel"   vs "Giovanna Bartello Franco"
+      "jorge loredo"      vs "Jorge Loredo Duran"
+
+    Mexican files routinely carry two surnames and the note carries one, so the
+    string gets longer at the end and the ratio falls below any threshold worth
+    having. Scoring token by token fixes that without loosening the threshold:
+    every word in the note has to find a good word in the customer name, so
+    "jorge loredo" still does NOT match "Jorge Ramirez".
+    """
+    if not target or not cand:
+        return 0.0
+    score = difflib.SequenceMatcher(None, target, cand).ratio()
+    if target in cand or cand in target:
+        score = max(score, 0.95)
+    ta, tb = target.split(), cand.split()
+    if len(ta) >= 2 and tb:
+        per = [max(difflib.SequenceMatcher(None, t, u).ratio() for u in tb) for t in ta]
+        score = max(score, sum(per) / len(per))
+    return score
+
+
+def _match_name(name: str, pool: list, carrier_id: str = "") -> tuple:
+    """(shipment, score, is_self) for the closest customer on the board.
+
+    `is_self` says the best match is the file the note is written on. Fernanda
+    pastes the same list of customers onto each file in the group, so every
+    note names its own customer. That is not an unmatched name and must never
+    be reported as one.
+    """
     target = _fold(name)
     if not target:
-        return None, 0.0
+        return None, 0.0, False
     best, score = None, 0.0
     for s in pool:
-        if s.id in exclude_ids:
-            continue
-        cand = _fold(getattr(s, "customer_name", ""))
-        if not cand:
-            continue
-        r = difflib.SequenceMatcher(None, target, cand).ratio()
-        # "jorge loredo" against "Jorge Loredo Martinez" is the same person;
-        # a containment hit counts as a strong match even though the ratio dips.
-        if target in cand or cand in target:
-            r = max(r, 0.95)
+        r = _name_score(target, _fold(getattr(s, "customer_name", "")))
         if r > score:
             best, score = s, r
-    return (best, score) if score >= NAME_THRESHOLD else (None, score)
+    if best is None or score < NAME_THRESHOLD:
+        return None, score, False
+    if best.id == carrier_id:
+        return None, score, True
+    return best, score, False
 
 
 def _label(s) -> str:
@@ -299,7 +329,7 @@ def resolve_groups(shipments: list) -> dict:
     by_id = {s.id: s for s in ships}
     carriers = [s for s in ships if s.consolidation and s.consolidation.get("grouped")]
     diag = {"notes": len(carriers), "groups": 0, "members": 0,
-            "matched": 0, "unmatched": [], "linked": 0}
+            "matched": 0, "unmatched": [], "linked": 0, "self_named": 0}
     if not carriers:
         return diag
 
@@ -310,7 +340,12 @@ def resolve_groups(shipments: list) -> dict:
         members = {s.id}
         named: list[dict] = []
         for name in c.get("with") or []:
-            hit, score = _match_name(name, ships, {s.id})
+            hit, score, is_self = _match_name(name, ships, s.id)
+            if is_self:
+                # The note names its own customer — she pastes the same list
+                # onto every file. Nothing to resolve, nothing to report.
+                diag["self_named"] += 1
+                continue
             if hit is not None:
                 members.add(hit.id)
                 named.append({"name": name, "id": hit.id, "score": round(score, 2)})

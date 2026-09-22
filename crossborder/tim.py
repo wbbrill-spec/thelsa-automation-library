@@ -221,14 +221,23 @@ def today_utc_ms() -> int:
 # for task comments, so asking about all thirteen steps of every shipment would
 # roughly quadruple the walk; asking about these four or five costs little and
 # covers where the note is actually left.
+# Measured on the live workspace, 2026-09-22: asking about five steps on every
+# open file cost 232 extra requests and pushed a refresh past four minutes,
+# which is longer than the cache it fills. Both notes Fernanda had written were
+# on the warehouse step, so the list is ordered by where a note actually turns
+# up and cut to two per file.
 NOTE_STEP_KEYWORDS = [
-    "confirmar recepcion en bodega",      # 5 — where Fernanda wrote hers
+    "confirmar recepcion en bodega",      # 5 — where both live notes were
     "descarga en bodega",                 # 9 — the Monterrey hub
     "importacion y cruce",                # 7 — booking the crossing
-    "luz verde",                          # 4
-    "logistica de entrega",               # 10
 ]
-NOTE_STEPS_MAX = int(os.environ.get("CB_GROUP_NOTE_STEPS", "5") or 5)
+NOTE_STEPS_MAX = int(os.environ.get("CB_GROUP_NOTE_STEPS", "2") or 2)
+
+# Only files that could still be consolidated are worth asking about. A file
+# waiting on documents has nothing to group yet, and one out for delivery is
+# past the point of caring.
+NOTE_STAGES = {Stage.GREEN_LIGHT, Stage.TO_BORDER, Stage.CUSTOMS,
+               Stage.AT_HUB, Stage.ONWARD}
 
 
 def note_candidate_tasks(tasks: list[dict], current_step: str = "") -> list[dict]:
@@ -343,7 +352,7 @@ def fetch_tim_shipments(client: Optional[ClickUpClient] = None,
             s = build_shipment(lst, tasks, folder=folder_name, space=space.get("name", ""),
                                team_id=team_id, completed=is_completed)
             worth_reading = (notes_on and not is_completed
-                             and s.stage not in (Stage.DELIVERED, Stage.CLOSED)
+                             and s.stage in NOTE_STAGES
                              and _recently_touched(tasks, note_cutoff))
             if worth_reading:
                 texts: list[str] = []

@@ -54,7 +54,11 @@ crossborder_bp = Blueprint("crossborder", __name__)
 
 _CACHE: dict = {"at": 0.0, "shipments": None, "diag": None, "completed": False,
                 "refreshing": False, "progress": {}, "error": None, "started_at": 0.0}
-_CACHE_TTL = int(os.environ.get("CROSSBORDER_CACHE_TTL", "300") or 300)
+# 10 minutes, not 5. Reading the consolidation notes made a full walk take
+# two to four minutes; a cache shorter than the walk that fills it means the
+# board is permanently mid-refresh. Shipment data does not change minute to
+# minute, and ?refresh=1 is there when somebody wants it now.
+_CACHE_TTL = int(os.environ.get("CROSSBORDER_CACHE_TTL", "600") or 600)
 _LOCK = threading.Lock()
 
 

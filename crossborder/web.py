@@ -51,6 +51,23 @@ _CACHE_TTL = int(os.environ.get("CROSSBORDER_CACHE_TTL", "300") or 300)
 _LOCK = threading.Lock()
 
 
+def exclude_us_diplomatic(shipments):
+    """Drop US Embassy / US Consulate shipments from the board (Bill, 2026-09-22).
+
+    Decided with Edgar, Fernanda and Sara: the Embassy pays for a dedicated,
+    sealed 53' trailer, does its own consolidation and uses its own customs
+    broker — the team never consolidates this freight, so it has no place on
+    the board, the load planner, the alerts or the revenue view. Detection is
+    Shipment.is_us_diplomatic (corporate account or bill-to names a US
+    Embassy / Consulate). CROSSBORDER_SHOW_DIPLOMATIC=1 brings them back.
+    Returns (kept, number removed).
+    """
+    if os.environ.get("CROSSBORDER_SHOW_DIPLOMATIC", "") in ("1", "true", "yes"):
+        return list(shipments), 0
+    kept = [s for s in shipments if not s.is_us_diplomatic]
+    return kept, len(shipments) - len(kept)
+
+
 def _refresh_worker(include_completed: bool, prog: dict):
     try:
         shipments, diag = tim.fetch_tim_shipments(include_completed=include_completed, progress=prog)
@@ -71,8 +88,9 @@ def _refresh_worker(include_completed: bool, prog: dict):
         # failure never drops the TIM fleet either.
         if os.environ.get("TMS_ENABLED", "1") in ("1", "true", "yes"):
             tms_ships, tdiag = _tms_cached(prog)
+            tms_ships, excluded = exclude_us_diplomatic(tms_ships)
             shipments = shipments + tms_ships
-            diag["tms"] = tdiag
+            diag["tms"] = {**tdiag, "excluded_us_diplomatic": excluded}
         # SIT "Plan de Viajes" — the Mexican onward leg (truck, driver, dates)
         # and the real trucks the engine can offer. A SIT failure must never
         # cost us the board, same rule as Moveware and Remisiones.
@@ -390,7 +408,7 @@ def api_shipments():
                                     "errors": diag.get("errors"), "demo": diag.get("demo"), "sit": diag.get("sit"),
                                     "tms": {k: v for k, v in (diag.get("tms") or {}).items()
                                             if k in ("env", "count", "error", "rows_seen", "cross_border", "by_direction",
-                                                     "details_fetched", "requests_made", "by_stage",
+                                                     "details_fetched", "requests_made", "by_stage", "excluded_us_diplomatic",
                                                      "stale", "stale_reason", "stale_since", "stale_age_s",
                                                      "slice_errors", "slice_error_sample", "cache_age_s")}},
                     "shipments": [s.to_dict() for s in shipments]})

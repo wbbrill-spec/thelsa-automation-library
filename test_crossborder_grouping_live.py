@@ -155,3 +155,47 @@ def test_an_unmatched_name_reaches_the_advice_line():
     g = engine.plan(ships, today=TODAY)["groups"][0]
     assert g["unmatched"] == ["Fantasma Inexistente"]
     assert "not found on the board" in g["advice"]
+
+
+# ── what the first live run on the real workspace exposed (22 Sep) ──────────
+@pytest.mark.parametrize("written,on_the_board,same", [
+    # Mexican files carry two surnames; the note carries one. A whole-string
+    # ratio puts these at 0.80 and below, which is why scoring is per token.
+    ("christian latino", "Christian Latino Ruiz", True),
+    ("chistian latino", "Christian Latino Ruiz", True),      # she mistyped it once
+    ("giovanna bartel", "Giovanna Bartello Franco", True),
+    ("jorge loredo", "Jorge Loredo Duran", True),
+    ("sandra guadalupe", "Sandra Guadalupe Mora", True),
+    # …without letting a shared first name through
+    ("jorge loredo", "Jorge Ramirez Solis", False),
+    ("daniel moya", "Zulema Ortiz", False),
+])
+def test_a_note_name_matches_the_fuller_name_on_the_board(written, on_the_board, same):
+    anchor = ship(1, "Ana Saldivar", note=f"consolidado con {written}")
+    other = ship(2, on_the_board, ref="130044")
+    grouping.resolve_groups([anchor, other])
+    assert other.is_grouped is same
+
+
+def test_a_note_naming_its_own_customer_is_not_an_unmatched_name():
+    """She pastes the same customer list onto every file in the group, so each
+    note names its own customer. Reporting that as 'not found on the board'
+    sent the team looking for a file that was right in front of them."""
+    a = ship(1, "Carol Ann Ashworth", ref="121722",
+             note="importación junto con: carol ann ashworth, jorge loredo")
+    b = ship(2, "Jorge Loredo Duran", ref="130044")
+    diag = grouping.resolve_groups([a, b])
+    assert diag["self_named"] == 1
+    assert diag["unmatched"] == []
+    assert diag["matched"] == 1 and diag["members"] == 2
+
+
+def test_the_same_note_on_two_files_is_still_one_truck():
+    """Both of her live notes listed the same customers; they must merge."""
+    names = "importación junto con: ana saldivar, carol ann ashworth, jorge loredo"
+    a = ship(1, "Ana Saldivar", ref="121722", note=names)
+    b = ship(2, "Carol Ann Ashworth", ref="130001", note=names)
+    c = ship(3, "Jorge Loredo Duran", ref="130044")
+    diag = grouping.resolve_groups([a, b, c])
+    assert diag["notes"] == 2 and diag["groups"] == 1 and diag["members"] == 3
+    assert grouping.group_key(a) == grouping.group_key(b) == grouping.group_key(c)

@@ -21,7 +21,7 @@ from zoneinfo import ZoneInfo
 from flask import (Blueprint, Response, abort, jsonify, redirect, render_template_string,
                    request, session, url_for)
 
-from . import db, drafting, graph, priority, scan, vault
+from . import db, drafting, graph, i18n, priority, scan, vault
 
 bp = Blueprint("assistant", __name__)
 MX = ZoneInfo("America/Mexico_City")
@@ -32,6 +32,18 @@ def _admins():
     raw = os.environ.get("ASSISTANT_ADMINS",
                          "bbrill@thelsa.com,bill.brill@inflectionpointnow.com")
     return {e.strip().lower() for e in raw.split(",") if e.strip()}
+
+
+# ── Language ───────────────────────────────────────────────────────────────────
+def user_lang(u=None) -> str:
+    """Saved choice first, then the browser's language, then English."""
+    if u is not None and u.get("lang") in i18n.LANGS:
+        return u["lang"]
+    try:
+        best = request.accept_languages.best_match(["en", "es"])
+    except RuntimeError:
+        best = None
+    return best or "en"
 
 
 # ── Auth helpers ───────────────────────────────────────────────────────────────
@@ -53,8 +65,9 @@ def login_required(f):
             return redirect(url_for("login", next=request.url))
         u = current_user()
         if not u["active"]:
-            return _page("Access paused", "<p class='sub'>Your assistant has been turned off by an "
-                         "administrator.</p>"), 403
+            lang = user_lang(u)
+            return _page(i18n.t(lang, "paused_title"),
+                         f"<p class='sub'>{i18n.t(lang, 'paused_body')}</p>", lang=lang), 403
         return f(u, *a, **k)
     return wrapped
 
@@ -90,35 +103,30 @@ def _mx(dt):
     return dt.astimezone(MX)
 
 
-def _when(dt):
+def _when(dt, lang="en"):
     d = _mx(dt)
     if not d:
         return ""
+    es = lang == "es"
     today = _dt.datetime.now(MX).date()
     days = (today - d.date()).days
     t = d.strftime("%-I:%M %p")
     if days == 0:
-        return f"Today {t}"
+        return f"{'Hoy' if es else 'Today'} {t}"
     if days == 1:
-        return f"Yesterday {t}"
+        return f"{'Ayer' if es else 'Yesterday'} {t}"
     if days == -1:
-        return f"Tomorrow"
-    return d.strftime("%b %-d")
+        return "Mañana" if es else "Tomorrow"
+    return f"{d.day} {i18n.month_abbr(d, lang)}" if es else d.strftime("%b %-d")
 
 
-def _stamp(dt):
+def _stamp(dt, lang="en"):
     d = _mx(dt)
-    return d.strftime("%b %-d, %-I:%M %p") if d else "never"
-
-
-KIND_LABEL = {
-    "needs_reply": "Needs reply", "flagged": "Flagged", "whatsapp": "WhatsApp",
-    "invoice_file": "Invoice file", "invoice_charge": "Invoice charges",
-    "upload_docs": "Send documents", "request_docs": "Request documents",
-    "tim_docs": "Documents pending", "tim_stalled": "Stalled", "tim_step": "Next step",
-}
-SOURCE_LABEL = {"microsoft": "Mail", "moveware": "Moveware (TMS)", "clickup": "ClickUp (TIM)",
-                "whatsapp": "WhatsApp"}
+    if not d:
+        return i18n.t(lang, "never")
+    if lang == "es":
+        return f"{d.day} {i18n.month_abbr(d, lang)}, {d.strftime('%-I:%M %p')}"
+    return d.strftime("%b %-d, %-I:%M %p")
 
 
 # ── Shared page shell ──────────────────────────────────────────────────────────
@@ -173,57 +181,78 @@ th{background:#fafbfc;font-size:11px;text-transform:uppercase;letter-spacing:.5p
 .ok{color:var(--ok);font-weight:600}.bad{color:var(--urgent);font-weight:600}
 input[type=text],input[type=email]{border:1px solid var(--line);border-radius:8px;padding:7px 9px;font:inherit;font-size:13px}
 .foot{margin-top:28px;font-size:12px;color:var(--muted);line-height:1.6}
+.lang{display:inline-flex;border:1px solid var(--line);border-radius:20px;overflow:hidden;margin-left:14px;vertical-align:middle}
+.lang a{margin:0!important;padding:4px 10px;font-size:12px;color:var(--ink)!important}
+.lang a.on{background:var(--ink);color:#fff!important}
 code{background:#eef1f5;padding:2px 6px;border-radius:5px;font-size:12px;overflow-wrap:anywhere}
 @media(max-width:600px){.card .row{flex-direction:column}.card .side{text-align:left}}
 """
 
-SHELL = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+SHELL = """<!doctype html><html lang="{{ lang }}"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{{ title }} — Thelsa AI Assistant</title><style>{{ css|safe }}</style></head><body>
+<title>{{ title }} — {{ t('title_suffix') }}</title><style>{{ css|safe }}</style></head><body>
 <div class="wrap">
   <div class="top"><img src="/static/thelsa_logo.png" alt="Thelsa">
-    <nav>{% if admin %}<a href="/assistant/admin">Admin</a>{% endif %}
-      <a href="/assistant">My dashboard</a><a href="/">← Automation Library</a></nav></div>
+    <nav>{% if admin %}<a href="/assistant/admin">{{ t('nav_admin') }}</a>{% endif %}
+      <a href="/assistant">{{ t('nav_dashboard') }}</a><a href="/">{{ t('nav_library') }}</a>
+      <span class="lang" role="group" aria-label="Language / Idioma">
+        <a href="/assistant/lang/en?next={{ here }}" class="{{ 'on' if lang == 'en' else '' }}">EN</a>
+        <a href="/assistant/lang/es?next={{ here }}" class="{{ 'on' if lang == 'es' else '' }}">ES</a></span></nav></div>
   {{ body|safe }}
 </div></body></html>"""
 
 
-def _page(title, body, admin=False):
-    return render_template_string(SHELL, title=title, css=CSS, body=body, admin=admin)
+def _here():
+    try:
+        p = request.path
+    except RuntimeError:
+        return "/assistant"
+    return p if p.startswith("/assistant") and not p.startswith("/assistant/lang") else "/assistant"
 
 
-def _render(title, tpl, u, **ctx):
-    body = render_template_string(tpl, csrf=_csrf_token(), u=u, **ctx)
-    return _page(title, body, admin=(u and u["role"] == "admin"))
+def _page(title, body, admin=False, lang="en"):
+    return render_template_string(SHELL, title=title, css=CSS, body=body, admin=admin, lang=lang,
+                                  here=_here(), t=lambda k, **kw: i18n.t(lang, k, **kw))
+
+
+def _render(title, tpl, u, lang=None, **ctx):
+    lang = lang or user_lang(u)
+    body = render_template_string(tpl, csrf=_csrf_token(), u=u, lang=lang,
+                                  t=lambda k, **kw: i18n.t(lang, k, **kw), **ctx)
+    return _page(title, body, admin=(u and u["role"] == "admin"), lang=lang)
+
+
+@bp.route("/assistant/lang/<code>")
+@login_required
+def set_language(u, code):
+    if code in i18n.LANGS:
+        db.set_lang(u["id"], code)
+    nxt = request.args.get("next") or "/assistant"
+    if not nxt.startswith("/assistant") or nxt.startswith("//"):
+        nxt = "/assistant"
+    return redirect(nxt)
 
 
 # ── Consent ────────────────────────────────────────────────────────────────────
 CONSENT_TPL = """
 <div class="box">
-  <h1 style="font-size:21px">Your AI Assistant</h1>
-  <p class="sub">Before we set up your personal dashboard, here's exactly what it does.</p>
+  <h1 style="font-size:21px">{{ t('consent_title') }}</h1>
+  <p class="sub">{{ t('consent_sub') }}</p>
   <ul>
-    <li><b>What it reads:</b> the sender, subject and first lines of emails in your Thelsa inbox
-        from the last 7 days, and the Moveware files where you are the coordinator.</li>
-    <li><b>How often:</b> automatically at 6am, 9am, 12pm, 3pm and 6pm (Mexico City), and whenever
-        you press "Refresh now".</li>
-    <li><b>What it stores:</b> only the short list shown on your dashboard. Your mailbox sign-in is
-        stored encrypted so it can refresh while you're away. Full emails are never stored.</li>
-    <li><b>Drafts:</b> it can suggest replies and save them to your Outlook Drafts. It never sends
-        anything.</li>
-    <li><b>Privacy:</b> only you can see your dashboard.</li>
-    <li><b>Stop anytime:</b> "Disconnect" deletes your stored sign-in and everything derived from
-        it immediately.</li>
+    <li>{{ t('consent_reads')|safe }}</li>
+    <li>{{ t('consent_often')|safe }}</li>
+    <li>{{ t('consent_stores')|safe }}</li>
+    <li>{{ t('consent_drafts')|safe }}</li>
+    <li>{{ t('consent_privacy')|safe }}</li>
+    <li>{{ t('consent_stop')|safe }}</li>
   </ul>
   <form method="post" action="/assistant/consent">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <label class="ck"><input type="checkbox" name="agree" required>
-      <span>I agree to the assistant reading my mailbox and Moveware files as described above.</span></label>
+      <span>{{ t('consent_agree') }}</span></label>
     <label class="ck"><input type="checkbox" name="whatsapp">
-      <span><b>Optional (beta):</b> also show unread WhatsApp chats, using a browser extension that
-      reads the chat list only while WhatsApp Web is open in my browser. Chat names and
-      the last-message preview are sent; full history is not.</span></label>
-    <button class="btn" type="submit">Continue</button>
+      <span>{{ t('consent_whatsapp')|safe }}</span></label>
+    <button class="btn" type="submit">{{ t('continue') }}</button>
   </form>
 </div>"""
 
@@ -273,86 +302,85 @@ def disconnect(u, provider):
 # ── Dashboard ──────────────────────────────────────────────────────────────────
 DASH_TPL = """
 <h1>{{ greeting }}, {{ first }}.</h1>
-<p class="sub">Everything that needs you — email{% if wa_on %}, WhatsApp{% endif %}, your Moveware (TMS) files and ClickUp (TIM) shipments — in order of urgency.</p>
+<p class="sub">{{ t('dash_sub') }}</p>
 
 {% if not ready %}
-  <div class="banner warn"><div style="flex:1"><b>Your assistant is almost ready.</b><br>
-    <span class="sub" style="margin:0">The administrator is finishing setup. Your Moveware to-dos show below;
-    email connection will be available shortly.</span></div></div>
+  <div class="banner warn"><div style="flex:1"><b>{{ t('almost_ready') }}</b><br>
+    <span class="sub" style="margin:0">{{ t('almost_ready_sub') }}</span></div></div>
 {% elif not ms %}
-  <div class="banner warn"><div style="flex:1"><b>Connect your Thelsa mailbox</b><br>
-    <span class="sub" style="margin:0">So your assistant can check your email 5 times a day, even when you're not here.</span></div>
-    <a class="btn" href="/assistant/connect/microsoft">Connect mailbox</a></div>
+  <div class="banner warn"><div style="flex:1"><b>{{ t('connect_title') }}</b><br>
+    <span class="sub" style="margin:0">{{ t('connect_sub') }}</span></div>
+    <a class="btn" href="/assistant/connect/microsoft">{{ t('connect_btn') }}</a></div>
 {% elif ms.status == 'error' %}
-  <div class="banner warn"><div style="flex:1"><b>Your mailbox needs to be reconnected.</b><br>
+  <div class="banner warn"><div style="flex:1"><b>{{ t('reconnect_title') }}</b><br>
     <span class="sub" style="margin:0">{{ ms.last_error or '' }}</span></div>
-    <a class="btn" href="/assistant/connect/microsoft">Reconnect</a></div>
+    <a class="btn" href="/assistant/connect/microsoft">{{ t('reconnect_btn') }}</a></div>
 {% endif %}
-{% if refreshing %}<div class="banner">Refreshing your dashboard… this page will reload in a few seconds.</div>
+{% if refreshing %}<div class="banner">{{ t('refreshing') }}</div>
 <script>setTimeout(function(){location.href='/assistant'},15000)</script>{% endif %}
 
 <div class="kpis">
-  <div class="kpi urgent"><div class="n">{{ counts.urgent }}</div><div class="l">Urgent</div></div>
-  <div class="kpi today"><div class="n">{{ counts.today }}</div><div class="l">Today</div></div>
-  <div class="kpi"><div class="n">{{ counts.soon }}</div><div class="l">Soon</div></div>
-  <div class="kpi"><div class="n">{{ counts.moveware }}</div><div class="l">Moveware to-dos</div></div>
-  {% if counts.clickup %}<div class="kpi"><div class="n">{{ counts.clickup }}</div><div class="l">TIM shipments</div></div>{% endif %}
-  <div class="kpi"><div class="n">{{ counts.mail }}</div><div class="l">Emails</div></div>
+  <div class="kpi urgent"><div class="n">{{ counts.urgent }}</div><div class="l">{{ t('urgent') }}</div></div>
+  <div class="kpi today"><div class="n">{{ counts.today }}</div><div class="l">{{ t('today') }}</div></div>
+  <div class="kpi"><div class="n">{{ counts.soon }}</div><div class="l">{{ t('soon') }}</div></div>
+  {% if has.moveware %}<div class="kpi"><div class="n">{{ counts.moveware }}</div><div class="l">{{ t('kpi_moveware') }}</div></div>{% endif %}
+  {% if has.clickup %}<div class="kpi"><div class="n">{{ counts.clickup }}</div><div class="l">{{ t('kpi_clickup') }}</div></div>{% endif %}
+  <div class="kpi"><div class="n">{{ counts.mail }}</div><div class="l">{{ t('kpi_mail') }}</div></div>
 </div>
 
 <div class="fresh">
-  <span>Mail: <b>{{ fresh.microsoft }}</b></span>
-  <span>Moveware: <b>{{ fresh.moveware }}</b></span>
-  {% if counts.clickup %}<span>ClickUp: <b>{{ fresh.clickup }}</b></span>{% endif %}
-  {% if wa_on %}<span>WhatsApp: <b>{{ fresh.whatsapp }}</b> <a href="/assistant/whatsapp">set up</a></span>{% endif %}
-  <span>Next automatic refresh: <b>{{ next_run }}</b></span>
+  <span>{{ t('fresh_mail') }}: <b>{{ fresh.microsoft }}</b></span>
+  {% if has.moveware %}<span>Moveware: <b>{{ fresh.moveware }}</b></span>{% endif %}
+  {% if has.clickup %}<span>ClickUp: <b>{{ fresh.clickup }}</b></span>{% endif %}
+  {% if wa_on %}<span>WhatsApp: <b>{{ fresh.whatsapp }}</b> <a href="/assistant/whatsapp">{{ t('set_up') }}</a></span>{% endif %}
+  <span>{{ t('fresh_next') }}: <b>{{ next_run }}</b></span>
 </div>
 
 <div class="bar">
-  <button class="chip on" data-f="all">All</button>
-  <button class="chip" data-f="microsoft">Mail</button>
-  <button class="chip" data-f="moveware">Moveware</button>
-  {% if counts.clickup %}<button class="chip" data-f="clickup">ClickUp</button>{% endif %}
+  <button class="chip on" data-f="all">{{ t('all') }}</button>
+  <button class="chip" data-f="microsoft">{{ source_label('microsoft') }}</button>
+  {% if has.moveware %}<button class="chip" data-f="moveware">Moveware</button>{% endif %}
+  {% if has.clickup %}<button class="chip" data-f="clickup">ClickUp</button>{% endif %}
   {% if wa_on %}<button class="chip" data-f="whatsapp">WhatsApp</button>{% endif %}
   <span class="spacer"></span>
   <form method="post" action="/assistant/refresh"><input type="hidden" name="csrf" value="{{ csrf }}">
-    <button class="btn light" type="submit">↻ Refresh now</button></form>
+    <button class="btn light" type="submit">{{ t('refresh_now') }}</button></form>
 </div>
 
 {% if not items %}
-  <div class="empty">Nothing needs you right now. 🎉</div>
+  <div class="empty">{{ t('empty') }}</div>
 {% endif %}
-{% for key, label, color in tiers %}
+{% for key, color in tiers %}
   {% set group = items | selectattr('tier', 'equalto', key) | list %}
   {% if group %}
-  <div class="tier-h" style="color:{{ color }}"><span class="dot" style="background:{{ color }}"></span>{{ label }} ({{ group|length }})</div>
+  <div class="tier-h" style="color:{{ color }}"><span class="dot" style="background:{{ color }}"></span>{{ t(key) }} ({{ group|length }})</div>
   {% for it in group %}
   <div class="card {{ it.tier }} {% if it.seen %}seen{% endif %}" data-src="{{ it.source }}" id="i-{{ it.id }}">
     <div class="row"><div class="body">
-      <span class="tag {{ it.source }}">{{ source_label.get(it.source, it.source) }}</span>{% if it.kind != 'whatsapp' %}<span class="tag kind">{{ kind_label.get(it.kind, it.kind) }}</span>{% endif %}
+      <span class="tag {{ it.source }}">{{ source_label(it.source) }}</span>{% if it.kind != 'whatsapp' %}<span class="tag kind">{{ kind_label(it.kind) }}</span>{% endif %}
       <div class="title">{{ it.subject }}</div>
       <div class="who">{{ it.from_name or '' }}{% if it.from_addr %} &lt;{{ it.from_addr }}&gt;{% endif %}</div>
       {% if it.snippet %}<div class="snip">{{ it.snippet[:260] }}</div>{% endif %}
     </div>
-    <div class="side" title="urgency {{ it.score }}/100">{% if it.received_at %}{% if it.source == 'moveware' %}{{ 'Pack' if it.kind == 'request_docs' else 'Since' }} {% elif it.source == 'clickup' %}Last step {% endif %}{% endif %}{{ when(it.received_at) }}</div></div>
+    <div class="side" title="{{ t('urgency_title', score=it.score) }}">{% if it.received_at %}{% if it.source == 'moveware' %}{{ t('side_pack') if it.kind == 'request_docs' else t('side_since') }} {% elif it.source == 'clickup' %}{{ t('side_last_step') }} {% endif %}{% endif %}{{ when(it.received_at) }}</div></div>
     <div class="acts">
-      {% if it.url %}<a class="btn small light" href="{{ it.url }}" target="_blank" rel="noopener">Open ↗</a>{% endif %}
+      {% if it.url %}<a class="btn small light" href="{{ it.url }}" target="_blank" rel="noopener">{{ t('open') }}</a>{% endif %}
       {% if it.source == 'microsoft' and draft_on %}
       <form method="post" action="/assistant/item/{{ it.id }}/draft"><input type="hidden" name="csrf" value="{{ csrf }}">
-        <button class="btn small light" type="submit">✎ Suggest reply</button></form>{% endif %}
+        <button class="btn small light" type="submit">{{ t('suggest_reply') }}</button></form>{% endif %}
       <form method="post" action="/assistant/item/{{ it.id }}/seen"><input type="hidden" name="csrf" value="{{ csrf }}">
         <input type="hidden" name="seen" value="{{ '0' if it.seen else '1' }}">
-        <button class="btn small light" type="submit">{{ 'Undo done' if it.seen else '✓ Done' }}</button></form>
+        <button class="btn small light" type="submit">{{ t('undo_done') if it.seen else t('done') }}</button></form>
     </div>
     {% for d in drafts.get(it.id, []) %}
     <div class="draft">
       <form method="post" action="/assistant/draft/{{ d.id }}/save"><input type="hidden" name="csrf" value="{{ csrf }}">
         <textarea name="body">{{ d.body }}</textarea>
         <div class="acts">
-          {% if d.status == 'saved' %}<span class="ok">✓ Saved to your Outlook Drafts</span>
-          {% elif can_write %}<button class="btn small" type="submit">Save to Outlook Drafts</button>
-          {% else %}<span class="sub" style="margin:0">Copy this into your reply in Outlook. (Saving to Drafts needs IT to enable it.)</span>{% endif %}
-          <button class="btn small light" type="button" onclick="navigator.clipboard.writeText(this.form.body.value);this.textContent='Copied'">Copy</button>
+          {% if d.status == 'saved' %}<span class="ok">{{ t('draft_saved') }}</span>
+          {% elif can_write %}<button class="btn small" type="submit">{{ t('draft_save') }}</button>
+          {% else %}<span class="sub" style="margin:0">{{ t('draft_copy_hint') }}</span>{% endif %}
+          <button class="btn small light" type="button" data-copied="{{ t('copied') }}" onclick="navigator.clipboard.writeText(this.form.body.value);this.textContent=this.dataset.copied">{{ t('copy') }}</button>
         </div></form>
     </div>
     {% endfor %}
@@ -362,13 +390,13 @@ DASH_TPL = """
 {% endfor %}
 
 <div class="foot">
-  Only you can see this dashboard. Emails are scanned from your own mailbox; Moveware to-dos come from files
-  where you are the coordinator{% if u.moveware_email %} ({{ u.moveware_email }}){% endif %}; ClickUp items are
-  TIM shipments {{ 'you own' if u.tim_scope == 'all' else 'assigned to you' }}.
+  {{ t('foot_private') }}
+  {% if has.moveware %}{{ t('foot_moveware') }}{% if u.moveware_email %} ({{ u.moveware_email }}){% endif %}{% endif %}
+  {% if has.clickup %}{{ t('foot_clickup_all') if u.tim_scope == 'all' else t('foot_clickup_assigned') }}{% endif %}
   {% if ms %}<form method="post" action="/assistant/disconnect/microsoft" style="display:inline"
-     onsubmit="return confirm('Disconnect your mailbox and delete its data from the assistant?')">
-     <input type="hidden" name="csrf" value="{{ csrf }}"><button class="btn small light" type="submit">Disconnect mailbox</button></form>{% endif %}
-  {% if not wa_on %}<a href="/assistant/whatsapp">Add WhatsApp (beta)</a>{% endif %}
+     data-confirm="{{ t('disconnect_confirm') }}" onsubmit="return confirm(this.dataset.confirm)">
+     <input type="hidden" name="csrf" value="{{ csrf }}"><button class="btn small light" type="submit">{{ t('disconnect_mailbox') }}</button></form>{% endif %}
+  {% if not wa_on %}<a href="/assistant/whatsapp">{{ t('add_whatsapp') }}</a>{% endif %}
 </div>
 <script>
 document.querySelectorAll('.chip').forEach(function(c){c.onclick=function(){
@@ -382,23 +410,26 @@ document.querySelectorAll('.chip').forEach(function(c){c.onclick=function(){
 </script>"""
 
 
-def _next_run_label():
+def _next_run_label(lang="en"):
     now = _dt.datetime.now(MX)
     hours = sorted(int(h) for h in scan.HOURS.split(",") if h.strip())
     for h in hours:
         t = now.replace(hour=h, minute=0, second=0, microsecond=0)
         if t > now:
             return t.strftime("%-I:%M %p")
-    return f"tomorrow {now.replace(hour=hours[0], minute=0).strftime('%-I:%M %p')}"
+    return i18n.t(lang, "tomorrow_at", time=now.replace(hour=hours[0], minute=0).strftime("%-I:%M %p"))
 
 
 @bp.route("/assistant")
 @login_required
 def dashboard(u):
+    lang = user_lang(u)
     if not u["consent_at"]:
-        return _render("Get started", CONSENT_TPL, u)
+        return _render(i18n.t(lang, "get_started"), CONSENT_TPL, u, lang=lang)
     ms = db.get_connection(u["id"], "microsoft")
     ranked = priority.rank(db.list_items(u["id"]))
+    for it in ranked:
+        it["subject"], it["snippet"] = i18n.item_text(it, lang)
     wa_on = bool(u["whatsapp_opt_in"])
     if not wa_on:
         ranked = [i for i in ranked if i["source"] != "whatsapp"]
@@ -409,24 +440,27 @@ def dashboard(u):
     for k in drafts:
         drafts[k] = drafts[k][:1]
     st = db.sync_times(u["id"])
-    fresh = {s: _stamp(st.get(s)) for s in ("microsoft", "moveware", "clickup", "whatsapp")}
+    fresh = {s: _stamp(st.get(s), lang) for s in ("microsoft", "moveware", "clickup", "whatsapp")}
     if not ms:
-        fresh["microsoft"] = "not connected"
+        fresh["microsoft"] = i18n.t(lang, "not_connected")
+    # Only show a source's box / filter / "as of" line if this person has items from it.
+    has = {src: any(i["source"] == src for i in ranked) for src in ("moveware", "clickup")}
     counts = {t: sum(1 for i in ranked if i["tier"] == t and not i["seen"])
               for t in ("urgent", "today", "soon")}
     counts["moveware"] = sum(1 for i in ranked if i["source"] == "moveware" and not i["seen"])
     counts["clickup"] = sum(1 for i in ranked if i["source"] == "clickup" and not i["seen"])
     counts["mail"] = sum(1 for i in ranked if i["source"] == "microsoft" and not i["seen"])
     hour = _dt.datetime.now(MX).hour
-    greeting = "Good morning" if hour < 12 else ("Good afternoon" if hour < 19 else "Good evening")
-    return _render("My dashboard", DASH_TPL, u,
+    greeting = i18n.t(lang, "good_morning" if hour < 12 else ("good_afternoon" if hour < 19 else "good_evening"))
+    return _render(i18n.t(lang, "nav_dashboard"), DASH_TPL, u, lang=lang,
                    first=(u["name"] or u["email"]).split(" ")[0].split("@")[0],
                    greeting=greeting, ms=ms, items=ranked, drafts=drafts, counts=counts,
-                   fresh=fresh, wa_on=wa_on, next_run=_next_run_label(),
+                   fresh=fresh, wa_on=wa_on, next_run=_next_run_label(lang), has=has,
                    refreshing=request.args.get("refreshing") or request.args.get("connected"),
-                   tiers=[("urgent", "Urgent", "#c0392b"), ("today", "Today", "#d68910"),
-                          ("soon", "Soon", "#7f8c8d")],
-                   source_label=SOURCE_LABEL, kind_label=KIND_LABEL, when=_when,
+                   tiers=[("urgent", "#c0392b"), ("today", "#d68910"), ("soon", "#7f8c8d")],
+                   source_label=lambda s_: i18n.source_label(s_, lang),
+                   kind_label=lambda k_: i18n.kind_label(k_, lang),
+                   when=lambda d_: _when(d_, lang),
                    draft_on=drafting.enabled() and ms is not None,
                    ready=vault.is_configured(),
                    can_write=graph.can_write_drafts())
@@ -463,7 +497,7 @@ def item_draft(u, item_id):
         text = drafting.suggest_reply(u["name"] or u["email"], f"{it['from_name']} <{it['from_addr']}>",
                                       it["subject"] or "", body)
     except Exception as exc:
-        text = f"(Couldn't generate a suggestion right now: {exc})"
+        text = i18n.t(user_lang(u), "draft_error", err=exc)
     db.save_draft(u["id"], item_id, text)
     return redirect(f"/assistant#i-{item_id}")
 
@@ -482,35 +516,28 @@ def draft_save(u, draft_id):
         res = graph.create_reply_draft(u["id"], it["external_id"], body)
         db.update_draft(u["id"], draft_id, status="saved", provider_draft_id=res.get("id"))
     except Exception as exc:
-        db.update_draft(u["id"], draft_id, body=f"{body}\n\n[Not saved to Outlook: {exc}]")
+        db.update_draft(u["id"], draft_id,
+                        body=f"{body}\n\n" + i18n.t(user_lang(u), "draft_not_saved", err=exc))
     return redirect(f"/assistant#i-{it['id']}")
 
 
 # ── WhatsApp (opt-in beta) ────────────────────────────────────────────────────
 WA_TPL = """
 <h1>WhatsApp <span class="tag">beta</span></h1>
-<p class="sub">Shows your unread WhatsApp chats on your dashboard. It works through a small Chrome
-extension that reads your chat list <b>only while WhatsApp Web is open</b> in your browser, so the
-WhatsApp section shows "as of" the last time it synced.</p>
+<p class="sub">{{ t('wa_intro')|safe }}</p>
 {% if not u.whatsapp_opt_in %}
   <form method="post" action="/assistant/whatsapp/optin"><input type="hidden" name="csrf" value="{{ csrf }}">
-    <label class="ck"><input type="checkbox" name="agree" required><span>I agree to send my WhatsApp chat
-    names, unread counts and last-message previews to my private dashboard. Full history is never read.</span></label>
-    <button class="btn" type="submit">Turn on WhatsApp</button></form>
+    <label class="ck"><input type="checkbox" name="agree" required><span>{{ t('wa_agree') }}</span></label>
+    <button class="btn" type="submit">{{ t('wa_turn_on') }}</button></form>
 {% else %}
   <div class="banner"><div style="flex:1">
-    <b>1.</b> <a href="/assistant/whatsapp/extension.zip">Download the extension</a> and unzip it.<br>
-    <b>2.</b> In Chrome open <code>chrome://extensions</code>, turn on <b>Developer mode</b>, click
-       <b>Load unpacked</b> and choose the unzipped folder.<br>
-    <b>3.</b> Click the extension's icon and paste your sync key.<br>
-    <b>4.</b> Open <a href="https://web.whatsapp.com" target="_blank" rel="noopener">web.whatsapp.com</a>.
-       It syncs every 5 minutes while open.</div></div>
-  {% if key %}<div class="banner warn"><div><b>Your sync key</b> (shown once — copy it now):<br><code>{{ key }}</code></div></div>{% endif %}
-  <p class="sub">Last sync: <b>{{ last }}</b></p>
+    {{ t('wa_step1')|safe }}<br>{{ t('wa_step2')|safe }}<br>{{ t('wa_step3')|safe }}<br>{{ t('wa_step4')|safe }}</div></div>
+  {% if key %}<div class="banner warn"><div>{{ t('wa_key')|safe }}<br><code>{{ key }}</code></div></div>{% endif %}
+  <p class="sub">{{ t('wa_last') }}: <b>{{ last }}</b></p>
   <form method="post" action="/assistant/whatsapp/key" style="display:inline"><input type="hidden" name="csrf" value="{{ csrf }}">
-    <button class="btn light" type="submit">{{ 'Create a new sync key' if has_key else 'Create my sync key' }}</button></form>
+    <button class="btn light" type="submit">{{ t('wa_new_key') if has_key else t('wa_first_key') }}</button></form>
   <form method="post" action="/assistant/disconnect/whatsapp" style="display:inline"><input type="hidden" name="csrf" value="{{ csrf }}">
-    <button class="btn light" type="submit">Turn off WhatsApp &amp; delete its data</button></form>
+    <button class="btn light" type="submit">{{ t('wa_off')|safe }}</button></form>
 {% endif %}"""
 
 
@@ -518,9 +545,10 @@ WhatsApp section shows "as of" the last time it synced.</p>
 @login_required
 def whatsapp(u):
     key = session.pop("asst_wa_key", None)
-    return _render("WhatsApp", WA_TPL, u, key=key,
+    lang = user_lang(u)
+    return _render("WhatsApp", WA_TPL, u, lang=lang, key=key,
                    has_key=db.get_connection(u["id"], "whatsapp") is not None,
-                   last=_stamp(db.sync_times(u["id"]).get("whatsapp")))
+                   last=_stamp(db.sync_times(u["id"]).get("whatsapp"), lang))
 
 
 @bp.route("/assistant/whatsapp/optin", methods=["POST"])

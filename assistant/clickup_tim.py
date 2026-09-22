@@ -119,7 +119,8 @@ def tasks_for_shipments(ships, user, stalled_days=None) -> list:
             "url": getattr(s, "url", None),
             "received_at": (_dt.datetime(last.year, last.month, last.day, 12,
                                          tzinfo=_dt.timezone.utc) if last else None),
-            "meta": {"days": days, "stage": stage, "ref": ref, "step": step},
+            "meta": {"days": days, "stage": stage, "ref": ref, "step": step, "customer": cust,
+                     "done": getattr(s, "steps_done", 0), "total": getattr(s, "steps_total", 0)},
         })
     return out
 

@@ -87,7 +87,8 @@ def tasks_for_files(files: list, today=None) -> list:
                                    + (" · US Embassy/Consulate (bill after delivery)"
                                       if f.get("is_embassy") else ""),
                         "received_at": _dt_utc(since),
-                        "meta": {"job": job, "days": days, "value": value, "due": since}})
+                        "meta": {"job": job, "days": days, "value": value, "due": since,
+                                 "client": client, "embassy": bool(f.get("is_embassy"))}})
 
         # 2. Upload / send the weight ticket + packing list
         if packed and not f.get("act_wt"):
@@ -98,7 +99,7 @@ def tasks_for_files(files: list, today=None) -> list:
                                    "Download the certified weight ticket + packing list from SIT "
                                    "and upload them.",
                         "received_at": _dt_utc(pack),
-                        "meta": {"job": job, "days": days, "due": pack}})
+                        "meta": {"job": job, "days": days, "due": pack, "client": client}})
 
         # 3. Request documents before the pack
         if pack and today <= pack <= today + _dt.timedelta(days=REQUEST_DOCS_DAYS) \
@@ -109,7 +110,7 @@ def tasks_for_files(files: list, today=None) -> list:
                         "snippet": f"Pack in {left} day(s) and no declared value or insurance "
                                    "on file.",
                         "received_at": _dt_utc(pack),
-                        "meta": {"job": job, "days_left": left, "due": pack}})
+                        "meta": {"job": job, "days_left": left, "due": pack, "client": client}})
     return out
 
 
@@ -128,7 +129,8 @@ def tasks_for_underbilling(rows: list) -> list:
                     "snippet": f"{_money(approved)} approved by email, {_money(invoiced)} invoiced "
                                f"({_money(gap)} not billed)",
                     "url": _url(job), "received_at": None,
-                    "meta": {"job": job, "value": gap}})
+                    "meta": {"job": job, "value": gap, "approved": approved,
+                             "invoiced": invoiced}})
     return out
 
 

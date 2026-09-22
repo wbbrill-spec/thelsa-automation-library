@@ -44,6 +44,7 @@ users = Table(
     Column("whatsapp_opt_in", Boolean, nullable=False, default=False),
     Column("moveware_email", String(320)),                           # override if Moveware uses another address
     Column("tim_scope", String(20), nullable=False, default="assigned"),  # ClickUp/TIM: all | assigned | none
+    Column("lang", String(5)),                                       # en | es (None = follow browser)
     Column("created_at", DateTime(timezone=True), default=now),
 )
 
@@ -226,6 +227,13 @@ def set_tim_scope(user_id: str, scope: str):
         raise ValueError(scope)
     with engine().begin() as c:
         c.execute(update(users).where(users.c.id == user_id).values(tim_scope=scope))
+
+
+def set_lang(user_id: str, lang: str):
+    if lang not in ("en", "es"):
+        raise ValueError(lang)
+    with engine().begin() as c:
+        c.execute(update(users).where(users.c.id == user_id).values(lang=lang))
 
 
 def list_users():

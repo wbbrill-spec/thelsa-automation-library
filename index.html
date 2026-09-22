@@ -583,9 +583,9 @@ Turns a phone photo of a handwritten survey cube sheet into Thelsa's TRS "Report
 <!-- Card: Warehouse Doc Capture (Embassy 2-day SLA) -->
 <div class="card">
 <div class="card-header">
-<div class="card-icon icon-blue">📸</div>
+<div class="card-icon icon-blue">📄</div>
 <div class="card-meta">
-<div class="card-name">Warehouse Doc Capture — Weight Ticket &amp; Packing List</div>
+<div class="card-name">Document Audit &amp; Translation — Packing Inventory &amp; Weight Certificate</div>
 <div class="card-tags">
 <span class="tag tag-active">Active</span>
 <span class="tag tag-ai">AI</span>
@@ -595,19 +595,19 @@ Turns a phone photo of a handwritten survey cube sheet into Thelsa's TRS "Report
 </div>
 <div class="card-body">
 <p class="card-description">
-Crew leaders photograph the certified weight ticket and packing list on their phone at the warehouse. AI extracts weight, volume, pieces and lift-van counts, converts lb↔kg / ft³↔m³, runs a density sanity check, and emails the assigned coordinator with the validated data and original photos — built for the U.S. Embassy 2-day SLA.
+Upload the SIT packing inventory and the certified weight certificate. The automation audits both documents for accuracy, flags audit gaps (totals that don’t add up, kg/lb mismatches, inventory weight vs. certified weight, missing signatures or dates), translates the inventory to English, and lets the user review, correct and send the final documents to U.S. Embassy and Consulate staff — built for the 2-day SLA.
 </p>
 <ul class="card-features">
-<li>Spanish mobile app; queues offline on warehouse Wi-Fi</li>
-<li>Claude-vision extraction of Spanish / English documents</li>
-<li>Catches lb-as-kg unit errors that under-bill files</li>
-<li>Coordinator notified instantly, photos attached</li>
-<li>Audit trail per capture · Moveware write-back in Phase 2</li>
+<li>Upload the inventory and weight certificate PDFs (one or both)</li>
+<li>Deterministic audit of every line: van rows, totals, kg↔lb, density, cross-document checks</li>
+<li>Audit gaps flagged for review before anything is sent</li>
+<li>English packing inventory PDF, with line-by-line corrections and the Spanish original attached</li>
+<li>Ready-to-send Outlook draft to the Embassy / Consulate, created in the user’s own mailbox</li>
 </ul>
 </div>
 <div class="card-footer">
-<div class="card-schedule">📱 Crew phones · on warehouse arrival</div>
-<a href="https://thelsa-doc-capture.onrender.com/auditoria.html?pin=4821" class="btn btn-primary">Open Capture App →</a>
+<div class="card-schedule">💻 Documentation team · before dispatch</div>
+<a href="https://thelsa-doc-capture.onrender.com/auditoria.html?pin=4821" class="btn btn-primary">Open Document Audit →</a>
 </div>
 </div>
 

@@ -201,7 +201,7 @@ def build_shipment(lst: dict, tasks: list[dict], *, folder: Optional[str], space
         last_progress_at=last_progress,
         days_since_progress=days_since,
         # Where the list lives, so the commercial / new-furniture rule can
-        # recognise Uso's lists once they exist (rules.py) without another walk.
+        # recognise the commercial lists once they exist (rules.py) without another walk.
         extra={"folder": folder or "", "space": space or "",
                "list_name": lst.get("name", "")},
     )

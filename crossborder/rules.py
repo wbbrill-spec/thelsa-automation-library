@@ -65,9 +65,9 @@ def exclude_us_diplomatic(shipments):
 # ── board exclusion 2: commercial / new furniture (Edgar, 2026-09-22) ────────
 # Gustavo's commercial sales and Rafael Larsa's new-furniture process are a
 # different import with a different customs broker, and they are never
-# consolidated with household goods. Uso is building their ClickUp step-by-step
-# separately; when it lands, whatever names those lists go in CB_COMMERCIAL_PATTERNS
-# and nothing else has to change.
+# consolidated with household goods. Gustavo is building their ClickUp
+# step-by-step separately; when it lands, whatever names those lists go in
+# CB_COMMERCIAL_PATTERNS and nothing else has to change.
 DEFAULT_COMMERCIAL_PATTERNS = [
     "comercial", "commercial", "mueble nuevo", "muebles nuevos", "new furniture", "larsa",
 ]

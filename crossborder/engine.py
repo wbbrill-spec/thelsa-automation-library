@@ -296,11 +296,36 @@ def _service(s: Shipment) -> str:
     return str((s.extra or {}).get("service") or "").upper()
 
 
+def _us_destination(s: Shipment) -> bool:
+    """Does this shipment's destination sit in the United States?
+
+    Used only to catch a TIM file that is actually an export. Deliberately
+    strict: it must NOT resolve to a Mexican hub, and it must name a US state
+    or end in a US state abbreviation. "Los Cabos" and "Monterrey, NL" stay
+    imports; "Los Angeles, CA" does not.
+    """
+    dest = (s.destination or "").strip()
+    if not dest or s.destination_hub is not Hub.UNKNOWN:
+        return False
+    low = dest.lower().replace(".", "")
+    if any(name in low for name in US_STATES):
+        return True
+    tokens = [t.strip().lower() for t in dest.replace("/", ",").split(",") if t.strip()]
+    return bool(tokens) and tokens[-1] in US_STATE_ABBR
+
+
 def _direction(s: Shipment) -> str:
     d = (s.extra or {}).get("direction")
     if d:
         return d
-    return "import"          # every TIM shipment is a US → MX small shipment
+    # TIM files carry no direction field, and almost all of them are US → MX
+    # small shipments. Almost: the workspace also holds the occasional export
+    # (a list prefixed "EXPO -"), and putting one of those on the
+    # McAllen → Monterrey crossing trailer is planning it backwards. The
+    # destination is what settles it (Fernanda, 2026-09-23).
+    if s.source is Source.TIM and _us_destination(s):
+        return "export"
+    return "import"
 
 
 LEG_LABELS = {

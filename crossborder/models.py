@@ -457,14 +457,23 @@ class Shipment:
 
         These are private moves of roughly 8 m³ that already fill most of a
         truck, and Fernanda's rule is "there is no point making them wait".
-        In ClickUp they are the 17-step "DTD Impo" checklist, which `tim.py`
-        records as process_format "DTD"; a source that spells it out in a
-        service or process field is honoured too.
+
+        NOTE (Fernanda, 2026-09-23): this used to read the ClickUp checklist
+        length — 17 steps meant the "DTD Impo" template, 13 the "DA" one. That
+        was wrong. **The finished import template is the 13-step one**, and the
+        only two 17-step lists left on the workspace were an export
+        ("EXPO - Brad Sutton", destined for Los Angeles) and one old Intermove
+        file. So the length identified no door-to-door move at all, and did
+        wrongly exclude an export.
+
+        Until the team gives us a real marker — a tag, a custom field or a
+        naming convention — the only thing honoured is a source that says so
+        in words. That means the rule currently matches nothing, which is the
+        honest state: better to plan a door-to-door move somebody then declines
+        than to hide freight behind a guess about a checklist.
         """
-        if str(self.process_format or "").strip().upper() == "DTD":
-            return True
         text = _fold(" ".join(str((self.extra or {}).get(k) or "")
-                              for k in ("service", "process", "process_format", "service_description")))
+                              for k in ("service", "process", "service_description", "job_type")))
         return bool(re.search(r"\bdtd\b|door\s*to\s*door|puerta\s*a\s*puerta", text))
 
     # ── consolidation grouping (Fernanda's ClickUp note, 2026-09-22) ──────

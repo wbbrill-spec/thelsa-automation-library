@@ -15,7 +15,12 @@ EMB = "EMBAJADA DE LOS ESTADOS UNIDOS DE AMERICA"
 CON = "U.S. Consulate General Matamoros"
 
 
-def ship(i, m3, corp=EMB, service="FTL", bill_to="", direction="export", dest="Brownsville, Texas"):
+# NOTE: these files are planned as IMPORTS so the packing rules under test here
+# are the lift-van ones, not the "exports never wait" rule (Fernanda, 22 Sep),
+# which deliberately gives every export a trailer of its own. US Embassy and
+# Consulate files no longer reach the board at all (Edgar, 22 Sep) — the
+# capacity maths below still governs any lift-van-loaded freight.
+def ship(i, m3, corp=EMB, service="FTL", bill_to="", direction="import", dest="Zapopan, Jalisco"):
     return Shipment(id=f"TMS:{i}", source=Source.TMS, source_ref=str(i), customer_name=f"C{i}",
                     destination=dest, destination_hub=Hub.UNKNOWN, stage=Stage.TO_BORDER, volume_m3=m3,
                     ready_date=dt.date(2026, 9, 18), corporate_account=corp,

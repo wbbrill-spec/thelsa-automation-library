@@ -105,8 +105,9 @@ def test_build_alerts_groups_by_owner_and_sorts_by_urgency():
         tms(23, "Late", manager="Erica", delivery=dt.date(2026, 9, 10)),
     ]
     out = alerts.build_alerts(ships, TODAY)
-    assert [a["owner"] for a in out] == ["Fernanda Mora", "Sara Reyes"]   # busiest first
-    fer = out[0]
+    coords = [a for a in out if not a.get("supervisor")]
+    assert [a["owner"] for a in coords] == ["Fernanda Mora", "Sara Reyes"]   # busiest first
+    fer = coords[0]
     assert fer["to"] == "fernandamora@thelsa.com" and fer["resolved"]
     assert fer["shipment_count"] == 2                             # the clean one is out
     assert [r["customer"] for r in fer["shipments"]] == ["On hold", "Stalled one"]
@@ -118,7 +119,11 @@ def test_build_alerts_groups_by_owner_and_sorts_by_urgency():
     assert "https://app.clickup.com/x/v/li/20" in body
     assert "CB_ALERT_EMAILS" not in body                          # resolved → no routing note
     # the Moveware file went to Sara even though Erica is its move manager
-    assert out[1]["to"] == "sarareyes@thelsa.com"
+    assert coords[1]["to"] == "sarareyes@thelsa.com"
+    # and the supervisor gets one roll-up of both coordinators' lists
+    sup = [a for a in out if a.get("supervisor")]
+    assert len(sup) == 1 and sup[0]["shipment_count"] == 3
+    assert "Fernanda Mora" in sup[0]["body"] and "Sara Reyes" in sup[0]["body"]
 
 
 def test_subject_agrees_in_number():
@@ -204,7 +209,8 @@ def test_create_drafts_uses_the_mailer_and_only_ever_drafts(monkeypatch):
 
     out = alerts.create_drafts([tim(51, "Ana", flags=["on_hold"], assignees=["Diana"])],
                                actor="bill", today=TODAY)
-    assert out["alert_count"] == 1 and out["drafts"][0]["ok"] and out["mode"] == "draft"
+    # one for the coordinator, one roll-up for the supervisor
+    assert out["alert_count"] == 2 and out["drafts"][0]["ok"] and out["mode"] == "draft"
     assert made and made[0]["to"] == "fernandamora@thelsa.com"
 
 

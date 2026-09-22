@@ -102,3 +102,38 @@ def test_fetch_walks_folders_and_skips_placeholders():
     assert by_ref["l3"].stage is Stage.CLOSED and diag["skipped_lists"] == ["List"]
     assert diag["folders"][0] == {"space": "Logistics Coordination", "folder": "U-HAUL", "shipments": 1}
     assert diag["count"] == 3 and diag["unmapped_steps"] == {}
+
+
+# ── Fernanda's consolidation note (decision D6, meeting with Edgar 22 Sep) ───
+def test_a_consolidation_comment_on_the_list_is_read_onto_the_shipment():
+    comments = [{"id": "c1", "comment_text":
+                 "[CONSOLIDADO] grupo: MTY-CDMX-24SEP | con: Ana Ruiz | tercero: Gran Casa"}]
+    s = tim.build_shipment(LST, make_tasks(5), folder="U-HAUL", space="Logistics Coordination",
+                           team_id="9011168761", completed=False, comments=comments)
+    assert s.is_grouped and s.group_name == "MTY-CDMX-24SEP"
+    assert s.consolidation["with"] == ["Ana Ruiz"]
+    assert s.consolidation["third_party"] == "Gran Casa"
+    assert "grouped" in s.status_flags
+
+
+def test_a_note_in_the_list_description_works_too_and_costs_no_extra_request():
+    lst = {**LST, "content": "consolidado con Beto Lara, sale el jueves"}
+    s = tim.build_shipment(lst, make_tasks(5), folder="U-HAUL", space="Logistics Coordination",
+                           team_id="9011168761", completed=False)
+    assert s.is_grouped and s.consolidation["with"] == ["Beto Lara"]
+
+
+def test_an_ordinary_comment_changes_nothing():
+    comments = [{"id": "c1", "comment_text": "El cliente confirmó la dirección de entrega."}]
+    s = tim.build_shipment(LST, make_tasks(5), folder="U-HAUL", space="Logistics Coordination",
+                           team_id="9011168761", completed=False, comments=comments)
+    assert not s.consolidation and not s.is_grouped and "grouped" not in s.status_flags
+
+
+def test_the_list_records_where_it_lives_so_commercial_lists_can_be_recognised():
+    s = tim.build_shipment(LST, make_tasks(5), folder="COMERCIAL", space="Logistics Coordination",
+                           team_id="9011168761", completed=False)
+    assert s.extra["folder"] == "COMERCIAL" and s.extra["space"] == "Logistics Coordination"
+    assert s.extra["list_name"] == LST["name"]
+    from crossborder import rules
+    assert rules.is_commercial(s)

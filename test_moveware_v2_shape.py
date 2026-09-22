@@ -304,7 +304,7 @@ def test_an_import_resolves_its_hub():
 def test_an_export_lane_names_the_state():
     from crossborder import engine
     s = tms.build_shipment(V2_LIST_ROW, V2_DETAIL, today=dt.date(2026, 9, 15))
-    assert engine.lane_for(s) == ("Export → Texas", "Texas")
+    assert engine.lane_for(s)[:2] == ("Export → Texas", "Texas")
 
 
 def test_v1_locations_still_win_when_present():

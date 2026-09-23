@@ -456,6 +456,39 @@ def stage_for(row: dict, detail: dict | None, today: dt.date) -> tuple[Stage, li
     return Stage.BOOKED, flags, dates
 
 
+def date_gap_flags(dates: dict, stage: Stage, today: dt.date) -> list[str]:
+    """Milestone dates missing from Moveware that are costing the file something.
+
+    Measured on the live fleet, 2026-09-23: of 15 open jobs, 2 of 9 imports had
+    a pack date and NONE of the 15 had a delivery date. Every open job therefore
+    reads as "not yet crossed", which means none of them can ever appear in the
+    stage-2 onward planning — the truck from Monterrey to the customer's city.
+    Bill confirmed the cause: the coordinators do not update Moveware with the
+    milestone dates.
+
+    The gap was invisible, so nothing pushed back on it. These flags make it an
+    outstanding item like any other: it shows on the board, it lands in the
+    owner's alert, and it reaches the supervisor roll-up.
+
+    Deliberately narrow — a flag that fires on everything gets ignored:
+      no_uplift_date    stops the file being planned onto any truck at all.
+      no_delivery_date  only once the freight is actually moving. Before the
+                        pack happens there may genuinely be no date to give.
+    """
+    out: list[str] = []
+    if stage in (Stage.DELIVERED, Stage.CLOSED):
+        return out
+    if not dates.get("uplift"):
+        out.append("no_uplift_date")
+    if not dates.get("delivery"):
+        moving = stage in (Stage.TO_BORDER, Stage.CUSTOMS, Stage.AT_HUB,
+                           Stage.ONWARD, Stage.OUT_FOR_DELIVERY)
+        packed = bool(dates.get("uplift")) and dates["uplift"] <= today
+        if moving or packed:
+            out.append("no_delivery_date")
+    return out
+
+
 def build_shipment(row: dict, detail: dict | None, *, today: dt.date | None = None, env: str = "prod") -> Shipment:
     today = today or dt.date.today()
     d = detail or {}
@@ -463,6 +496,7 @@ def build_shipment(row: dict, detail: dict | None, *, today: dt.date | None = No
     meas = _measurements(d)
     dirn = direction(row) or "import"
     stage, flags, dates = stage_for(row, d, today)
+    flags = flags + date_gap_flags(dates, stage, today)
     list_id = str(row.get("id") or "")
     display = str(d.get("id") or list_id)
     billing = d.get("billing") if isinstance(d.get("billing"), dict) else {}

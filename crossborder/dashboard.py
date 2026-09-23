@@ -79,6 +79,7 @@ main { max-width: 1500px; margin: 0 auto; padding: 22px 24px 60px; }
 .tag.awaiting_green_light, .tag.awaiting_booking { background: #eef1f5; color: #555; }
 .tag.in_progress { background: #e6f4ea; color: #1e7e34; }
 .tag.vol { background: #eef1f5; color: #333; }
+.tag.no_delivery_date, .tag.no_uplift_date { background: #fdf2f8; color: #9d174d; }
 .card .step { font-size: 10px; color: #888; margin-top: 5px; }
 .card .bar { height: 4px; background: #eee; border-radius: 3px; margin-top: 5px; overflow: hidden; }
 .card .bar i { display: block; height: 100%; background: #c0392b; }
@@ -296,9 +297,10 @@ const FLAG_LABEL = {stalled:"Stalled ≥7 days", docs_incomplete:"Docs incomplet
   payment_pending:"Payment pending", in_storage:"In storage", certificate_pending:"Certificate pending",
   in_progress:"In progress", window_risk:"Delivery window at risk", docs_pending:"Waiting on documents",
   visa_pending:"Visa pending", unresponsive:"Customer unresponsive", awaiting_green_light:"Awaiting green light",
-  awaiting_booking:"Awaiting booking", awaiting_truck:"No truck assigned yet"};
-const FLAG_ICON = {stalled:"⏳", docs_incomplete:"📄", on_hold:"⛔", payment_pending:"💳", in_storage:"🏬", certificate_pending:"📝", in_progress:"▶", window_risk:"⚠️", unresponsive:"📵", docs_pending:"📄", visa_pending:"🛂", awaiting_green_light:"🟢", awaiting_booking:"📅", awaiting_truck:"🚚"};
-const ALERT_FLAGS = ["on_hold","payment_pending","window_risk","unresponsive","docs_incomplete","docs_pending","certificate_pending","visa_pending","stalled"];
+  awaiting_booking:"Awaiting booking", awaiting_truck:"No truck assigned yet",
+  no_delivery_date:"No delivery date in Moveware", no_uplift_date:"No pack/load date in Moveware"};
+const FLAG_ICON = {stalled:"⏳", docs_incomplete:"📄", on_hold:"⛔", payment_pending:"💳", in_storage:"🏬", certificate_pending:"📝", in_progress:"▶", window_risk:"⚠️", unresponsive:"📵", docs_pending:"📄", visa_pending:"🛂", awaiting_green_light:"🟢", awaiting_booking:"📅", awaiting_truck:"🚚", no_delivery_date:"📆", no_uplift_date:"📆"};
+const ALERT_FLAGS = ["on_hold","payment_pending","window_risk","unresponsive","docs_incomplete","docs_pending","certificate_pending","visa_pending","no_delivery_date","no_uplift_date","stalled"];
 const HUBS = ["Monterrey","Mexico City","Guadalajara","Querétaro","Mérida","Torreón","Unknown"];
 const TRUCK_LV = 13;
 const TRUCK_M3 = 88;   // 53' trailer ≈ 20,000 lb HHG at 6.5 lb/cuft ≈ 3,077 cuft ≈ 88 m³ (Bill, 2026-09-09)
@@ -372,6 +374,8 @@ const ES = {
   "Services that disappeared or moved date since the last republication.":
     "Servicios que desaparecieron o cambiaron de fecha desde la última publicación.",
   "disappeared": "desapareció", "date changed": "cambió de fecha", "truck changed": "cambió de unidad",
+  "No delivery date in Moveware": "Falta fecha de entrega en Moveware",
+  "No pack/load date in Moveware": "Falta fecha de carga/empaque en Moveware",
   "with": "con", "the note is on this file": "la nota está en este expediente",
   "Not for consolidation": "No consolidar", "Moving with": "Se mueve con",
   "Named in the note but not found on the board": "Mencionados en la nota pero no encontrados en el tablero",

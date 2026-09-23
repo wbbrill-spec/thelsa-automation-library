@@ -72,6 +72,11 @@ KNOWN_EMAILS: dict[str, str] = {
 ALERT_FLAGS = [
     "on_hold", "payment_pending", "unresponsive", "window_risk",
     "docs_incomplete", "docs_pending", "certificate_pending", "visa_pending",
+    # Milestone dates missing from Moveware (Bill, 2026-09-23). Ranked below
+    # the things that are actively going wrong, but above "stalled": a file
+    # with no delivery date can never reach the onward-truck planning, so it
+    # quietly drops out of the consolidation the team is trying to do.
+    "no_delivery_date", "no_uplift_date",
     "stalled",
 ]
 
@@ -86,6 +91,10 @@ FLAG_LABEL: dict[str, tuple[str, str]] = {
     "certificate_pending": ("Certificado de menaje pendiente", "Certificate pending"),
     "visa_pending": ("Visa pendiente", "Visa pending"),
     "stalled": ("Sin avance en la lista de pasos", "No checklist progress"),
+    "no_delivery_date": ("Falta fecha de entrega en Moveware",
+                         "No delivery date in Moveware"),
+    "no_uplift_date": ("Falta fecha de carga/empaque en Moveware",
+                       "No pack / load date in Moveware"),
 }
 
 
@@ -275,6 +284,18 @@ def _detail(r: dict, lang: str) -> str:
     if top == "stalled" and r.get("days_since_progress") is not None:
         return (f"{r['days_since_progress']} días sin avance" if lang == "es"
                 else f"{r['days_since_progress']} days without progress")
+    # Say what the missing date COSTS, not just that it is missing. "No delivery
+    # date" reads like paperwork; "this file never reaches the onward-truck
+    # planning" is the reason anyone would stop and fix it.
+    if top == "no_delivery_date":
+        return ("sin fecha de entrega el expediente nunca llega a la planeación "
+                "del camión de salida desde Monterrey" if lang == "es"
+                else "without a delivery date this file never reaches the "
+                     "onward-truck planning from Monterrey")
+    if top == "no_uplift_date":
+        return ("sin fecha de carga/empaque el expediente no se puede planear "
+                "en ningún camión" if lang == "es"
+                else "without a pack/load date this file cannot be planned onto any truck")
     return r["step"] or ""
 
 

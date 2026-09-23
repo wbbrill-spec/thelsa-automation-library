@@ -220,3 +220,63 @@ def test_alerts_enabled_switch(monkeypatch):
     assert alerts.alerts_enabled()
     monkeypatch.setenv("DRY_RUN", "1")
     assert not alerts.alerts_enabled()
+
+
+# ── missing Moveware milestone dates (Bill, 2026-09-23) ─────────────────────
+# Measured on the live fleet that day: of 15 open Moveware jobs, 2 of 9 imports
+# had a pack date and NONE of the 15 had a delivery date — so every one read as
+# "not yet crossed" and none could reach the stage-2 onward planning. The gap
+# was invisible, which is why nothing pushed back on it.
+import datetime as _dt
+
+from crossborder import tms as _tms
+from crossborder.models import Stage as _Stage
+
+
+def _dates(uplift=None, delivery=None, ops=None):
+    return {"uplift": uplift, "delivery": delivery, "ops_complete": ops}
+
+
+def test_a_job_with_no_load_date_is_flagged_because_it_cannot_be_planned():
+    f = _tms.date_gap_flags(_dates(), _Stage.BOOKED, TODAY)
+    assert f == ["no_uplift_date"]
+
+
+def test_a_moving_job_with_no_delivery_date_is_flagged():
+    f = _tms.date_gap_flags(_dates(uplift=_dt.date(2026, 9, 5)), _Stage.TO_BORDER, TODAY)
+    assert f == ["no_delivery_date"]
+
+
+def test_a_freshly_booked_job_is_not_nagged_for_a_delivery_date():
+    """Before the pack happens there may genuinely be no date to give."""
+    f = _tms.date_gap_flags(_dates(uplift=_dt.date(2026, 10, 20)), _Stage.BOOKED, TODAY)
+    assert f == []
+
+
+def test_a_complete_job_is_flagged_for_nothing():
+    f = _tms.date_gap_flags(_dates(uplift=_dt.date(2026, 9, 1), delivery=_dt.date(2026, 9, 30)),
+                            _Stage.TO_BORDER, TODAY)
+    assert f == []
+
+
+def test_a_delivered_or_closed_job_is_never_nagged():
+    for st in (_Stage.DELIVERED, _Stage.CLOSED):
+        assert _tms.date_gap_flags(_dates(), st, TODAY) == []
+
+
+def test_the_missing_date_reaches_the_owner_and_says_what_it_costs():
+    s = tms(60, "Sin fecha", flags=["no_delivery_date"], stage=Stage.TO_BORDER)
+    a = alerts.build_alerts([s], TODAY)
+    mine = [x for x in a if not x.get("supervisor")][0]
+    assert mine["owner"] == "Sara Reyes"
+    assert mine["shipments"][0]["top_issue"] == "no_delivery_date"
+    assert "onward-truck planning" in mine["body"]
+    assert "planeación del camión de salida" in mine["body"]
+    # and the supervisor sees it in the roll-up
+    sup = [x for x in a if x.get("supervisor")][0]
+    assert sup["by_issue"]["no_delivery_date"] == 1
+
+
+def test_things_actually_going_wrong_still_outrank_a_missing_date():
+    s = tms(61, "Dos cosas", flags=["on_hold", "no_delivery_date"], stage=Stage.TO_BORDER)
+    assert alerts.issues_for(s, TODAY)[0] == "on_hold"

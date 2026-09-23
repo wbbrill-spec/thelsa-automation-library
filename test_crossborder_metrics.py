@@ -104,12 +104,23 @@ def test_both_sides_of_the_comparison_are_configurable(monkeypatch):
     assert m["savings"]["assumed_mxn"] == 54000 - 30000
 
 
-def test_a_big_file_needs_more_than_one_small_lot(monkeypatch):
-    """The rate sheet is written in 15 m³ brackets, so 20 m³ is two lots."""
+def test_a_small_lot_never_costs_more_than_hiring_the_whole_trailer(monkeypatch):
+    """The rate sheet quotes one bracket, up to 15 m³. Charging two brackets
+    for 16 m³ assumes somebody would pay 44,000 rather than hire a whole
+    trailer for 22,000, which they would not — and it inflated the live
+    savings figure above the cruder method it replaced."""
     monkeypatch.delenv("CB_SMALL_LOT_MXN", raising=False)
+    monkeypatch.delenv("CB_TRUCK_COST_MXN", raising=False)
     assert metrics.small_lot_cost(15.0) == 22000
-    assert metrics.small_lot_cost(15.5) == 44000
+    assert metrics.small_lot_cost(15.5) == 22000      # capped, not doubled
+    assert metrics.small_lot_cost(90.0) == 22000
     assert metrics.small_lot_cost(0) == 22000
+
+
+def test_the_cap_follows_a_configured_trailer_price(monkeypatch):
+    monkeypatch.setenv("CB_TRUCK_COST_MXN", "40000")
+    monkeypatch.delenv("CB_SMALL_LOT_MXN", raising=False)
+    assert metrics.small_lot_cost(30.0) == 40000      # two lots would be 44,000
 
 
 def test_consolidating_can_never_show_a_negative_saving():

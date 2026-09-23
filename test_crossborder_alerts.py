@@ -233,8 +233,9 @@ from crossborder import tms as _tms
 from crossborder.models import Stage as _Stage
 
 
-def _dates(uplift=None, delivery=None, ops=None):
-    return {"uplift": uplift, "delivery": delivery, "ops_complete": ops}
+def _dates(uplift=None, delivery=None, ops=None, clearance=None):
+    return {"uplift": uplift, "delivery": delivery, "ops_complete": ops,
+            "clearance": clearance}
 
 
 def test_a_job_with_no_load_date_is_flagged_because_it_cannot_be_planned():
@@ -243,8 +244,23 @@ def test_a_job_with_no_load_date_is_flagged_because_it_cannot_be_planned():
 
 
 def test_a_moving_job_with_no_delivery_date_is_flagged():
-    f = _tms.date_gap_flags(_dates(uplift=_dt.date(2026, 9, 5)), _Stage.TO_BORDER, TODAY)
+    f = _tms.date_gap_flags(_dates(uplift=_dt.date(2026, 9, 5), clearance=_dt.date(2026, 9, 8)),
+                            _Stage.TO_BORDER, TODAY)
     assert f == ["no_delivery_date"]
+
+
+def test_a_packed_job_with_no_clearance_date_is_flagged():
+    """D18/D19, 23 Sep: without a clearance date the file can never leave
+    stage 1, however long ago it really crossed."""
+    f = _tms.date_gap_flags(_dates(uplift=_dt.date(2026, 9, 5), delivery=_dt.date(2026, 10, 9)),
+                            _Stage.TO_BORDER, TODAY)
+    assert f == ["no_clearance_date"]
+
+
+def test_a_job_not_yet_packed_is_not_nagged_for_a_clearance_date():
+    f = _tms.date_gap_flags(_dates(uplift=_dt.date(2026, 10, 20), delivery=_dt.date(2026, 11, 1)),
+                            _Stage.BOOKED, TODAY)
+    assert f == []
 
 
 def test_a_freshly_booked_job_is_not_nagged_for_a_delivery_date():
@@ -254,7 +270,8 @@ def test_a_freshly_booked_job_is_not_nagged_for_a_delivery_date():
 
 
 def test_a_complete_job_is_flagged_for_nothing():
-    f = _tms.date_gap_flags(_dates(uplift=_dt.date(2026, 9, 1), delivery=_dt.date(2026, 9, 30)),
+    f = _tms.date_gap_flags(_dates(uplift=_dt.date(2026, 9, 1), delivery=_dt.date(2026, 9, 30),
+                                   clearance=_dt.date(2026, 9, 10)),
                             _Stage.TO_BORDER, TODAY)
     assert f == []
 

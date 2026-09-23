@@ -82,12 +82,40 @@ def test_a_load_carrying_one_file_avoids_nothing():
     assert m["savings"] is None
 
 
-def test_the_cost_assumption_is_configurable_and_stated(monkeypatch):
-    monkeypatch.setenv("CB_TRUCK_COST_MXN", "30000")
+def test_the_saving_compares_against_the_small_lot_rate(monkeypatch):
+    """D15, 23 Sep. Three files, 30 m³ between them — 10 m³ each, so each one
+    alone is a single 15 m³ compartido lot at 22,000. Together they pay for one
+    trailer. 66,000 against 22,000 = 44,000 saved."""
+    monkeypatch.delenv("CB_TRUCK_COST_MXN", raising=False)
+    monkeypatch.delenv("CB_SMALL_LOT_MXN", raising=False)
     m = metrics.summarise({"loads": [load(3, 30.0)], "groups": []}, TODAY)
-    assert m["savings"]["assumed_mxn"] == 2 * 30000
-    # and it never presents itself as fact
-    assert "upper bound" in m["savings"]["assumption"]
+    assert m["savings"]["alone_mxn"] == 66000
+    assert m["savings"]["together_mxn"] == 22000
+    assert m["savings"]["assumed_mxn"] == 44000
+    # and it still says out loud what it assumed
+    assert "compartido" in m["savings"]["assumption"]
+
+
+def test_both_sides_of_the_comparison_are_configurable(monkeypatch):
+    monkeypatch.setenv("CB_TRUCK_COST_MXN", "30000")
+    monkeypatch.setenv("CB_SMALL_LOT_MXN", "18000")
+    m = metrics.summarise({"loads": [load(3, 30.0)], "groups": []}, TODAY)
+    assert m["savings"]["alone_mxn"] == 54000
+    assert m["savings"]["assumed_mxn"] == 54000 - 30000
+
+
+def test_a_big_file_needs_more_than_one_small_lot(monkeypatch):
+    """The rate sheet is written in 15 m³ brackets, so 20 m³ is two lots."""
+    monkeypatch.delenv("CB_SMALL_LOT_MXN", raising=False)
+    assert metrics.small_lot_cost(15.0) == 22000
+    assert metrics.small_lot_cost(15.5) == 44000
+    assert metrics.small_lot_cost(0) == 22000
+
+
+def test_consolidating_can_never_show_a_negative_saving():
+    assert metrics.consolidation_saving(1, 40.0) == {}
+    s = metrics.consolidation_saving(2, 400.0)
+    assert s["saved_mxn"] >= 0
 
 
 def test_a_lane_can_carry_its_own_price(monkeypatch):

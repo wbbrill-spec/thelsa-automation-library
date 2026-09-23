@@ -95,7 +95,15 @@ def small_lot_cost(m3: float = 0.0) -> float:
     except ValueError:
         price = DEFAULT_SMALL_LOT_MXN
     lots = max(1, math.ceil((float(m3 or 0) - 1e-9) / bracket)) if m3 else 1
-    return price * lots
+    # Capped at the price of a whole trailer, and the cap matters. The rate
+    # sheet quotes one bracket, "up to 15 m³"; multiplying it for a bigger file
+    # assumes TRS would charge double for 16 m³, which nobody would pay when a
+    # whole 53 ft trailer is the same 22,000 MXN. Without this the board
+    # reported 462,000 MXN of savings on the live plan against 374,000 on the
+    # old basis — a bigger number from a supposedly more conservative method,
+    # which is exactly the kind of figure that gets quoted once and then
+    # discredits everything next to it.
+    return min(price * lots, truck_cost(""))
 
 
 def consolidation_saving(files: int, m3: float, lane: str = "") -> dict:

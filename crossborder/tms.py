@@ -438,7 +438,18 @@ def stage_for(row: dict, detail: dict | None, today: dt.date) -> tuple[Stage, li
                 or _mw_date(row.get("delivery"))
                 or ad("estimatedDelivery") or _mw_date(d.get("estimatedDelivery")))
     ops_done = _mw_date(ex.get("dtopscomplete")) or ad("unpack")
-    dates = {"uplift": uplift, "delivery": delivery, "ops_complete": ops_done}
+    # Customs clearance — the date that decides whether a file has crossed
+    # (Bill, 23 Sep, D18). V2's `arrival` is the freight landing in country;
+    # the extras are whatever the branch actually types into. Read them all,
+    # take the earliest real one. Unknown keys simply return None.
+    clearance = (ad("arrival")
+                 or _mw_date(ex.get("dtcustoms")) or _mw_date(ex.get("dtclearance"))
+                 or _mw_date(ex.get("dtcustomsclearance")) or _mw_date(ex.get("dtaduana"))
+                 or _mw_date(ex.get("dtdespacho")) or _mw_date(ex.get("dtcleared"))
+                 or _mw_date(d.get("customsClearanceDate")) or _mw_date(d.get("arrival"))
+                 or _mw_date(row.get("arrival")))
+    dates = {"uplift": uplift, "delivery": delivery, "ops_complete": ops_done,
+             "clearance": clearance}
     flags: list[str] = []
     if status in DEAD_STATUSES or str(d.get("isClosed") or "").upper() == "Y":
         return Stage.CLOSED, flags, dates
@@ -449,6 +460,12 @@ def stage_for(row: dict, detail: dict | None, today: dt.date) -> tuple[Stage, li
     if uplift and uplift <= today:
         if delivery and (delivery - today).days <= 2:
             return Stage.OUT_FOR_DELIVERY, flags, dates
+        # Cleared customs and not yet delivered = in Mexico, waiting on the
+        # onward truck. Before 23 Sep every such job sat in "to border" no
+        # matter how long ago it crossed, because nothing read a clearance
+        # date — which is precisely why stage 2 of the plan was empty.
+        if clearance and clearance <= today:
+            return Stage.AT_HUB, flags, dates
         return Stage.TO_BORDER, flags, dates
     if status == "E":
         flags.append("enquiry")
@@ -486,6 +503,14 @@ def date_gap_flags(dates: dict, stage: Stage, today: dt.date) -> list[str]:
         packed = bool(dates.get("uplift")) and dates["uplift"] <= today
         if moving or packed:
             out.append("no_delivery_date")
+    # Added 23 Sep (D18/D19). Without a clearance date the file can never leave
+    # stage 1, however long ago it actually crossed — so once the freight has
+    # been packed and is on its way, a missing clearance date is an outstanding
+    # item, not a detail.
+    if not dates.get("clearance"):
+        packed = bool(dates.get("uplift")) and dates["uplift"] <= today
+        if packed and stage in (Stage.TO_BORDER, Stage.CUSTOMS):
+            out.append("no_clearance_date")
     return out
 
 
@@ -543,20 +568,23 @@ def build_shipment(row: dict, detail: dict | None, *, today: dt.date | None = No
         anchor, basis = booked_on, "booked"
     revenue_month = fx.month_key(anchor) if revenue is not None else ""
     sale = revenue
-    return Shipment(
+    s = Shipment(
         id=f"TMS:{list_id}", source=Source.TMS, source_ref=list_id,
         reference_number=display, customer_name=customer,
         agent=agent,
         origin=origin, destination=destination, destination_hub=hub,
         volume_m3=meas["volume_m3"], weight=meas["weight_kg"],
         stage=stage, source_status=_s(d.get("jobStatus")) or _s(row.get("status")),
-        ready_date=dates["uplift"], delivery_date=dates["delivery"],
+        ready_date=dates["uplift"], clearance_date=dates.get("clearance"),
+        delivery_date=dates["delivery"],
         status_flags=flags, updated_at=updated, url="",
         assignees=[x for x in [_s(mm.get("name")) or _s(row.get("moveManager"))] if x],
         process_format="Moveware", current_step="", steps_done=0, steps_total=0,
         milestones={"booked": (_activity_dates(d)("booked") or _activity_dates(row)("booked")
                                or _created(d) or _created(row) or _mw_date(row.get("created"))),
                     "uplift": dates["uplift"],
+                    "crossed": dates.get("clearance") if dates.get("clearance")
+                               and dates["clearance"] <= today else None,
                     "delivered": dates["delivery"] if dates["delivery"] and dates["delivery"] <= today else None,
                     "closed": dates["ops_complete"]},
         last_progress_at=last_progress, days_since_progress=days,
@@ -581,6 +609,12 @@ def build_shipment(row: dict, detail: dict | None, *, today: dt.date | None = No
                "mw_env": env, "load_type": _s(ex.get("loadtype")), "sit_location": _s(ex.get("sitloc")),
                "delivery_type": _s(d.get("deliveryType"))},
     )
+    # The crew note is where the coordinators were asked to write the port of
+    # entry (D17), and it is also where a door-to-door or load-type remark
+    # would land. Read it for all three; absent means unknown, never assumed.
+    from . import markers
+    markers.apply_markers(s, [crew_note, svc, _s(d.get("deliveryType"))])
+    return s
 
 
 # ── walk ─────────────────────────────────────────────────────────────────────

@@ -447,8 +447,54 @@ class Shipment:
         """
         if self.milestones.get("crossed") or self.milestones.get("at_hub"):
             return True
+        # Bill's ruling, consolidation meeting 23 Sep (D18): "if we have a
+        # customs clearance date that's in the past in Moveware, then it's
+        # cleared." This is the answer to the question that had left stage 2
+        # empty — nothing recorded the moment freight crossed, so the board
+        # could not plan the truck out of Monterrey for any of it.
+        if self.clearance_date and self.clearance_date <= dt.date.today():
+            return True
         return self.stage in (Stage.AT_HUB, Stage.ONWARD, Stage.OUT_FOR_DELIVERY,
                               Stage.DELIVERED, Stage.CLOSED)
+
+    # ── which border it crosses (consolidation meeting, 23 Sep) ───────────
+    @property
+    def port_of_entry(self) -> str:
+        """"McAllen" / "Laredo" / "" — the crossing this file uses.
+
+        Policy from 23 Sep (D1) is McAllen for everything, with exceptions
+        approved individually. TIM has always cleared at McAllen and Fernanda
+        confirmed she never uses Laredo, so a TIM file is McAllen unless it
+        says otherwise. TMS is mid-switch: coordinators write "port of entry:
+        McAllen" in the Moveware crew notes (D17), and until a file says so we
+        record nothing rather than assuming the policy was followed. Measuring
+        the switch is the whole point; assuming it would measure nothing.
+        """
+        marked = str((self.extra or {}).get("port_of_entry") or "").strip()
+        if marked:
+            return marked
+        if self.source is Source.TIM:
+            return "McAllen"
+        return ""
+
+    @property
+    def port_is_assumed(self) -> bool:
+        """True when we are stating a port nobody wrote down."""
+        return bool(self.port_of_entry) and not (self.extra or {}).get("port_of_entry")
+
+    @property
+    def load_type(self) -> str:
+        """"ubox" / "liftvan" / "loose" / "" — how the freight is made up.
+
+        Fernanda agreed to mark this (D22) because a 15 m³ shipment can be any
+        of the three and they pack differently: 13 lift vans to a 53 ft trailer
+        against 10 U-Boxes. Counts already on the file win over a written note.
+        """
+        if self.u_boxes:
+            return "ubox"
+        if self.lift_vans:
+            return "liftvan"
+        return str((self.extra or {}).get("load_type_marked") or "")
 
     # ── door-to-door loose-loaded moves (Fernanda, 2026-09-22) ────────────
     @property
@@ -466,12 +512,15 @@ class Shipment:
         file. So the length identified no door-to-door move at all, and did
         wrongly exclude an export.
 
-        Until the team gives us a real marker — a tag, a custom field or a
-        naming convention — the only thing honoured is a source that says so
-        in words. That means the rule currently matches nothing, which is the
-        honest state: better to plan a door-to-door move somebody then declines
-        than to hide freight behind a guess about a checklist.
+        RESOLVED (consolidation meeting, 23 Sep — D22): Fernanda agreed to
+        write "door to door" in the ClickUp comments on new files. So the
+        marker now exists, it is read from the note text by markers.py, and
+        this property honours it. Anything the source describes in words still
+        counts; nothing is inferred from the shape of the checklist.
         """
+        marked = (self.extra or {}).get("door_to_door")
+        if isinstance(marked, bool):
+            return marked
         text = _fold(" ".join(str((self.extra or {}).get(k) or "")
                               for k in ("service", "process", "service_description", "job_type")))
         return bool(re.search(r"\bdtd\b|door\s*to\s*door|puerta\s*a\s*puerta", text))
@@ -533,6 +582,9 @@ class Shipment:
         d["corporate_account_named"] = self.corporate_account_named
         d["has_crossed"] = self.has_crossed
         d["is_door_to_door"] = self.is_door_to_door
+        d["port_of_entry"] = self.port_of_entry
+        d["port_is_assumed"] = self.port_is_assumed
+        d["load_type"] = self.load_type
         d["consolidation"] = self.consolidation
         d["group_name"] = self.group_name
         d["consolidated_with"] = self.consolidated_with

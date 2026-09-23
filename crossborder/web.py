@@ -46,7 +46,7 @@ import time
 from flask import Blueprint, jsonify, redirect, request, session, url_for
 
 from . import (alerts, clickup, demo, engine, fx, grouping, metrics, models,
-               plan_history, remisiones, rules, sit, tim, tms)
+               notices, plan_history, remisiones, rules, sit, tim, tms)
 from .dashboard import DASHBOARD_HTML
 from .models import Source
 
@@ -477,6 +477,23 @@ def api_plan():
     except Exception as exc:  # noqa: BLE001
         log.exception("metrics failed")
         p["metrics"] = {"error": f"{type(exc).__name__}: {exc}"}
+    # Which border each import crosses (D1/D17, 23 Sep). Policy is now McAllen
+    # for everything, and this is how we find out whether that actually
+    # happened rather than assuming it did. "recorded" counts only the files
+    # where somebody wrote it down; TIM's McAllen is policy, not evidence.
+    try:
+        imports = [s for s in shipments if (s.extra or {}).get("direction") != "export"]
+        ports: dict = {}
+        recorded = 0
+        for s in imports:
+            port = s.port_of_entry or "not recorded"
+            ports[port] = ports.get(port, 0) + 1
+            if (s.extra or {}).get("port_of_entry"):
+                recorded += 1
+        p["ports"] = {"by_port": ports, "recorded": recorded, "imports": len(imports),
+                      "policy": "McAllen"}
+    except Exception as exc:  # noqa: BLE001
+        log.exception("port split failed")
     return jsonify(p)
 
 
@@ -502,7 +519,63 @@ def api_metrics():
         limit = 90
     return jsonify({"history": metrics.history(limit=limit),
                     "truck_cost_mxn": metrics.truck_cost(),
+                    "small_lot_mxn": metrics.small_lot_cost(),
+                    "confirmed": notices.recent(limit=200),
                     "capacity_m3": models.TRUCK_53_M3})
+
+
+# ── "these travel together" (Bill, consolidation meeting 23 Sep — D32) ───────
+@crossborder_bp.route("/crossborder/api/consolidation/notice", methods=["POST"])
+@_login_required
+def api_consolidation_notice():
+    """Tick the shipments that are going on one truck; get a notice to send.
+
+    Drafts only. A consolidation notice asks another company to hold space on
+    a truck — it is precisely the kind of message that must not leave without
+    a person having read it.
+    """
+    payload = request.get_json(silent=True) or {}
+    ids = [str(x) for x in (payload.get("ids") or []) if x]
+    if len(ids) < 2:
+        return jsonify({"error": "pick at least two shipments to consolidate"}), 400
+    wanted = set(ids)
+    picked, lane = [], str(payload.get("lane") or "")
+    shipments, diag, _ = load_shipments()
+    shipments, diag = _with_demo(shipments, diag, request.args)
+    try:
+        current = engine.plan(shipments)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("plan failed while drafting a consolidation notice")
+        return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 500
+    for ld in (current or {}).get("loads") or []:
+        for it in ld.get("shipments") or []:
+            if it.get("id") in wanted:
+                row = dict(it)
+                row.setdefault("destination", it.get("destination"))
+                picked.append(row)
+                lane = lane or ld.get("lane", "")
+    found = {p.get("id") for p in picked}
+    missing = [i for i in ids if i not in found]
+    if len(picked) < 2:
+        return jsonify({"error": "those shipments are not on the current plan",
+                        "missing": missing}), 409
+    draft = notices.build(picked, lane, actor=session.get("user_email", "user"),
+                          note=str(payload.get("note") or ""))
+    if payload.get("record", True):
+        draft["recorded"] = notices.record(draft)
+    draft["missing"] = missing
+    return jsonify(draft)
+
+
+@crossborder_bp.route("/crossborder/api/consolidation/notices")
+@_login_required
+def api_consolidation_notices():
+    """What the team has actually confirmed — the scorecard's honest half."""
+    try:
+        days = max(1, min(int(request.args.get("days", "30") or 30), 365))
+    except ValueError:
+        days = 30
+    return jsonify(notices.recent(days=days))
 
 
 @crossborder_bp.route("/crossborder/api/plan-history")

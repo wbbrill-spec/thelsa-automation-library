@@ -102,6 +102,29 @@ main { max-width: 1500px; margin: 0 auto; padding: 22px 24px 60px; }
 .load .fillbar i.lt { background: #f59e0b; }
 .load .fl { font-size: 11px; color: #666; display: flex; justify-content: space-between; }
 .load .row { display: flex; gap: 8px; font-size: 12px; padding: 5px 0; border-top: 1px solid #f3f3f3; cursor: pointer; }
+/* "These travel together" — Bill, consolidation meeting 23 Sep (D32). */
+.load .row .pick { margin: 2px 2px 0 0; cursor: pointer; flex: 0 0 auto; width: 15px; height: 15px; accent-color: #c0392b; }
+.load .row.picked { background: #fff6f4; }
+#picker { position: fixed; left: 50%; transform: translateX(-50%); bottom: -80px; z-index: 22;
+          background: #24292f; color: #fff; border-radius: 999px; padding: 10px 14px 10px 18px;
+          display: flex; align-items: center; gap: 12px; font-size: 13px;
+          box-shadow: 0 8px 28px rgba(0,0,0,.28); transition: bottom .18s; }
+#picker.on { bottom: 18px; }
+#picker button { border: 0; border-radius: 999px; padding: 7px 14px; font-size: 13px; font-weight: 700; cursor: pointer; }
+#picker .go { background: #c0392b; color: #fff; }
+#picker .clr { background: transparent; color: #bbb; font-weight: 600; }
+#notice { position: fixed; inset: 0; z-index: 30; display: none; align-items: center; justify-content: center;
+          background: rgba(0,0,0,.45); padding: 20px; }
+#notice.on { display: flex; }
+#notice .card { background: #fff; border-radius: 12px; max-width: 760px; width: 100%; max-height: 88vh;
+                overflow-y: auto; padding: 22px; }
+#notice h3 { font-size: 17px; font-weight: 800; margin-bottom: 4px; }
+#notice .sub { color: #666; font-size: 12.5px; margin-bottom: 12px; }
+#notice pre { white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+              font-size: 12px; background: #f6f7f9; border-radius: 8px; padding: 12px; line-height: 1.5; }
+#notice .to { font-size: 12.5px; color: #333; margin-bottom: 10px; }
+#notice .acts { display: flex; gap: 8px; margin-top: 14px; align-items: center; }
+#notice .warn { background: #fff8ec; border-radius: 8px; padding: 9px 12px; font-size: 12.5px; color: #92400e; margin-bottom: 12px; }
 .load .row .who { flex: 1; min-width: 0; }
 .load .row .m3 { white-space: nowrap; color: #333; font-weight: 600; }
 .load .adv { font-size: 12px; color: #92400e; background: #fff8ec; border-radius: 8px; padding: 8px 10px; margin-top: 8px; line-height: 1.45; }
@@ -301,6 +324,28 @@ body.demo header { border-bottom-color: #7c2d12; }
 <div id="overlay"></div>
 <div id="drawer"><button class="close" id="dclose">×</button><div id="dbody"></div></div>
 
+<!-- "These travel together" (D32, 23 Sep). Tick the boxes on a load, get the
+     message that tells Sara and TRS. Drafts only — a person sends it. -->
+<div id="picker">
+  <span id="pick-count">0</span>
+  <button class="go" id="pick-go" data-i18n="Prepare consolidation notice">Prepare consolidation notice</button>
+  <button class="clr" id="pick-clear" data-i18n="Clear">Clear</button>
+</div>
+<div id="notice">
+  <div class="card">
+    <h3 data-i18n="These travel together">These travel together</h3>
+    <div class="sub" id="notice-sub"></div>
+    <div class="warn" data-i18n="Nothing has been sent. Read it, then send it yourself — this message asks TRS to hold space on a truck.">Nothing has been sent. Read it, then send it yourself — this message asks TRS to hold space on a truck.</div>
+    <div class="to" id="notice-to"></div>
+    <pre id="notice-body"></pre>
+    <div class="note" id="notice-save" style="margin-top:8px"></div>
+    <div class="acts">
+      <button class="btn" id="notice-copy" data-i18n="Copy">Copy</button>
+      <button class="btn" id="notice-close" data-i18n="Close">Close</button>
+    </div>
+  </div>
+</div>
+
 <script>
 const STAGES = [
   ["booked","Booked"],["docs_pending","Docs pending"],["green_light","Green light"],
@@ -379,6 +424,22 @@ const ES = {
   "Export": "Exportación", "Domestic Mexico": "Nacional México",
   "trailer": "tráiler", "trailers": "tráileres", "avg fill": "llenado prom.",
   "Ships on its own": "Sale por su cuenta", "drops at": "baja en",
+  // "These travel together" (D32) and the port of entry (D1/D17), 23 Sep.
+  "These travel together": "Estos viajan juntos",
+  "shipment selected": "embarque seleccionado", "shipments selected": "embarques seleccionados",
+  "Prepare consolidation notice": "Preparar aviso de consolidación",
+  "Clear": "Limpiar", "Preparing…": "Preparando…", "Copy": "Copiar", "Copied": "Copiado",
+  "Close": "Cerrar", "To": "Para", "Subject": "Asunto",
+  "Select the text and copy it": "Selecciona el texto y cópialo",
+  "Could not prepare the notice.": "No se pudo preparar el aviso.",
+  "of a 53 ft trailer": "de un tráiler de 53'", "free": "libres",
+  "Separately": "Por separado", "together": "juntos", "saved": "ahorro",
+  "Nothing has been sent. Read it, then send it yourself — this message asks TRS to hold space on a truck.":
+    "No se ha enviado nada. Léelo y envíalo tú — este mensaje pide a TRS que reserve espacio en un camión.",
+  "port of entry": "puerto de entrada", "assumed": "supuesto",
+  "no port recorded": "sin puerto registrado",
+  "Crossing at McAllen": "Cruzando por McAllen", "still at Laredo": "aún por Laredo",
+  "Laredo": "Laredo", "of": "de", "recorded on the file": "registrados en el expediente",
   "needs a hired 53' trailer": "requiere tráiler de 53' contratado",
   "Already consolidated": "Ya consolidado",
   "Trucks a coordinator is already filling — add freight to these before booking another.":
@@ -686,7 +747,7 @@ function renderPlan() {
           ? `<b>${l.u_boxes} / ${l.u_box_positions} U-Box</b> · ${l.m3} m³ · ${l.fill_pct}%${l.free_u_box_positions ? ` · ${l.free_u_box_positions} ${tr("positions free")}` : ""}`
           : `${l.m3} / ${l.truck_m3} m³ · ${l.fill_pct}%`}${l.kg ? ` · ${fmtN(l.kg)} kg` : ""}${
         (l.revenue || []).length ? ` · ${tr("revenue")} ${fmtMoneyBuckets(l.revenue)}` : ""}</span><span>${l.depart_by ? tr("depart by") + " " + fmtD(l.depart_by) : ""}</span></div>
-      ${l.shipments.map(it => `<div class="row" data-id="${esc(it.id)}"><div class="who"><b>${esc(it.customer)}</b>${it.anchor ? ' <span class="tag anchor">anchor</span>' : ""}${it.corporate_account ? ` <span class="corp">${esc(it.corporate_account)}</span>` : ""}${it.ubox ? ` <span class="tag lv">U-Box${it.u_boxes ? " ×" + it.u_boxes : ""}</span>` : ""}${it.us_diplomatic ? ` <span class="tag lv" title="${tr("US Embassy / Consulate — ships in lift vans; Moveware volume is gross")}">${tr("lift vans")}</span>` : ""}${l.window_risk.includes(it.id) ? ' <span class="tag risk">by ' + fmtD(it.deadline) + '</span>' : ""}<br><span class="rs">${esc(it.source)} · ${esc(it.agent || "")}${it.reference ? " · " + esc(it.reference) : ""} · → ${esc(it.destination || "?")}${it.service ? " · " + esc(it.service) : ""}</span></div><div class="m3">${it.lift_vans ? `<b>${it.lift_vans} LV</b><br><span class="rs">${it.m3} m³ ${tr("gross")}</span>` : `${it.m3} m³`}${it.revenue != null ? `<br><span class="rs">${fmtMoney(it.revenue, it.revenue_currency, it.revenue_month)}</span>` : ""}</div></div>`).join("")}
+      ${l.shipments.map(it => `<div class="row" data-id="${esc(it.id)}"><input type="checkbox" class="pick" data-id="${esc(it.id)}" data-lane="${esc(l.lane)}" title="${tr("These travel together")}"><div class="who"><b>${esc(it.customer)}</b>${it.anchor ? ' <span class="tag anchor">anchor</span>' : ""}${it.corporate_account ? ` <span class="corp">${esc(it.corporate_account)}</span>` : ""}${it.ubox ? ` <span class="tag lv">U-Box${it.u_boxes ? " ×" + it.u_boxes : ""}</span>` : ""}${it.us_diplomatic ? ` <span class="tag lv" title="${tr("US Embassy / Consulate — ships in lift vans; Moveware volume is gross")}">${tr("lift vans")}</span>` : ""}${l.window_risk.includes(it.id) ? ' <span class="tag risk">by ' + fmtD(it.deadline) + '</span>' : ""}<br><span class="rs">${esc(it.source)} · ${esc(it.agent || "")}${it.reference ? " · " + esc(it.reference) : ""} · → ${esc(it.destination || "?")}${it.service ? " · " + esc(it.service) : ""}</span></div><div class="m3">${it.lift_vans ? `<b>${it.lift_vans} LV</b><br><span class="rs">${it.m3} m³ ${tr("gross")}</span>` : `${it.m3} m³`}${it.revenue != null ? `<br><span class="rs">${fmtMoney(it.revenue, it.revenue_currency, it.revenue_month)}</span>` : ""}</div></div>`).join("")}
       ${(l.trucks||[]).length ? `<div class="fl" style="margin-top:6px"><span>${tr("On a truck already going")}: ${l.trucks.map(t => `<span class="tag ${t.fits?"truckfit":"truck"}" title="${esc(t.driver||"")}">${esc(t.unit)} · ${fmtD(t.date)} · ${t.spare_m3} m³ ${tr("free")}</span>`).join(" ")}</span></div>` : ""}
       ${l.pairing_advice ? `<div class="adv info">${esc(l.pairing_advice)}</div>` : ""}
       ${opp && opp.advice && !l.ships_alone ? `<div class="adv">${esc(opp.advice)}</div>` : ""}
@@ -694,6 +755,7 @@ function renderPlan() {
   renderGroups(p);
   renderMetrics(p);
   document.querySelectorAll("#loads .row, #groups .row").forEach(el => el.onclick = () => openDrawer(el.dataset.id));
+  wirePicker();
   const cb = p.coming_by_lane || {}; const lanes = Object.keys(cb).filter(k => !src || cb[k].some(i => i.source === src));
   const ub = p.unsized_by_lane || {}; const ulanes = Object.keys(ub).filter(k => !src || ub[k].some(i => i.source === src));
   const parts = [];
@@ -703,6 +765,115 @@ function renderPlan() {
   $("#coming").innerHTML = parts.join("<br><br>");
   renderTrucks(p);
 }
+
+// Which border the imports actually cross (D1/D17, 23 Sep). Policy is McAllen
+// for everything now. This tile is how we find out whether the policy took,
+// rather than assuming it did — so it counts what somebody WROTE DOWN, and
+// says plainly how much of the board is still silent on the question.
+function portTile(p) {
+  const po = p.ports;
+  if (!po || !po.imports) return "";
+  const by = po.by_port || {};
+  const mca = by["McAllen"] || 0, lar = by["Laredo"] || 0;
+  const sub = lar
+    ? `${lar} ${tr("still at Laredo")} · ${po.recorded} ${tr("of")} ${po.imports} ${tr("recorded on the file")}`
+    : `${po.recorded} ${tr("of")} ${po.imports} ${tr("recorded on the file")}`;
+  return `<div class="metric">
+      <div class="ml">${tr("Crossing at McAllen")}</div>
+      <div class="mv">${mca}${lar ? `<span class="delta down">▼ ${lar} ${tr("Laredo")}</span>` : ""}</div>
+      <div class="ms">${esc(sub)}</div>
+    </div>`;
+}
+
+// "These travel together" — Bill, consolidation meeting 23 Sep (D32).
+//
+// Until now a consolidation lived in somebody's head until they wrote a note
+// or made a call: Sara cannot add freight to a truck she has not been told
+// about, and TRS cannot hold space nobody asked for. Ticking the boxes drafts
+// the message that tells them, and records the pick so the scoreboard can
+// count decisions the team actually made rather than suggestions it ignored.
+//
+// It drafts. It does not send. A consolidation notice asks another company to
+// hold space on a truck — that does not leave without a person reading it.
+const PICKED = new Set();
+
+function wirePicker() {
+  document.querySelectorAll("#loads .pick, #groups .pick").forEach(cb => {
+    cb.checked = PICKED.has(cb.dataset.id);
+    cb.closest(".row").classList.toggle("picked", cb.checked);
+    cb.onclick = (ev) => {
+      ev.stopPropagation();              // the row itself opens the drawer
+      const id = cb.dataset.id;
+      if (cb.checked) { PICKED.add(id); PICK_LANE = cb.dataset.lane || PICK_LANE; }
+      else PICKED.delete(id);
+      cb.closest(".row").classList.toggle("picked", cb.checked);
+      renderPicker();
+    };
+  });
+  renderPicker();
+}
+
+let PICK_LANE = "";
+
+function renderPicker() {
+  const bar = $("#picker");
+  if (!bar) return;
+  const n = PICKED.size;
+  bar.classList.toggle("on", n > 0);
+  $("#pick-count").textContent = n === 1
+    ? "1 " + tr("shipment selected")
+    : n + " " + tr("shipments selected");
+  $("#pick-go").disabled = n < 2;
+  $("#pick-go").style.opacity = n < 2 ? .5 : 1;
+}
+
+function clearPicks() {
+  PICKED.clear();
+  document.querySelectorAll(".pick").forEach(cb => {
+    cb.checked = false; cb.closest(".row").classList.remove("picked");
+  });
+  renderPicker();
+}
+
+async function draftNotice() {
+  const go = $("#pick-go");
+  const was = go.textContent;
+  go.textContent = tr("Preparing…"); go.disabled = true;
+  try {
+    const r = await fetch("/crossborder/api/consolidation/notice", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ids: [...PICKED], lane: PICK_LANE}),
+    });
+    const d = await r.json();
+    if (!r.ok) { alert(d.error || tr("Could not prepare the notice.")); return; }
+    showNotice(d);
+  } catch (e) {
+    alert(tr("Could not prepare the notice.") + " " + e);
+  } finally {
+    go.textContent = was; renderPicker();
+  }
+}
+
+function showNotice(d) {
+  const s = d.summary || {};
+  const sv = s.saving;
+  $("#notice-sub").textContent =
+    `${s.files} ${tr("shipments")} · ${s.m3} m³ · ${s.fill_pct}% ${tr("of a 53 ft trailer")}`
+    + (s.spare_m3 ? ` · ${s.spare_m3} m³ ${tr("free")}` : "");
+  $("#notice-to").innerHTML = `<b>${tr("To")}:</b> ${esc((d.to || []).join(", "))}<br><b>${tr("Subject")}:</b> ${esc(d.subject_en)}`;
+  $("#notice-body").textContent = d.body || "";
+  $("#notice-save").innerHTML = sv
+    ? `${tr("Separately")}: ~${fmtN(sv.alone_mxn)} MXN · ${tr("together")}: ~${fmtN(sv.together_mxn)} MXN · <b>${tr("saved")} ~${fmtN(sv.saved_mxn)} MXN</b>`
+    : "";
+  $("#notice").classList.add("on");
+  $("#notice-copy").onclick = async () => {
+    try { await navigator.clipboard.writeText(d.subject_en + "\n\n" + d.body);
+          $("#notice-copy").textContent = tr("Copied"); }
+    catch (e) { $("#notice-copy").textContent = tr("Select the text and copy it"); }
+  };
+}
+
+function closeNotice() { $("#notice").classList.remove("on"); }
 
 // The consolidation scoreboard. The programme's whole case is that filling
 // trucks saves money; until now the board could not say whether the team was
@@ -743,7 +914,8 @@ function renderMetrics(p) {
        : tile(tr("Trucks avoided"), "0", tr("every load is carrying a single file")),
     tile(tr("Paid-for empty space"), fmtN(m.paid_spare_m3) + " m³",
          tr("already heading to Mexico with room on board")),
-  ].join("");
+    portTile(p),
+  ].filter(Boolean).join("");
   $("#metrics-note").innerHTML = (sv ? esc(tr("Savings assume") + " " + sv.assumption) : "")
     + (m.history && m.history.count > 1
         ? ` <b>${tr("Measured since")} ${esc(m.history.points[0].as_of)}</b> (${m.history.count} ${tr("days")}).`
@@ -1082,6 +1254,10 @@ $("#view-cons").onclick = () => { view = "cons"; render(); renderPlan(); };
 $("#view-table").onclick = () => { view = "table"; render(); };
 $("#refresh").onclick = () => load(true);
 $("#dclose").onclick = closeDrawer; $("#overlay").onclick = closeDrawer;
+$("#pick-go").onclick = draftNotice;
+$("#pick-clear").onclick = clearPicks;
+$("#notice-close").onclick = closeNotice;
+$("#notice").onclick = (e) => { if (e.target.id === "notice") closeNotice(); };
 $("#lang-en").onclick = () => setLang("en"); $("#lang-es").onclick = () => setLang("es");
 $("#cur-mxn").onclick = () => setCur("MXN"); $("#cur-usd").onclick = () => setCur("USD");
 document.addEventListener("keydown", e => { if (e.key === "Escape") closeDrawer(); });

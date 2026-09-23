@@ -70,6 +70,15 @@ def exclude_us_diplomatic(shipments):
 # CB_COMMERCIAL_PATTERNS and nothing else has to change.
 DEFAULT_COMMERCIAL_PATTERNS = [
     "comercial", "commercial", "mueble nuevo", "muebles nuevos", "new furniture", "larsa",
+    # Gustavo's naming convention, agreed 23 Sep (D23): ClickUp file names get
+    # an INPO / EXPO prefix, and commercial or design work is marked on the
+    # same prefix. There are no commercial files in ClickUp yet — these are
+    # here so the rule works the day the first one appears, rather than
+    # needing a deploy. The exact convention is still Gustavo's to confirm;
+    # whatever he settles on goes in CB_COMMERCIAL_PATTERNS_EXTRA, no code
+    # change. Two-word forms only: a bare "com" would match half the board.
+    "inpo com", "expo com", "impo com", "inpo c o m", "expo c o m",
+    "inpo design", "expo design", "impo design", "inpo diseno", "expo diseno",
 ]
 
 

@@ -31,7 +31,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
-from . import grouping
+from . import grouping, markers
 from .clickup import ClickUpClient, ClickUpError
 from .models import Shipment, Source, Stage, norm_text, parse_date
 
@@ -206,7 +206,18 @@ def build_shipment(lst: dict, tasks: list[dict], *, folder: Optional[str], space
                "list_name": lst.get("name", "")},
     )
     # Fernanda's consolidation note, if she left one (decision D6, 22 Sep).
-    grouping.apply_note(s, grouping.note_texts(lst, comments, tasks))
+    texts = grouping.note_texts(lst, comments, tasks)
+    grouping.apply_note(s, texts)
+    # Door-to-door and loose-load / lift-van, which Fernanda agreed to write in
+    # the comments (D22, 23 Sep). The list name is read too — it is where the
+    # INPO/EXPO convention lives. Port of entry is not read from TIM text: she
+    # confirmed she clears everything at McAllen, so the default in
+    # Shipment.port_of_entry covers it and a customer city called Laredo in a
+    # note cannot reassign the file.
+    markers.apply_markers(s, texts + [lst.get("name", "")])
+    if s.extra.get("port_of_entry"):
+        s.extra.pop("port_of_entry", None)
+        s.extra.pop("port_source", None)
     return s
 
 
@@ -369,7 +380,11 @@ def fetch_tim_shipments(client: Optional[ClickUpClient] = None,
                     except Exception as exc:  # noqa: BLE001
                         log.debug("task comments unavailable for %s: %s", t.get("name"), exc)
                 note_stats["checked"] += 1
-                grouping.apply_note(s, texts + grouping.note_texts(lst, None, tasks))
+                all_texts = texts + grouping.note_texts(lst, None, tasks)
+                grouping.apply_note(s, all_texts)
+                markers.apply_markers(s, all_texts)
+                s.extra.pop("port_of_entry", None)   # TIM is McAllen by policy
+                s.extra.pop("port_source", None)
             if s.consolidation:
                 note_stats["found"] += 1
             return s, None

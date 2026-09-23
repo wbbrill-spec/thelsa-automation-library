@@ -48,6 +48,19 @@ from .models import TRUCK_53_M3, norm_text
 __all__ = ["summarise", "truck_cost", "record", "history", "reset"]
 
 DEFAULT_TRUCK_COST_MXN = 22000.0
+# What TRS charges for a SMALL lot rather than a trailer — the number that
+# makes consolidation worth money. From Gustavo's screen share of the TRS rate
+# sheet, consolidation meeting 23 Sep (D15): "flete nacional compartido", up to
+# 15 m³ (three lift vans), Monterrey → Naucalpan, 20,212 MXN of transport plus
+# loading and unloading manoeuvres, ≈ 22,000 all in.
+#
+# That is the same price as a whole 53 ft trailer carrying thirteen lift vans.
+# So three lift vans cost ~22,000 shipped alone and ~5,000 as part of a full
+# trailer (22,000 ÷ 13 ≈ 1,700 each). Roughly a fourfold difference, and it is
+# a real quoted rate rather than an assumption — which is why the board can
+# now put a number on a consolidation without hedging.
+DEFAULT_SMALL_LOT_MXN = 22000.0
+DEFAULT_SMALL_LOT_M3 = 15.0
 _LOCK = threading.Lock()
 MAX_POINTS = int(os.environ.get("CB_METRICS_MAX", "400") or 400)
 
@@ -67,6 +80,45 @@ def truck_cost(lane: str = "") -> float:
         return float(os.environ.get("CB_TRUCK_COST_MXN") or DEFAULT_TRUCK_COST_MXN)
     except ValueError:
         return DEFAULT_TRUCK_COST_MXN
+
+
+def small_lot_cost(m3: float = 0.0) -> float:
+    """What TRS would charge to move this much freight as its own small lot.
+
+    The alternative to consolidating. Priced in 15 m³ brackets because that is
+    how the rate sheet is written — a 16 m³ lot is two brackets, not 1.07.
+    """
+    import math
+    bracket = float(os.environ.get("CB_SMALL_LOT_M3") or DEFAULT_SMALL_LOT_M3) or 15.0
+    try:
+        price = float(os.environ.get("CB_SMALL_LOT_MXN") or DEFAULT_SMALL_LOT_MXN)
+    except ValueError:
+        price = DEFAULT_SMALL_LOT_MXN
+    lots = max(1, math.ceil((float(m3 or 0) - 1e-9) / bracket)) if m3 else 1
+    return price * lots
+
+
+def consolidation_saving(files: int, m3: float, lane: str = "") -> dict:
+    """What one load saved by travelling together instead of separately.
+
+    Each file would otherwise have gone as its own small lot at the TRS
+    compartido rate; together they pay a share of one trailer. This replaces
+    the old "trucks avoided × trailer price", which over-counted badly — a
+    single 4 m³ file was never going to hire a whole 53 ft trailer, but it
+    absolutely would have paid the small-lot rate.
+    """
+    if files < 2:
+        return {}
+    alone = small_lot_cost(m3 / files) * files
+    together = truck_cost(lane)
+    return {
+        "alone_mxn": round(alone),
+        "together_mxn": round(together),
+        "saved_mxn": round(max(0.0, alone - together)),
+        "basis": "TRS flete nacional compartido, 22,000 MXN per 15 m³ lot "
+                 "(Gustavo's rate sheet, 23 Sep) against one hired 53 ft "
+                 "trailer at 22,000 MXN.",
+    }
 
 
 def _load_rows(plan: dict) -> list[dict]:
@@ -115,15 +167,25 @@ def summarise(plan: dict, today: Optional[dt.date] = None) -> dict:
 
     money = None
     if avoided:
-        per = [truck_cost(r["lane"]) * (r["files"] - 1) for r in shared]
+        # Rebuilt 23 Sep on Gustavo's TRS rate sheet. The old figure multiplied
+        # trucks avoided by a whole trailer price, which nobody could defend:
+        # a lone 4 m³ file would not have hired a 53 ft trailer. What it WOULD
+        # have paid is the compartido small-lot rate, and that comparison is
+        # both smaller and real.
+        savings = [consolidation_saving(r["files"], r["space"], r["lane"]) for r in shared]
+        savings = [x for x in savings if x]
+        total = sum(x["saved_mxn"] for x in savings)
         money = {
             "trucks_avoided": avoided,
-            "assumed_mxn": round(sum(per)),
-            "per_load_mxn": round(sum(per) / len(shared)) if shared else 0,
-            "assumption": f"a hired 53 ft trailer at {round(truck_cost()):,} MXN "
-                          "(Fernanda's Monterrey → Mexico City figure, 21 Sep). "
-                          "An upper bound: a single small file would not really "
-                          "hire a whole trailer.",
+            "assumed_mxn": round(total),
+            "per_load_mxn": round(total / len(savings)) if savings else 0,
+            "alone_mxn": round(sum(x["alone_mxn"] for x in savings)),
+            "together_mxn": round(sum(x["together_mxn"] for x in savings)),
+            "assumption": "TRS flete nacional compartido at "
+                          f"{round(small_lot_cost()):,} MXN per 15 m³ lot against a hired "
+                          f"53 ft trailer at {round(truck_cost()):,} MXN "
+                          "(Gustavo's rate sheet, consolidation meeting 23 Sep). "
+                          "Both are quoted Monterrey → Mexico City prices, not a rate card.",
         }
 
     spare_m3 = 0.0

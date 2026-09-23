@@ -12,12 +12,13 @@ compliance we honestly report what evidence IS vs ISN'T on record per file:
 survey, insurance, priced quote, delivery date. Full compliance scoring resumes
 once the field mapping + document/invoice endpoints are confirmed with Moveware.
 
-DATA ACCESS
------------
-/faim/api/metrics pages through the ENTIRE /jobs feed (following Moveware's
-`_links` pagination) to count all files for company 64000, then deep-checks a
-time-bounded sample via /quotes for the evidence fields. /faim/raw exposes the
-raw structures + total count + pagination links for validation.
+DATA ACCESS (V2 / MoveConnect REST)
+-----------------------------------
+/faim/api/metrics reads the EXACT file total from the `x-total-count` header
+(count=true) and evidence coverage from the most recent /jobs page. V2 paginates
+by `page=` (1-indexed; it ignores `offset=`) and its list items are rich
+(activityDates, roles, status), so no per-file sub-calls are needed. /faim/raw
+exposes the true total + a raw V2 list item for validation.
 """
 import datetime as dt
 import functools
@@ -131,23 +132,49 @@ def _next_link(payload):
     return None
 
 
-def _fetch_all_jobs():
-    """Page through the whole /jobs feed. Returns (jobs, pages_fetched)."""
-    start = time.time()
-    payload = _mw_get("/jobs", timeout=10)
-    jobs = list(payload.get("jobs") or []) if isinstance(payload, dict) else []
-    pages = 1
-    while pages < _MAX_PAGES and time.time() - start < _PAGE_BUDGET:
-        nxt = _next_link(payload)
-        if not nxt:
-            break
+def _mw_total(query):
+    """GET a /jobs query with count=true; return x-total-count as int (or None)."""
+    url = mw_live.BASE_URL + "/" + str(query).lstrip("/")
+    req = urllib.request.Request(url, headers=mw_live._headers(), method="GET")
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        raw = resp.headers.get("x-total-count")
+    try:
+        return int(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _fetch_recent_jobs():
+    """V2: exact file total via x-total-count, plus the MOST RECENT files.
+
+    The /jobs feed is oldest-first and paginates by `page=` (1-indexed; V2 honours
+    `page=` and ignores `offset=`), so the last page holds the newest files. V2 list
+    items are rich (activityDates, roles, status), so no per-file calls are needed.
+    Returns (recent_jobs, total).
+    """
+    total = None
+    try:
+        total = _mw_total("/jobs?limit=1&page=1&count=true")
+    except Exception:
+        total = None
+
+    last_page = 1
+    if total and total > _SAMPLE_N:
+        last_page = (total + _SAMPLE_N - 1) // _SAMPLE_N
+
+    recent = []
+    for pg in (last_page, 1):
         try:
-            payload = _mw_get(nxt, timeout=8)
+            payload = _mw_get(f"/jobs?limit={_SAMPLE_N}&page={pg}", timeout=10)
         except Exception:
+            payload = None
+        recent = list(payload.get("jobs") or []) if isinstance(payload, dict) else []
+        if recent:
             break
-        jobs.extend(payload.get("jobs") or [] if isinstance(payload, dict) else [])
-        pages += 1
-    return jobs, pages
+
+    if total is None:
+        total = len(recent)
+    return recent[-_SAMPLE_N:], total
 
 
 def _faim_live_metrics():
@@ -159,51 +186,43 @@ def _faim_live_metrics():
         return _LIVE_CACHE["data"]
 
     try:
-        all_jobs, pages = _fetch_all_jobs()
+        jobs, total = _fetch_recent_jobs()
     except Exception:
         return None
-    if not all_jobs:
+    if not jobs:
         return None
 
-    total = len(all_jobs)
-    active = [j for j in all_jobs if str(_g(j, "status")).upper() != "C"]
+    def _coord(j):
+        ent = ((j.get("roles") or {}).get("coordinator") or {}).get("entity") or {}
+        nm = _g(ent, "name")
+        if not nm:
+            nm = (str(_g(ent, "firstName")) + " " + str(_g(ent, "lastName"))).strip()
+        return nm or "Unassigned"
 
-    # Deep-check a time-bounded sample of active files for evidence fields.
-    start = time.time()
     sample = []
-    for j in active:
-        if len(sample) >= _SAMPLE_N or time.time() - start > _ENRICH_BUDGET:
-            break
-        jid = str(_g(j, "id", "jobId", "jobNumber"))
-        if not jid:
+    for j in jobs:
+        if not isinstance(j, dict):
             continue
-        try:
-            qd = _mw_get(f"/jobs/{jid}/quotes", timeout=6)
-        except Exception:
-            continue
-        quotes = qd.get("quotes") if isinstance(qd, dict) else None
-        q0 = quotes[0] if quotes else {}
-        rich = q0.get("job", {}) if isinstance(q0, dict) else {}
-        roles = q0.get("roles", {}) if isinstance(q0, dict) else {}
-        dates = rich.get("dates", {}) if isinstance(rich, dict) else {}
-        ins = rich.get("services", {}).get("insurance", {}) if isinstance(rich.get("services"), dict) else {}
-        opts = q0.get("options", []) if isinstance(q0, dict) else []
+        ad = j.get("activityDates") or {}
+        status = str(_g(j, "status")).upper()
+        coord = _coord(j)
         sample.append({
-            "file": jid,
-            "cust": _g(rich, "name") or _g(j, "name") or jid,
-            "coord": _g(roles.get("manager", {}), "name") or _g(j, "moveManager") or "Unassigned",
-            "survey": _has(_g(dates.get("survey", {}), "date")) or _has(_g(j, "survey")),
-            "delivery": _has(_g(dates.get("delivery", {}), "date")) or _has(_g(j, "delivery")),
-            "insurance": any(_has(ins.get(k)) for k in ("type", "value", "premium", "insurerCode")),
-            "quote": any(_num(_g(o, "valueInc", "value")) > 0 for o in opts),
+            "file": str(_g(j, "number", "id") or ""),
+            "cust": _g(j, "name") or str(_g(j, "number", "id") or ""),
+            "coord": coord,
+            "status": status,
+            "active": status not in ("C", "X", "Z"),
+            "survey": _has(_g((ad.get("survey") or {}), "date")),
+            "delivery": _has(_g((ad.get("delivery") or {}), "date"))
+            or _has(_g((ad.get("estimatedDelivery") or {}), "date")),
+            "coordinator": coord != "Unassigned",
         })
 
     s = len(sample)
     cov = {
         "Survey on file": sum(1 for x in sample if x["survey"]),
-        "Delivery logged": sum(1 for x in sample if x["delivery"]),
-        "Insurance recorded": sum(1 for x in sample if x["insurance"]),
-        "Priced quote": sum(1 for x in sample if x["quote"]),
+        "Delivery date logged": sum(1 for x in sample if x["delivery"]),
+        "Coordinator assigned": sum(1 for x in sample if x["coordinator"]),
     }
     by_criterion = sorted(
         [{"name": k, "v": _pct(v, s)} for k, v in cov.items()],
@@ -214,7 +233,7 @@ def _faim_live_metrics():
     for x in sample:
         c = x["coord"]
         coord_tot[c] = coord_tot.get(c, 0) + 1
-        if x["survey"] and x["insurance"] and x["quote"]:
+        if x["survey"] and x["delivery"]:
             coord_cov[c] = coord_cov.get(c, 0) + 1
     by_coordinator = sorted(
         [{"name": c, "v": _pct(coord_cov.get(c, 0), coord_tot[c])} for c in coord_tot],
@@ -226,37 +245,36 @@ def _faim_live_metrics():
         gaps = []
         if not x["survey"]:
             gaps.append("survey")
-        if not x["insurance"]:
-            gaps.append("insurance")
-        if not x["quote"]:
-            gaps.append("priced quote")
         if not x["delivery"]:
             gaps.append("delivery date")
+        if not x["coordinator"]:
+            gaps.append("coordinator")
         if gaps:
             missing.append({
                 "file": x["file"], "cust": x["cust"],
                 "rule": "Missing: " + ", ".join(gaps), "coord": x["coord"],
                 "days": f"{len(gaps)} gap{'s' if len(gaps) != 1 else ''}",
-                "sev": "crit" if len(gaps) >= 3 else "warn", "_age": len(gaps),
+                "sev": "crit" if len(gaps) >= 2 else "warn", "_age": len(gaps),
             })
     missing.sort(key=lambda m: -m["_age"])
     for m in missing:
         m.pop("_age", None)
 
+    active_n = sum(1 for x in sample if x["active"])
     result = {
         "generatedNote": (
-            f"LIVE Moveware — company 64000 · {total} files found across {pages} page(s) "
-            f"· evidence deep-checked on {s} active files this load. This view reports "
-            "what's on record vs. missing; full compliance scoring resumes once the "
-            "document/invoice endpoints + field mapping are confirmed."
+            f"LIVE Moveware — company 64000 · {total} files total (via x-total-count) "
+            f"· evidence read on the {s} most recent files, straight from the /jobs "
+            "payload (survey, delivery, coordinator). Priced-quote, insurance and document "
+            "criteria are the next phase (options/invoices + the documents endpoint)."
         ),
         "window": "live coverage snapshot",
         "passBar": 80,
         "tiles": {
             "totalFiles": total,
-            "activeFiles": len(active),
+            "activeFiles": active_n,
             "sampleFiles": s,
-            "missingInsurance": sum(1 for x in sample if not x["insurance"]),
+            "missingInsurance": sum(1 for x in sample if not x["survey"]),
         },
         "byCoordinator": by_coordinator,
         "byCriterion": by_criterion,
@@ -290,18 +308,15 @@ def faim_metrics():
 @faim_bp.route("/faim/raw")
 @_login_required
 def faim_raw():
-    """Debug: total file count, pagination links, and raw structures."""
+    """Debug: exact total (x-total-count), a raw V2 list item, and sub-resources."""
     if not _HAVE_MW:
         return jsonify({"error": "mw_live not importable"})
     out = {}
     try:
-        first = _mw_get("/jobs", timeout=10)
-        out["jobs_links"] = first.get("_links") if isinstance(first, dict) else None
-        out["first_page_count"] = len(first.get("jobs") or []) if isinstance(first, dict) else 0
-        out["next_link"] = _next_link(first)
-        jobs, pages = _fetch_all_jobs()
-        out["total_files"] = len(jobs)
-        out["pages_fetched"] = pages
+        out["total_files"] = _mw_total("/jobs?limit=1&page=1&count=true")
+        recent, total = _fetch_recent_jobs()
+        out["sample_size"] = len(recent)
+        out["first_recent_job"] = recent[0] if recent else None
     except Exception as e:
         out["jobs_error"] = str(e)
     try:
@@ -388,7 +403,7 @@ td.num{font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
 <div class="cols2">
 <div class="card">
 <h2>Coverage by coordinator</h2>
-<p class="note">Share of each coordinator's checked files that have survey + insurance + priced quote all on record. Line = 80% target.</p>
+<p class="note">Share of each coordinator's recent files with both survey and delivery date on record. Line = 80% target.</p>
 <div class="bars" id="byCoord"></div>
 </div>
 <div class="card">
@@ -434,10 +449,10 @@ document.getElementById('viewer').textContent=d.viewer||'';
 if(d.generatedNote){const b=document.getElementById('sampleBanner');b.style.display='block';b.textContent='● '+d.generatedNote;}
 const t=d.tiles||{};
 document.getElementById('tiles').innerHTML=`
-<div class="tile"><p class="label">Live files in Moveware</p><p class="val">${t.totalFiles}</p><p class="sub2">company 64000, all pages</p></div>
+<div class="tile"><p class="label">Live files in Moveware</p><p class="val">${t.totalFiles}</p><p class="sub2">company 64000 · x-total-count</p></div>
 <div class="tile"><p class="label">Active (not cancelled)</p><p class="val">${t.activeFiles}</p><p class="sub2">eligible for audit</p></div>
-<div class="tile"><p class="label">Deep-checked this load</p><p class="val">${t.sampleFiles}</p><p class="sub2">sampled for evidence</p></div>
-<div class="tile"><p class="label">Missing insurance</p><p class="val">${t.missingInsurance}</p><p class="sub2">of the checked sample</p></div>`;
+<div class="tile"><p class="label">Recent files checked</p><p class="val">${t.sampleFiles}</p><p class="sub2">newest in the book</p></div>
+<div class="tile"><p class="label">Missing survey</p><p class="val">${t.missingInsurance}</p><p class="sub2">of the recent sample</p></div>`;
 bars(document.getElementById('byCoord'),d.byCoordinator||[]);
 bars(document.getElementById('byCrit'),d.byCriterion||[]);
 const tb=document.getElementById('breaches');

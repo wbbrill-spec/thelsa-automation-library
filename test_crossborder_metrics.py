@@ -56,6 +56,19 @@ def test_solo_trucks_are_counted_because_that_is_what_should_fall():
     assert m["solo_loads"] == 2 and m["solo_pct"] == 67 and m["shared_loads"] == 1
 
 
+def test_an_export_travelling_alone_is_policy_not_a_failure_to_consolidate():
+    """Fernanda: exports do not wait. On the live board today four of seven
+    loads were exports doing exactly what they should, and counting them as
+    solo trucks read 57% — a number that would have been quoted as a problem."""
+    exports = [{**load(1, 20.0, lane="Export → Texas", leg="export"), "ships_alone": True}
+               for _ in range(4)]
+    p = {"loads": exports + [load(1, 12.0), load(3, 40.0)], "groups": []}
+    m = metrics.summarise(p, TODAY)
+    assert m["alone_by_policy"] == 4
+    assert m["consolidatable_loads"] == 2
+    assert m["solo_loads"] == 1 and m["solo_pct"] == 50
+
+
 def test_trucks_avoided_is_files_beyond_the_first_on_each_load():
     """Eight files on one truck is seven trucks that did not run."""
     p = {"loads": [load(8, 64.0)], "groups": []}

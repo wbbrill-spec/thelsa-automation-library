@@ -125,13 +125,17 @@ def build(picked: list[dict], lane: str = "", *, actor: str = "", note: str = ""
         lines.append(cap)
         if s["saving"]:
             sv = s["saving"]
+            # State the saving, not just the two prices. It is the reason the
+            # message exists, and whoever reads it should not have to subtract.
             lines.append(
-                (f"Moving these separately would cost about {sv['alone_mxn']:,} MXN at the "
-                 f"TRS shared-freight rate; together it is about {sv['together_mxn']:,} MXN."
-                 if en else
-                 f"Moverlos por separado costaría alrededor de {sv['alone_mxn']:,} MXN a la "
-                 f"tarifa de flete compartido de TRS; juntos son alrededor de "
-                 f"{sv['together_mxn']:,} MXN.").replace(",", ","))
+                f"Moving these separately would cost about {sv['alone_mxn']:,} MXN at the "
+                f"TRS shared-freight rate; together it is about {sv['together_mxn']:,} MXN "
+                f"— a saving of roughly {sv['saved_mxn']:,} MXN."
+                if en else
+                f"Moverlos por separado costaría alrededor de {sv['alone_mxn']:,} MXN a la "
+                f"tarifa de flete compartido de TRS; juntos son alrededor de "
+                f"{sv['together_mxn']:,} MXN — un ahorro de aproximadamente "
+                f"{sv['saved_mxn']:,} MXN.")
         if note:
             lines += ["", note]
         lines += ["",

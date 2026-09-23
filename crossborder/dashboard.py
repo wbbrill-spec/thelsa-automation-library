@@ -105,6 +105,13 @@ main { max-width: 1500px; margin: 0 auto; padding: 22px 24px 60px; }
 /* "These travel together" — Bill, consolidation meeting 23 Sep (D32). */
 .load .row .pick { margin: 2px 2px 0 0; cursor: pointer; flex: 0 0 auto; width: 15px; height: 15px; accent-color: #c0392b; }
 .load .row.picked { background: #fff6f4; }
+.load h4 .pickall { margin-right: 7px; cursor: pointer; width: 15px; height: 15px; accent-color: #c0392b; vertical-align: -2px; }
+/* Files that could still join a truck somebody is already filling. These were
+   a line of grey text — the single most actionable thing on the card and
+   nothing to click. */
+.joinable { margin-top: 8px; border-top: 1px dashed #e0c9a8; padding-top: 6px; }
+.joinable .jh { font-size: 11px; text-transform: uppercase; letter-spacing: .4px; color: #92400e; margin-bottom: 2px; }
+.load .row.cand .who b { font-weight: 600; }
 #picker { position: fixed; left: 50%; transform: translateX(-50%); bottom: -80px; z-index: 22;
           background: #24292f; color: #fff; border-radius: 999px; padding: 10px 14px 10px 18px;
           display: flex; align-items: center; gap: 12px; font-size: 13px;
@@ -438,6 +445,9 @@ const ES = {
     "No se ha enviado nada. Léelo y envíalo tú — este mensaje pide a TRS que reserve espacio en un camión.",
   "port of entry": "puerto de entrada", "assumed": "supuesto",
   "no port recorded": "sin puerto registrado",
+  "Include in the notice": "Incluir en el aviso", "Add to this consolidation": "Agregar a esta consolidación",
+  "Select every file on this truck": "Seleccionar todos los expedientes de este camión",
+  "tick to add": "marca para agregar",
   "Crossing at McAllen": "Cruzando por McAllen", "still at Laredo": "aún por Laredo",
   "Laredo": "Laredo", "of": "de", "recorded on the file": "registrados en el expediente",
   "needs a hired 53' trailer": "requiere tráiler de 53' contratado",
@@ -807,10 +817,41 @@ function wirePicker() {
       if (cb.checked) { PICKED.add(id); PICK_LANE = cb.dataset.lane || PICK_LANE; }
       else PICKED.delete(id);
       cb.closest(".row").classList.toggle("picked", cb.checked);
+      syncGroupHeads();
       renderPicker();
     };
   });
+  // The header tick on a truck somebody is already filling. Members are NOT
+  // pre-selected: the action bar popping up on every page load, for every
+  // group, would be noise. One click here takes the whole truck, which is
+  // what a coordinator wants before adding a file to it.
+  document.querySelectorAll("#groups .pickall").forEach(head => {
+    head.onclick = (ev) => {
+      ev.stopPropagation();
+      const card = head.closest(".load");
+      const members = [...card.querySelectorAll(".row:not(.cand) .pick")];
+      members.forEach(cb => {
+        cb.checked = head.checked;
+        cb.closest(".row").classList.toggle("picked", cb.checked);
+        if (cb.checked) { PICKED.add(cb.dataset.id); PICK_LANE = cb.dataset.lane || PICK_LANE; }
+        else PICKED.delete(cb.dataset.id);
+      });
+      renderPicker();
+    };
+  });
+  syncGroupHeads();
   renderPicker();
+}
+
+// Keep each group's header tick honest about its members.
+function syncGroupHeads() {
+  document.querySelectorAll("#groups .pickall").forEach(head => {
+    const card = head.closest(".load");
+    const members = [...card.querySelectorAll(".row:not(.cand) .pick")];
+    const on = members.filter(cb => cb.checked).length;
+    head.checked = on > 0 && on === members.length;
+    head.indeterminate = on > 0 && on < members.length;
+  });
 }
 
 let PICK_LANE = "";
@@ -832,6 +873,7 @@ function clearPicks() {
   document.querySelectorAll(".pick").forEach(cb => {
     cb.checked = false; cb.closest(".row").classList.remove("picked");
   });
+  document.querySelectorAll(".pickall").forEach(h => { h.checked = false; h.indeterminate = false; });
   renderPicker();
 }
 
@@ -934,12 +976,15 @@ function renderGroups(p) {
     const pct = Math.min(100, g.fill_pct);
     const cls = g.fill_pct >= 85 ? "ok" : (g.fill_pct < 60 ? "lt" : "");
     return `<div class="load grouped">
-      <h4>${esc(g.name || g.lane)} <span class="tag grp">${g.customers} ${g.customers === 1 ? tr("file") : tr("files")} ${tr("consolidated")}</span>${g.third_party ? `<span class="tag detour">${esc(g.third_party)}</span>` : ""}${g.spare_m3 > 0 ? `<span class="tag xs">${g.spare_m3} m³ ${tr("free")}</span>` : ""}</h4>
+      <h4><input type="checkbox" class="pickall" data-key="${esc(g.key || g.lane)}" title="${tr("Select every file on this truck")}">${esc(g.name || g.lane)} <span class="tag grp">${g.customers} ${g.customers === 1 ? tr("file") : tr("files")} ${tr("consolidated")}</span>${g.third_party ? `<span class="tag detour">${esc(g.third_party)}</span>` : ""}${g.spare_m3 > 0 ? `<span class="tag xs">${g.spare_m3} m³ ${tr("free")}</span>` : ""}</h4>
       <div class="fl"><span>${esc(g.leg_label ? tr(g.leg_label) : g.lane)}</span><span>${g.fill_pct}%</span></div>
       <div class="fillbar"><i class="${cls}" style="width:${pct}%"></i></div>
-      ${g.members.map(m => `<div class="row" data-id="${esc(m.id)}"><div class="who"><b>${esc(m.customer)}</b> <span class="tag grp">${esc(m.label)}</span>${m.carrier ? ` <span class="tag xs" title="${tr("the note is on this file")}">${tr("note")}</span>` : ""}<br><span class="rs">→ ${esc(m.destination || "?")}${(m.consolidated_with || []).length ? ` · ${tr("with")} ${esc(m.consolidated_with.join(", "))}` : ""}</span></div><div class="m3">${m.m3 || 0} m³</div></div>`).join("")}
+      ${g.members.map(m => `<div class="row" data-id="${esc(m.id)}"><input type="checkbox" class="pick" data-id="${esc(m.id)}" data-lane="${esc(g.lane)}" title="${tr("Include in the notice")}"><div class="who"><b>${esc(m.customer)}</b> <span class="tag grp">${esc(m.label)}</span>${m.carrier ? ` <span class="tag xs" title="${tr("the note is on this file")}">${tr("note")}</span>` : ""}<br><span class="rs">→ ${esc(m.destination || "?")}${(m.consolidated_with || []).length ? ` · ${tr("with")} ${esc(m.consolidated_with.join(", "))}` : ""}</span></div><div class="m3">${m.m3 || 0} m³</div></div>`).join("")}
       ${(g.unmatched || []).length ? `<div class="adv">${tr("Named in the note but not found on the board")}: ${esc(g.unmatched.join(", "))}</div>` : ""}
-      ${g.could_join && g.could_join.length ? `<div class="adv">${tr("Could still join this truck")}: ${g.could_join.map(c => `${esc(c.customer)} (${c.space_m3} m³)`).join(", ")}</div>` : ""}
+      ${g.could_join && g.could_join.length ? `<div class="joinable">
+        <div class="jh">${tr("Could still join this truck")} — ${tr("tick to add")}</div>
+        ${g.could_join.map(c => `<div class="row cand" data-id="${esc(c.id)}"><input type="checkbox" class="pick" data-id="${esc(c.id)}" data-lane="${esc(g.lane)}" title="${tr("Add to this consolidation")}"><div class="who"><b>${esc(c.customer)}</b> <span class="tag xs">${esc(c.source || "")}</span><br><span class="rs">→ ${esc(c.destination || "?")}</span></div><div class="m3">${c.space_m3} m³</div></div>`).join("")}
+      </div>` : ""}
       ${g.note ? `<div class="fl" style="margin-top:6px"><span class="rs">${tr("note")}: ${esc(g.note)}</span></div>` : ""}
     </div>`; }).join("");
 }

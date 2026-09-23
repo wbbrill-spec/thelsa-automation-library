@@ -547,13 +547,25 @@ def api_consolidation_notice():
     except Exception as exc:  # noqa: BLE001
         log.exception("plan failed while drafting a consolidation notice")
         return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 500
+    seen: set = set()
+
+    def _take(it: dict, from_lane: str):
+        nonlocal lane
+        if it.get("id") in wanted and it.get("id") not in seen:
+            seen.add(it["id"])
+            picked.append(dict(it))
+            lane = lane or from_lane
+
     for ld in (current or {}).get("loads") or []:
         for it in ld.get("shipments") or []:
-            if it.get("id") in wanted:
-                row = dict(it)
-                row.setdefault("destination", it.get("destination"))
-                picked.append(row)
-                lane = lane or ld.get("lane", "")
+            _take(it, ld.get("lane", ""))
+    # Also the trucks a coordinator is ALREADY filling, and the files that
+    # could still join one. Without this the notice worked on suggestions but
+    # not on the consolidation Fernanda had actually made — which is the one
+    # place a coordinator most wants to add a file and tell people about it.
+    for g in (current or {}).get("groups") or []:
+        for it in (g.get("members") or []) + (g.get("could_join") or []):
+            _take(it, g.get("lane", ""))
     found = {p.get("id") for p in picked}
     missing = [i for i in ids if i not in found]
     if len(picked) < 2:

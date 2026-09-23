@@ -66,24 +66,40 @@ def _fmt_date(d) -> str:
 
 
 def _line(s: dict, lang: str) -> str:
-    bits = [f"  • {s.get('customer') or '?'}"]
+    """One customer's line in the notice.
+
+    Assembled in two halves — words joined by spaces, freight joined by commas
+    — because the naive version produced "5.7 m³ , 1 lift vans": a stray space
+    before the comma and a plural on a single van. This message goes to TRS and
+    to another company's coordinators; it should not read like a template
+    somebody forgot to finish.
+    """
+    en = lang == "en"
+    head = [f"  • {s.get('customer') or '?'}"]
     ref = s.get("reference") or s.get("source_ref")
     if ref:
-        bits.append(f"({s.get('source', '')} {ref})")
-    vol = s.get("m3")
-    if vol:
-        bits.append(f"— {vol} m³")
+        head.append(f"({s.get('source', '')} {ref})".strip())
+
+    freight: list[str] = []
+    if s.get("m3"):
+        freight.append(f"{s['m3']} m³")
     if s.get("lift_vans"):
-        bits.append(f", {s['lift_vans']} " + ("lift vans" if lang == "en" else "huacales"))
+        n = int(s["lift_vans"])
+        freight.append(f"{n} " + (("lift van" if n == 1 else "lift vans") if en
+                                  else ("huacal" if n == 1 else "huacales")))
     elif s.get("u_boxes"):
-        bits.append(f", {s['u_boxes']} U-Box")
-    dest = s.get("destination")
-    if dest:
-        bits.append(("→ " if lang == "en" else "→ ") + str(dest))
-    when = s.get("delivery_date")
-    if when:
-        bits.append(("(delivery " if lang == "en" else "(entrega ") + _fmt_date(when) + ")")
-    return " ".join(bits)
+        n = int(s["u_boxes"])
+        # "U-Box" / "U-Boxes" in both languages — the team says it in English
+        # either way, and "U-Boxs" is not a word in either.
+        freight.append(f"{n} U-Box" + ("es" if n != 1 else ""))
+    if freight:
+        head.append("— " + ", ".join(freight))
+
+    if s.get("destination"):
+        head.append("→ " + str(s["destination"]))
+    if s.get("delivery_date"):
+        head.append(("(delivery " if en else "(entrega ") + _fmt_date(s["delivery_date"]) + ")")
+    return " ".join(head)
 
 
 def summarise(picked: list[dict], lane: str = "") -> dict:

@@ -161,3 +161,25 @@ def test_the_same_file_is_never_counted_twice():
     plan["loads"][0]["shipments"].append({"id": "TIM:1", "customer": "Ana Saldivar", "m3": 5.7})
     picked, _ = _collect(plan, ["TIM:1"])
     assert len(picked) == 1
+
+
+def test_one_lift_van_is_not_one_lift_vans():
+    """This message goes to another company. It should not read like a
+    placeholder somebody forgot to finish."""
+    d = notices.build([{"id": "a", "customer": "A", "m3": 5.7, "lift_vans": 1},
+                       {"id": "b", "customer": "B", "m3": 7.3, "lift_vans": 3}])
+    assert "1 lift vans" not in d["body_en"]
+    assert "1 lift van" in d["body_en"] and "3 lift vans" in d["body_en"]
+    assert "1 huacales" not in d["body_es"]
+    assert "1 huacal" in d["body_es"] and "3 huacales" in d["body_es"]
+    # and no stray space before the comma
+    assert " ," not in d["body_en"] and " ," not in d["body_es"]
+    assert "5.7 m\u00b3, 1 lift van" in d["body_en"]
+
+
+def test_u_boxes_read_the_same_in_both_languages():
+    d = notices.build([{"id": "a", "customer": "A", "m3": 14.6, "u_boxes": 2},
+                       {"id": "b", "customer": "B", "m3": 7.3, "u_boxes": 1}])
+    for body in (d["body_en"], d["body_es"]):
+        assert "2 U-Boxes" in body and "1 U-Box" in body
+        assert "U-Boxs" not in body

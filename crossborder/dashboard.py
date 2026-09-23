@@ -396,8 +396,9 @@ const ES = {
   "load": "carga", "loads": "cargas",
   "Shipments per load": "Envíos por carga", "files on": "expedientes en", "trucks": "camiones",
   "Trucks carrying one file": "Camiones con un solo expediente",
-  "of loads — the number consolidation should push down":
-    "de las cargas — el número que la consolidación debe reducir",
+  "of the loads that could be shared": "de las cargas que podrían compartirse",
+  "exports excluded — they ship alone by rule":
+    "exportaciones excluidas — salen solas por regla",
   "Trucks avoided": "Camiones evitados", "assumed saving": "ahorro estimado",
   "every load is carrying a single file": "cada carga lleva un solo expediente",
   "Paid-for empty space": "Espacio vacío ya pagado",
@@ -734,7 +735,8 @@ function renderMetrics(p) {
          `${m.files_on_trucks} ${tr("files on")} ${m.loads} ${tr("trucks")}`,
          h ? arrow(h.files_per_load, true) : ""),
     tile(tr("Trucks carrying one file"), m.solo_loads,
-         m.solo_pct + "% " + tr("of loads — the number consolidation should push down"),
+         m.solo_pct + "% " + tr("of the loads that could be shared")
+           + (m.alone_by_policy ? ` · ${m.alone_by_policy} ${tr("exports excluded — they ship alone by rule")}` : ""),
          h ? arrow(h.solo_pct, false) : ""),
     sv ? tile(tr("Trucks avoided"), sv.trucks_avoided,
               tr("assumed saving") + " ~" + fmtN(sv.assumed_mxn) + " MXN")

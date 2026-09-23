@@ -78,6 +78,7 @@ def _load_rows(plan: dict) -> list[dict]:
         rows.append({
             "kind": "suggested", "lane": ld.get("lane", ""), "leg": ld.get("leg", ""),
             "files": len(ld.get("shipments") or []),
+            "alone_by_policy": bool(ld.get("ships_alone")),
             "space": float(ld.get("space_m3") or ld.get("m3") or 0),
             "m3": float(ld.get("m3") or 0),
             "fill": float(ld.get("fill_pct") or 0),
@@ -85,7 +86,7 @@ def _load_rows(plan: dict) -> list[dict]:
     for g in plan.get("groups") or []:
         rows.append({
             "kind": "actual", "lane": g.get("lane", ""), "leg": g.get("leg", ""),
-            "files": int(g.get("customers") or 0),
+            "files": int(g.get("customers") or 0), "alone_by_policy": False,
             "space": float(g.get("space_m3") or 0),
             "m3": float(g.get("m3") or 0),
             "fill": float(g.get("fill_pct") or 0),
@@ -102,7 +103,13 @@ def summarise(plan: dict, today: Optional[dt.date] = None) -> dict:
     space = round(sum(r["space"] for r in rows), 1)
     m3 = round(sum(r["m3"] for r in rows), 1)
     capacity = round(loads * TRUCK_53_M3, 1)
-    solo = sum(1 for r in rows if r["files"] == 1)
+    # An export travelling alone is policy, not a failure to consolidate
+    # (Fernanda: exports do not wait). Counting those as "solo trucks" would
+    # have read 57% on the live board today and been quoted as a problem when
+    # four of the seven loads were exports doing exactly what they should.
+    policy = sum(1 for r in rows if r["alone_by_policy"])
+    consolidatable = [r for r in rows if not r["alone_by_policy"]]
+    solo = sum(1 for r in consolidatable if r["files"] == 1)
     shared = [r for r in rows if r["files"] > 1]
     avoided = sum(r["files"] - 1 for r in rows if r["files"] > 1)
 
@@ -133,7 +140,9 @@ def summarise(plan: dict, today: Optional[dt.date] = None) -> dict:
         "space_m3": space, "capacity_m3": capacity, "volume_m3": m3,
         "files_per_load": round(files / loads, 1) if loads else 0,
         "solo_loads": solo,
-        "solo_pct": round(solo / loads * 100) if loads else 0,
+        "solo_pct": round(solo / len(consolidatable) * 100) if consolidatable else 0,
+        "consolidatable_loads": len(consolidatable),
+        "alone_by_policy": policy,
         "shared_loads": len(shared),
         "savings": money,
         "paid_spare_m3": round(spare_m3, 1),

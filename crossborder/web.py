@@ -24,6 +24,8 @@ Routes:
                                    changed date since the last republication.
   /crossborder/api/rules           JSON: which operational rules are live and what
                                    they are currently excluding (open this in training).
+  /crossborder/api/metrics         JSON: the consolidation scoreboard and its history —
+                                   utilisation, files per load, solo trucks, trucks avoided.
   /crossborder/plan/draft  (POST)  create the suggested-load email as a DRAFT in
                                    the Thelsa mailbox (never sends). Also runs
                                    daily at PLAN_EMAIL_HOUR when PLAN_EMAIL_ENABLED=1.
@@ -43,8 +45,8 @@ import time
 
 from flask import Blueprint, jsonify, redirect, request, session, url_for
 
-from . import (alerts, clickup, demo, engine, fx, grouping, models, plan_history,
-               remisiones, rules, sit, tim, tms)
+from . import (alerts, clickup, demo, engine, fx, grouping, metrics, models,
+               plan_history, remisiones, rules, sit, tim, tms)
 from .dashboard import DASHBOARD_HTML
 from .models import Source
 
@@ -465,6 +467,16 @@ def api_plan():
         except Exception as exc:  # noqa: BLE001
             log.exception("truck offers failed")
             p["trucks_error"] = f"{type(exc).__name__}: {exc}"
+    # The consolidation scoreboard, and one point a day on the curve. Demo rows
+    # must never reach the history — it is the record the programme is judged on.
+    try:
+        p["metrics"] = metrics.summarise(p)
+        if not diag.get("demo"):
+            metrics.record(p["metrics"])
+        p["metrics"]["history"] = metrics.history()
+    except Exception as exc:  # noqa: BLE001
+        log.exception("metrics failed")
+        p["metrics"] = {"error": f"{type(exc).__name__}: {exc}"}
     return jsonify(p)
 
 
@@ -478,6 +490,19 @@ def api_trucks():
         diag = dict(_SIT_CACHE.get("diag") or {})
     return jsonify({"count": len(trucks), "spare_by_hub": sit.spare_by_hub(trucks),
                     "diagnostics": diag, "trucks": trucks})
+
+
+@crossborder_bp.route("/crossborder/api/metrics")
+@_login_required
+def api_metrics():
+    """Is consolidation improving? Today's scoreboard plus the curve."""
+    try:
+        limit = max(2, min(int(request.args.get("days", "90") or 90), 400))
+    except ValueError:
+        limit = 90
+    return jsonify({"history": metrics.history(limit=limit),
+                    "truck_cost_mxn": metrics.truck_cost(),
+                    "capacity_m3": models.TRUCK_53_M3})
 
 
 @crossborder_bp.route("/crossborder/api/plan-history")

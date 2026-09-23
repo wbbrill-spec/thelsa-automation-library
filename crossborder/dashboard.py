@@ -79,6 +79,14 @@ main { max-width: 1500px; margin: 0 auto; padding: 22px 24px 60px; }
 .tag.awaiting_green_light, .tag.awaiting_booking { background: #eef1f5; color: #555; }
 .tag.in_progress { background: #e6f4ea; color: #1e7e34; }
 .tag.vol { background: #eef1f5; color: #333; }
+.metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; margin-bottom: 8px; }
+.metric { background: #fff; border: 1px solid #e8e8e8; border-radius: 12px; padding: 12px 14px; }
+.metric .ml { font-size: 11px; color: #666; font-weight: 700; text-transform: uppercase; letter-spacing: .02em; }
+.metric .mv { font-size: 26px; font-weight: 800; margin: 4px 0 2px; display: flex; align-items: baseline; gap: 8px; }
+.metric .ms { font-size: 11px; color: #888; line-height: 1.4; }
+.metric .delta { font-size: 12px; font-weight: 700; }
+.metric .delta.up { color: #1e7e34; }
+.metric .delta.down { color: #c0392b; }
 .tag.no_delivery_date, .tag.no_uplift_date { background: #fdf2f8; color: #9d174d; }
 .card .step { font-size: 10px; color: #888; margin-top: 5px; }
 .card .bar { height: 4px; background: #eee; border-radius: 3px; margin-top: 5px; overflow: hidden; }
@@ -223,16 +231,38 @@ body.demo header { border-bottom-color: #7c2d12; }
     <button class="btn" id="clear">Clear</button>
     <span class="spacer"></span>
     <label style="font-size:12px;color:#666;display:flex;align-items:center;gap:6px;white-space:nowrap"><input type="checkbox" id="f-closed"> include completed</label>
-    <button class="btn" id="view-board">Board</button>
+    <button class="btn" id="view-ship">Shipments</button>
+    <button class="btn" id="view-cons">Consolidation</button>
     <button class="btn" id="view-table">Table</button>
     <button class="btn primary" id="refresh">↻ Refresh</button>
   </div>
 
+  <div id="ship-view">
   <div class="kpis" id="kpis"></div>
-
-  <div id="board-view">
     <div class="section"><span data-i18n="Pipeline">Pipeline</span> <span class="cnt" id="cnt-board">0</span></div>
     <div class="board" id="board"></div>
+
+    <div class="grid2">
+      <div>
+        <div class="plan-head">
+          <div class="section"><span data-i18n="Needs attention">Needs attention</span> <span class="cnt" id="cnt-alerts">0</span></div>
+          <span class="spacer"></span>
+          <button class="btn" id="alert-draft">✉ Draft owner alerts</button>
+        </div>
+        <div class="plan-stats" id="alert-msg" style="margin-bottom:8px"></div>
+        <div class="panel alerts" id="alerts"></div>
+      </div>
+      <div>
+        <div class="section" data-i18n="Hub load (open imports, m³ vs one 53' trailer)">Hub load (open imports, m³ vs one 53' trailer)</div>
+        <div class="panel hubs" id="hubs"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="cons-view" style="display:none">
+    <div class="section"><span data-i18n="Is consolidation improving?">Is consolidation improving?</span></div>
+    <div class="metrics" id="metrics"></div>
+    <div class="note" id="metrics-note"></div>
 
     <div class="plan-head">
       <div class="section"><span data-i18n="Suggested loads">Suggested loads</span> <span class="cnt" id="cnt-loads">0</span></div>
@@ -260,21 +290,6 @@ body.demo header { border-bottom-color: #7c2d12; }
   </div>
   <div class="trucks" id="trucks"></div>
 
-    <div class="grid2">
-      <div>
-        <div class="plan-head">
-          <div class="section"><span data-i18n="Needs attention">Needs attention</span> <span class="cnt" id="cnt-alerts">0</span></div>
-          <span class="spacer"></span>
-          <button class="btn" id="alert-draft">✉ Draft owner alerts</button>
-        </div>
-        <div class="plan-stats" id="alert-msg" style="margin-bottom:8px"></div>
-        <div class="panel alerts" id="alerts"></div>
-      </div>
-      <div>
-        <div class="section" data-i18n="Hub load (open imports, m³ vs one 53' trailer)">Hub load (open imports, m³ vs one 53' trailer)</div>
-        <div class="panel hubs" id="hubs"></div>
-      </div>
-    </div>
   </div>
 
   <div id="table-view" style="display:none">
@@ -306,7 +321,7 @@ const TRUCK_LV = 13;
 const TRUCK_M3 = 88;   // 53' trailer ≈ 20,000 lb HHG at 6.5 lb/cuft ≈ 3,077 cuft ≈ 88 m³ (Bill, 2026-09-09)
 const pm3 = s => s.planning_m3 || 0;
 
-let ALL = [], STATUS = {}, DIAG = {}, view = "board", sortKey = "customer_name", sortDir = 1, kpiSel = null;
+let ALL = [], STATUS = {}, DIAG = {}, view = "ship", sortKey = "customer_name", sortDir = 1, kpiSel = null;
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const fmtN = n => n == null ? "—" : (Math.round(n*10)/10).toLocaleString();
@@ -374,6 +389,25 @@ const ES = {
   "Services that disappeared or moved date since the last republication.":
     "Servicios que desaparecieron o cambiaron de fecha desde la última publicación.",
   "disappeared": "desapareció", "date changed": "cambió de fecha", "truck changed": "cambió de unidad",
+  // Tabs and the consolidation scoreboard (Bill, 23 Sep)
+  "Shipments": "Envíos", "Consolidation": "Consolidación",
+  "Is consolidation improving?": "¿Está mejorando la consolidación?",
+  "Trailer utilisation": "Uso del tráiler", "across": "en",
+  "load": "carga", "loads": "cargas",
+  "Shipments per load": "Envíos por carga", "files on": "expedientes en", "trucks": "camiones",
+  "Trucks carrying one file": "Camiones con un solo expediente",
+  "of loads — the number consolidation should push down":
+    "de las cargas — el número que la consolidación debe reducir",
+  "Trucks avoided": "Camiones evitados", "assumed saving": "ahorro estimado",
+  "every load is carrying a single file": "cada carga lleva un solo expediente",
+  "Paid-for empty space": "Espacio vacío ya pagado",
+  "already heading to Mexico with room on board": "ya en ruta a México con espacio disponible",
+  "Savings assume": "El ahorro supone", "Measured since": "Medido desde", "days": "días",
+  "First day of measurement": "Primer día de medición",
+  "the trend appears once there are two days on record.":
+    "la tendencia aparece cuando haya dos días registrados.",
+  "No loads planned today, so there is nothing to measure.":
+    "Hoy no hay cargas planeadas, así que no hay nada que medir.",
   "No delivery date in Moveware": "Falta fecha de entrega en Moveware",
   "No pack/load date in Moveware": "Falta fecha de carga/empaque en Moveware",
   "with": "con", "the note is on this file": "la nota está en este expediente",
@@ -446,7 +480,8 @@ function applyStaticLang(){
   $("#f-q").placeholder = tr("Search customer / reference / destination…");
   $("#clear").textContent = tr("Clear");
   const inc = document.querySelector('label input#f-closed'); if (inc && inc.parentNode) inc.parentNode.lastChild.textContent = " " + tr("include completed");
-  $("#view-board").textContent = tr("Board"); $("#view-table").textContent = tr("Table");
+  $("#view-ship").textContent = tr("Shipments"); $("#view-cons").textContent = tr("Consolidation");
+  $("#view-table").textContent = tr("Table");
   $("#refresh").textContent = tr("↻ Refresh");
   $("#plan-draft").textContent = tr("✉ Draft today's load email");
   if ($("#alert-draft")) $("#alert-draft").textContent = tr("✉ Draft owner alerts");
@@ -656,6 +691,7 @@ function renderPlan() {
       ${opp && opp.advice && !l.ships_alone ? `<div class="adv">${esc(opp.advice)}</div>` : ""}
     </div>`; }).join("") : `<div class="empty">${p.error ? "" : tr("No consolidatable shipments are ready right now.")}</div>`;
   renderGroups(p);
+  renderMetrics(p);
   document.querySelectorAll("#loads .row, #groups .row").forEach(el => el.onclick = () => openDrawer(el.dataset.id));
   const cb = p.coming_by_lane || {}; const lanes = Object.keys(cb).filter(k => !src || cb[k].some(i => i.source === src));
   const ub = p.unsized_by_lane || {}; const ulanes = Object.keys(ub).filter(k => !src || ub[k].some(i => i.source === src));
@@ -665,6 +701,51 @@ function renderPlan() {
   $("#coming").style.display = parts.length ? "" : "none";
   $("#coming").innerHTML = parts.join("<br><br>");
   renderTrucks(p);
+}
+
+// The consolidation scoreboard. The programme's whole case is that filling
+// trucks saves money; until now the board could not say whether the team was
+// filling them any better than last month. Utilisation and files-per-load are
+// the numbers to quote; trucks-avoided is the direction of travel, and the
+// peso figure rests on one lane's price, so it says so.
+function renderMetrics(p) {
+  const m = p.metrics || {};
+  if (m.error || !m.loads) {
+    $("#metrics").innerHTML = `<div class="empty">${tr("No loads planned today, so there is nothing to measure.")}</div>`;
+    return;
+  }
+  const h = (m.history && m.history.change) || null;
+  const arrow = (v, goodUp) => {
+    if (!v) return "";
+    const good = goodUp ? v > 0 : v < 0;
+    return `<span class="delta ${good ? "up" : "down"}">${v > 0 ? "▲" : "▼"} ${Math.abs(v)}</span>`;
+  };
+  const tile = (label, value, sub, delta) => `<div class="metric">
+      <div class="ml">${esc(label)}</div>
+      <div class="mv">${value}${delta || ""}</div>
+      <div class="ms">${esc(sub || "")}</div>
+    </div>`;
+  const sv = m.savings;
+  $("#metrics").innerHTML = [
+    tile(tr("Trailer utilisation"), m.utilisation_pct + "%",
+         `${fmtN(m.space_m3)} / ${fmtN(m.capacity_m3)} m³ ${tr("across")} ${m.loads} ${m.loads === 1 ? tr("load") : tr("loads")}`,
+         h ? arrow(h.utilisation_pct, true) : ""),
+    tile(tr("Shipments per load"), m.files_per_load,
+         `${m.files_on_trucks} ${tr("files on")} ${m.loads} ${tr("trucks")}`,
+         h ? arrow(h.files_per_load, true) : ""),
+    tile(tr("Trucks carrying one file"), m.solo_loads,
+         m.solo_pct + "% " + tr("of loads — the number consolidation should push down"),
+         h ? arrow(h.solo_pct, false) : ""),
+    sv ? tile(tr("Trucks avoided"), sv.trucks_avoided,
+              tr("assumed saving") + " ~" + fmtN(sv.assumed_mxn) + " MXN")
+       : tile(tr("Trucks avoided"), "0", tr("every load is carrying a single file")),
+    tile(tr("Paid-for empty space"), fmtN(m.paid_spare_m3) + " m³",
+         tr("already heading to Mexico with room on board")),
+  ].join("");
+  $("#metrics-note").innerHTML = (sv ? esc(tr("Savings assume") + " " + sv.assumption) : "")
+    + (m.history && m.history.count > 1
+        ? ` <b>${tr("Measured since")} ${esc(m.history.points[0].as_of)}</b> (${m.history.count} ${tr("days")}).`
+        : ` <b>${tr("First day of measurement")}</b> — ${tr("the trend appears once there are two days on record.")}`);
 }
 
 // Consolidations a coordinator has already made, read from her note on the
@@ -781,11 +862,15 @@ function filtered() {
 function render() {
   const rows = filtered();
   renderKpis();
-  if (view === "board") { renderBoard(rows); renderAlerts(rows); renderHubs(rows); }
-  else renderTable(rows);
-  $("#board-view").style.display = view === "board" ? "" : "none";
+  // Three tabs (Bill, 23 Sep): the shipment tiles first, the consolidation
+  // recommendations second, the full table third.
+  if (view === "ship") { renderBoard(rows); renderAlerts(rows); renderHubs(rows); }
+  else if (view === "table") renderTable(rows);
+  $("#ship-view").style.display = view === "ship" ? "" : "none";
+  $("#cons-view").style.display = view === "cons" ? "" : "none";
   $("#table-view").style.display = view === "table" ? "" : "none";
-  $("#view-board").className = "btn" + (view === "board" ? " active" : "");
+  $("#view-ship").className = "btn" + (view === "ship" ? " active" : "");
+  $("#view-cons").className = "btn" + (view === "cons" ? " active" : "");
   $("#view-table").className = "btn" + (view === "table" ? " active" : "");
 }
 
@@ -990,7 +1075,8 @@ function closeDrawer() { $("#drawer").classList.remove("open"); $("#overlay").cl
 $("#f-q").oninput = render;
 $("#f-closed").onchange = () => load(false);
 $("#clear").onclick = () => { ["#f-source","#f-agent","#f-flag","#f-hub","#f-stage"].forEach(id => $(id).value = ""); $("#f-q").value = ""; kpiSel = null; render(); };
-$("#view-board").onclick = () => { view = "board"; render(); };
+$("#view-ship").onclick = () => { view = "ship"; render(); renderPlan(); };
+$("#view-cons").onclick = () => { view = "cons"; render(); renderPlan(); };
 $("#view-table").onclick = () => { view = "table"; render(); };
 $("#refresh").onclick = () => load(true);
 $("#dclose").onclick = closeDrawer; $("#overlay").onclick = closeDrawer;

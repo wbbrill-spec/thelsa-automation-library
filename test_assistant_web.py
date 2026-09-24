@@ -173,6 +173,44 @@ def test_moveware_matches_coordinator_email(monkeypatch):
     assert [i["meta"]["job"] for i in items] == ["1"]
 
 
+def test_moveware_watch_list_adds_other_coordinators(monkeypatch):
+    import types, sys
+    def f(job, coord):
+        return {"job": job, "coordinator_email": coord, "status": "W",
+                "pack": dt.date.today() - dt.timedelta(days=3), "invoiced": False, "act_wt": 5}
+    fake = types.SimpleNamespace(
+        have_creds=lambda: True, ensure_auditor=lambda: None,
+        audited_in_window=lambda: [f("1", "Stephanie.Barraza@Thelsa.com"),
+                                   f("2", "elizabethhernandez@thelsa.com"),
+                                   f("3", "sarareyes@thelsa.com"),
+                                   f("4", "someoneelse@thelsa.com")])
+    monkeypatch.setitem(sys.modules, "mw_live", fake)
+    memo = {"email": "guillermomonroy@thelsa.com", "moveware_email": None,
+            "mw_watch": "stephanie.barraza@thelsa.com, elizabethhernandez@thelsa.com; "
+                        "sarareyes@thelsa.com"}
+    jobs = sorted(i["meta"]["job"] for i in moveware.tasks_for_user(memo))
+    assert jobs == ["1", "2", "3"]                     # not "4"
+    # no watch list → only their own files, which is none of these
+    assert moveware.tasks_for_user({**memo, "mw_watch": None}) == []
+
+
+def test_watched_emails_normalizes():
+    got = moveware.watched_emails({"email": "Memo@Thelsa.com", "moveware_email": "memo.m@thelsa.com",
+                                   "mw_watch": " A@x.com ,a@x.com;\nB@x.com , not-an-email "})
+    assert got == {"memo@thelsa.com", "memo.m@thelsa.com", "a@x.com", "b@x.com"}
+
+
+def test_admin_sets_moveware_watch_list(client):
+    u = consent("memo@thelsa.com")
+    login(client, "boss@thelsa.com")
+    client.get("/assistant/admin")
+    client.post(f"/assistant/admin/user/{u['id']}/mwwatch",
+                data={"csrf": "tok", "watch": "Stephanie.Barraza@thelsa.com, sarareyes@thelsa.com"})
+    assert db.get_user(u["id"])["mw_watch"] == "stephanie.barraza@thelsa.com,sarareyes@thelsa.com"
+    client.post(f"/assistant/admin/user/{u['id']}/mwwatch", data={"csrf": "tok", "watch": ""})
+    assert db.get_user(u["id"])["mw_watch"] is None
+
+
 def test_priority_tiers():
     now = dt.datetime(2026, 9, 21, 12, tzinfo=dt.timezone.utc)
     ranked = priority.rank([

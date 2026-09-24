@@ -138,6 +138,22 @@ def _matches(addr, emails):
     return (addr or "").strip().lower() in emails
 
 
+def watched_emails(user) -> set:
+    """Every coordinator address whose files this user should see: their own,
+    their Moveware override, plus anyone on their watch list (users.mw_watch).
+    A manager can therefore follow their coordinators' files without being the
+    coordinator on any of them."""
+    emails = {(user.get("email") or "").strip().lower()}
+    if user.get("moveware_email"):
+        emails.add(user["moveware_email"].strip().lower())
+    watch = user.get("mw_watch")
+    if watch:
+        parts = watch.replace(";", ",").split(",") if isinstance(watch, str) else watch
+        emails.update(e for e in (str(p).strip().lower() for p in parts) if "@" in e)
+    emails.discard("")
+    return emails
+
+
 def tasks_for_user(user) -> list:
     """All Moveware to-dos for one user. Returns None if Moveware data isn't
     loaded yet (so the caller keeps the previous items instead of wiping them)."""
@@ -151,9 +167,7 @@ def tasks_for_user(user) -> list:
     files = mw_live.audited_in_window()
     if not files:
         return None
-    emails = {user["email"].lower()}
-    if user.get("moveware_email"):
-        emails.add(user["moveware_email"].lower())
+    emails = watched_emails(user)
     mine = [f for f in files if _matches(f.get("coordinator_email"), emails)]
     items = tasks_for_files(mine)
     try:

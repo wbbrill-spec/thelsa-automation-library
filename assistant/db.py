@@ -43,6 +43,7 @@ users = Table(
     Column("consent_at", DateTime(timezone=True)),                    # accepted data notice
     Column("whatsapp_opt_in", Boolean, nullable=False, default=False),
     Column("moveware_email", String(320)),                           # override if Moveware uses another address
+    Column("mw_watch", Text),                                        # extra Moveware coordinators this user follows
     Column("tim_scope", String(20), nullable=False, default="assigned"),  # ClickUp/TIM: all | assigned | none
     Column("lang", String(5)),                                       # en | es (None = follow browser)
     Column("created_at", DateTime(timezone=True), default=now),
@@ -220,6 +221,30 @@ def set_moveware_email(user_id: str, email: str):
     with engine().begin() as c:
         c.execute(update(users).where(users.c.id == user_id)
                   .values(moveware_email=(email or "").strip().lower() or None))
+
+
+def parse_emails(value) -> list:
+    """'a@x.com, B@X.com; a@x.com' -> ['a@x.com', 'b@x.com'] (lowercased, de-duped,
+    order kept). Accepts a string or an iterable; anything without '@' is dropped."""
+    if value is None:
+        return []
+    parts = value.replace(";", ",").replace("\n", ",").split(",") \
+        if isinstance(value, str) else list(value)
+    out = []
+    for p in parts:
+        e = str(p).strip().lower()
+        if "@" in e and e not in out:
+            out.append(e)
+    return out
+
+
+def set_mw_watch(user_id: str, value):
+    """Set the extra Moveware coordinators whose files this user also sees.
+    Pass '' or None to clear."""
+    emails = parse_emails(value)
+    with engine().begin() as c:
+        c.execute(update(users).where(users.c.id == user_id)
+                  .values(mw_watch=(",".join(emails) or None)))
 
 
 def set_tim_scope(user_id: str, scope: str):

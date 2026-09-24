@@ -643,7 +643,7 @@ never anyone's emails or to-dos.</p>
   <span class="sub" style="margin:0">They open the AI Assistant tile, sign in, and connect their mailbox.</span></form>
 
 <h2>Users</h2>
-<table><tr><th>User</th><th>Mailbox</th><th>WhatsApp</th><th>Moveware email</th><th>TIM (ClickUp)</th><th></th></tr>
+<table><tr><th>User</th><th>Mailbox</th><th>WhatsApp</th><th>Moveware email</th><th>Also sees (Moveware)</th><th>TIM (ClickUp)</th><th></th></tr>
 {% for r in rows %}<tr>
   <td><b>{{ r.name or r.email }}</b><br>{{ r.email }}{% if r.role=='admin' %} · admin{% endif %}
       {% if not r.active %}<br><span class="bad">deactivated</span>{% endif %}
@@ -655,6 +655,10 @@ never anyone's emails or to-dos.</p>
   <td><form method="post" action="/assistant/admin/user/{{ r.id }}/moveware"><input type="hidden" name="csrf" value="{{ csrf }}">
       <input type="email" name="mw" value="{{ r.moveware_email or '' }}" placeholder="same as login" style="width:170px">
       <button class="btn small light" type="submit">Save</button></form></td>
+  <td><form method="post" action="/assistant/admin/user/{{ r.id }}/mwwatch"><input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="text" name="watch" value="{{ r.mw_watch or '' }}" placeholder="coordinator emails, comma-separated" style="width:230px">
+      <button class="btn small light" type="submit">Save</button>
+      <br><span class="sub" style="margin:0">Their files appear on this dashboard too.</span></form></td>
   <td><form method="post" action="/assistant/admin/user/{{ r.id }}/tim"><input type="hidden" name="csrf" value="{{ csrf }}">
       <select name="scope" onchange="this.form.submit()">
         {% for v, l in [('assigned','Assigned only'),('all','All TIM files'),('none','None')] %}
@@ -686,6 +690,7 @@ def admin(u):
         if usr["id"] in by_user:
             by_user[usr["id"]]["consent"] = bool(usr["consent_at"])
             by_user[usr["id"]]["moveware_email"] = usr["moveware_email"]
+            by_user[usr["id"]]["mw_watch"] = usr["mw_watch"]
             by_user[usr["id"]]["tim_scope"] = usr["tim_scope"]
     return _render("Admin", ADMIN_TPL, u, rows=list(by_user.values()), runs=db.recent_runs(15),
                    stamp=_stamp, vault_ok=vault.is_configured(),
@@ -711,6 +716,15 @@ def admin_add(u):
 def admin_moveware(u, user_id):
     _check_csrf()
     db.set_moveware_email(user_id, request.form.get("mw"))
+    scan.scan_user_async(user_id)
+    return redirect(url_for("assistant.admin"))
+
+
+@bp.route("/assistant/admin/user/<user_id>/mwwatch", methods=["POST"])
+@admin_required
+def admin_mw_watch(u, user_id):
+    _check_csrf()
+    db.set_mw_watch(user_id, request.form.get("watch"))
     scan.scan_user_async(user_id)
     return redirect(url_for("assistant.admin"))
 

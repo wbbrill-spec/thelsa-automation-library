@@ -15,6 +15,7 @@ import json
 import os
 import secrets
 import zipfile
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -364,7 +365,7 @@ DASH_TPL = """
     </div>
     <div class="side" title="{{ t('urgency_title', score=it.score) }}">{% if it.received_at %}{% if it.source == 'moveware' %}{{ t('side_pack') if it.kind == 'request_docs' else t('side_since') }} {% elif it.source == 'clickup' %}{{ t('side_last_step') }} {% endif %}{% endif %}{{ when(it.received_at) }}</div></div>
     <div class="acts">
-      {% if it.url %}<a class="btn small light" href="{{ it.url }}" target="_blank" rel="noopener">{{ t('open') }}</a>{% endif %}
+      {% if it.url %}<a class="btn small light" href="/assistant/item/{{ it.id }}/open" target="_blank" rel="noopener">{{ t('open') }}</a>{% endif %}
       {% if it.source == 'microsoft' and draft_on %}
       <form method="post" action="/assistant/item/{{ it.id }}/draft"><input type="hidden" name="csrf" value="{{ csrf }}">
         <button class="btn small light" type="submit">{{ t('suggest_reply') }}</button></form>{% endif %}
@@ -472,6 +473,44 @@ def refresh(u):
     _check_csrf()
     scan.scan_user_async(u["id"])
     return redirect("/assistant?refreshing=1")
+
+
+def open_url(raw: str) -> str:
+    """The link we actually send someone to when they press Open.
+
+    Outlook's webLink carries exvsurl=1, which asks the browser to hand the
+    message to the desktop Outlook app. Where no handler is registered — or the
+    dashboard is inside a sandboxed frame — that hand-off can end in a tab that
+    never renders, which reads as "the button does nothing". Stripping it makes
+    the message open in Outlook on the web, which always works in a browser.
+    Anything that is not an http(s) URL is refused, so a bad stored value can
+    never turn into a javascript: or data: link.
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return ""
+    parts = urlsplit(raw)
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        return ""
+    query = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
+             if k.lower() != "exvsurl"]
+    return urlunsplit((parts.scheme, parts.netloc, parts.path,
+                       urlencode(query), parts.fragment))
+
+
+@bp.route("/assistant/item/<item_id>/open")
+@login_required
+def item_open(u, item_id):
+    """Same-origin redirect to the item's source. Going through the server keeps
+    the click working even where a new tab is blocked, and keeps message ids out
+    of the page."""
+    it = db.get_item(u["id"], item_id)          # None for anyone else's item
+    if not it:
+        abort(404)
+    target = open_url(it["url"])
+    if not target:
+        abort(404)
+    return redirect(target)
 
 
 @bp.route("/assistant/item/<item_id>/seen", methods=["POST"])

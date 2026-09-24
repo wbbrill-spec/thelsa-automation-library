@@ -21,7 +21,7 @@ from zoneinfo import ZoneInfo
 from flask import (Blueprint, Response, abort, jsonify, redirect, render_template_string,
                    request, session, url_for)
 
-from . import db, drafting, graph, i18n, priority, scan, vault
+from . import db, drafting, graph, i18n, priority, scan, vault, wa_triage
 
 bp = Blueprint("assistant", __name__)
 MX = ZoneInfo("America/Mexico_City")
@@ -594,18 +594,34 @@ def whatsapp_sync():
     if not u:
         return jsonify({"ok": False, "error": "invalid key or WhatsApp not enabled"}), 401
     chats = (request.get_json(silent=True) or {}).get("chats") or []
-    found = []
+    kept = []
     for c in chats[:60]:
         name = str(c.get("name") or "")[:200].strip()
         unread = int(c.get("unread") or 0)
         if not name or unread <= 0:
             continue
+        if not wa_triage.passes_watch(name, u.get("wa_watch")):
+            continue
+        kept.append({"name": name, "unread": unread,
+                     "preview": str(c.get("preview") or "")[:300],
+                     "time": str(c.get("time") or "")[:40]})
+
+    # Work/personal pass. A chat with no verdict was not judged, so it stays.
+    verdicts = wa_triage.classify(kept)
+    found = []
+    for c in kept:
+        v = verdicts.get(wa_triage.key(c["name"], c["preview"])) or {}
+        if v.get("work") is False:
+            continue
+        name, unread = c["name"], c["unread"]
+        action = v.get("action") or ""
         found.append({"kind": "whatsapp", "external_id": "wa:" + name.lower()[:480],
                       "from_name": name, "from_addr": None,
                       "subject": f"{unread} unread message{'s' if unread != 1 else ''} from {name}",
-                      "snippet": str(c.get("preview") or "")[:300],
+                      "snippet": action or c["preview"],
                       "url": "https://web.whatsapp.com", "received_at": db.now(),
-                      "meta": {"unread": unread, "time": str(c.get("time") or "")[:40]}})
+                      "meta": {"unread": unread, "time": c["time"],
+                               "action": action, "triaged": bool(v)}})
     db.replace_items(u["id"], "whatsapp", found)
     db.mark_connection(u["id"], "whatsapp", ok=True)
     return jsonify({"ok": True, "items": len(found)})
@@ -643,7 +659,7 @@ never anyone's emails or to-dos.</p>
   <span class="sub" style="margin:0">They open the AI Assistant tile, sign in, and connect their mailbox.</span></form>
 
 <h2>Users</h2>
-<table><tr><th>User</th><th>Mailbox</th><th>WhatsApp</th><th>Moveware email</th><th>Also sees (Moveware)</th><th>TIM (ClickUp)</th><th></th></tr>
+<table><tr><th>User</th><th>Mailbox</th><th>WhatsApp</th><th>Moveware email</th><th>Also sees (Moveware)</th><th>TIM (ClickUp)</th><th>WhatsApp chats</th><th></th></tr>
 {% for r in rows %}<tr>
   <td><b>{{ r.name or r.email }}</b><br>{{ r.email }}{% if r.role=='admin' %} · admin{% endif %}
       {% if not r.active %}<br><span class="bad">deactivated</span>{% endif %}
@@ -664,6 +680,12 @@ never anyone's emails or to-dos.</p>
         {% for v, l in [('assigned','Assigned only'),('all','All TIM files'),('none','None')] %}
         <option value="{{ v }}" {% if (r.tim_scope or 'assigned') == v %}selected{% endif %}>{{ l }}</option>{% endfor %}
       </select></form></td>
+  <td>{% if r.whatsapp %}<form method="post" action="/assistant/admin/user/{{ r.id }}/wa"><input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="text" name="wa" value="{{ r.wa_watch or '' }}" placeholder="all chats" style="width:170px">
+      <button class="btn small light" type="submit">Save</button>
+      <br><span class="sub" style="margin:0">Names to keep. Empty = all.
+      {% if wa_ai %}Personal chats are filtered out by AI.{% else %}AI filtering off (no API key).{% endif %}</span></form>
+      {% else %}—{% endif %}</td>
   <td><form method="post" action="/assistant/admin/user/{{ r.id }}/active"
         {% if r.active %}onsubmit="return confirm('Deactivate and delete this user\\'s stored sign-in and data?')"{% endif %}>
       <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="active" value="{{ '0' if r.active else '1' }}">
@@ -691,11 +713,13 @@ def admin(u):
             by_user[usr["id"]]["consent"] = bool(usr["consent_at"])
             by_user[usr["id"]]["moveware_email"] = usr["moveware_email"]
             by_user[usr["id"]]["mw_watch"] = usr["mw_watch"]
+            by_user[usr["id"]]["wa_watch"] = usr["wa_watch"]
             by_user[usr["id"]]["tim_scope"] = usr["tim_scope"]
     return _render("Admin", ADMIN_TPL, u, rows=list(by_user.values()), runs=db.recent_runs(15),
                    stamp=_stamp, vault_ok=vault.is_configured(),
                    db_kind="Postgres" if db._db_url().startswith("postgresql") else "SQLite (temporary!)",
                    draft_on=drafting.enabled(), can_write=graph.can_write_drafts(),
+                   wa_ai=wa_triage.enabled(),
                    sched=scan._sched is not None)
 
 
@@ -717,6 +741,14 @@ def admin_moveware(u, user_id):
     _check_csrf()
     db.set_moveware_email(user_id, request.form.get("mw"))
     scan.scan_user_async(user_id)
+    return redirect(url_for("assistant.admin"))
+
+
+@bp.route("/assistant/admin/user/<user_id>/wa", methods=["POST"])
+@admin_required
+def admin_wa_watch(u, user_id):
+    _check_csrf()
+    db.set_wa_watch(user_id, request.form.get("wa"))
     return redirect(url_for("assistant.admin"))
 
 

@@ -44,6 +44,7 @@ users = Table(
     Column("whatsapp_opt_in", Boolean, nullable=False, default=False),
     Column("moveware_email", String(320)),                           # override if Moveware uses another address
     Column("mw_watch", Text),                                        # extra Moveware coordinators this user follows
+    Column("wa_watch", Text),                                        # WhatsApp chats to keep (empty = all)
     Column("tim_scope", String(20), nullable=False, default="assigned"),  # ClickUp/TIM: all | assigned | none
     Column("lang", String(5)),                                       # en | es (None = follow browser)
     Column("created_at", DateTime(timezone=True), default=now),
@@ -245,6 +246,21 @@ def set_mw_watch(user_id: str, value):
     with engine().begin() as c:
         c.execute(update(users).where(users.c.id == user_id)
                   .values(mw_watch=(",".join(emails) or None)))
+
+
+def set_wa_watch(user_id: str, value):
+    """Which WhatsApp chats reach the dashboard. Free text, comma-separated;
+    empty or None means every unread chat."""
+    raw = value if isinstance(value, str) else ",".join(value or [])
+    terms = [t.strip() for t in raw.replace(";", ",").replace("\n", ",").split(",") if t.strip()]
+    seen, kept = set(), []
+    for t in terms:
+        if t.lower() not in seen:
+            seen.add(t.lower())
+            kept.append(t)
+    with engine().begin() as c:
+        c.execute(update(users).where(users.c.id == user_id)
+                  .values(wa_watch=(", ".join(kept) or None)))
 
 
 def set_tim_scope(user_id: str, scope: str):

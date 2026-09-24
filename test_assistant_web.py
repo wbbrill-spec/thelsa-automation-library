@@ -138,6 +138,122 @@ def test_whatsapp_sync_flow(client):
                        json={"chats": []}).status_code == 401
 
 
+def _wa_setup(client, monkeypatch, chats, verdicts=None, watch=None):
+    """Opt a user into WhatsApp, POST a chat list, return the resulting items."""
+    from assistant import wa_triage
+    wa_triage.reset_cache_for_tests()
+    monkeypatch.setattr(wa_triage, "classify", lambda cs: verdicts or {})
+    login(client, "wa@thelsa.com")
+    u = consent("wa@thelsa.com")
+    if watch is not None:
+        db.set_wa_watch(u["id"], watch)
+    client.post("/assistant/whatsapp/optin", data={"csrf": "tok", "agree": "on"})
+    client.post("/assistant/whatsapp/key", data={"csrf": "tok"})
+    page = client.get("/assistant/whatsapp").data.decode()
+    key = re.search(r"(wa_[A-Za-z0-9_\-]+)", page).group(1)
+    r = client.post("/api/assistant/whatsapp/sync",
+                    headers={"Authorization": f"Bearer {key}"}, json={"chats": chats})
+    assert r.status_code == 200
+    return u, db.list_items(u["id"], "whatsapp")
+
+
+CHATS = [{"name": "Cliente Lopez", "unread": 2, "preview": "¿Ya salió el embarque?"},
+         {"name": "Mamá", "unread": 5, "preview": "no olvides la cena"},
+         {"name": "Thelsa Operaciones", "unread": 1, "preview": "falta la carta de encargo"}]
+
+
+def test_whatsapp_drops_personal_chats_and_uses_the_action_line(client, monkeypatch):
+    from assistant import wa_triage
+    verdicts = {
+        wa_triage.key("Cliente Lopez", "¿Ya salió el embarque?"):
+            {"work": True, "action": "Confirmar fecha de salida del embarque"},
+        wa_triage.key("Mamá", "no olvides la cena"): {"work": False, "action": ""},
+        wa_triage.key("Thelsa Operaciones", "falta la carta de encargo"):
+            {"work": True, "action": ""},
+    }
+    u, items = _wa_setup(client, monkeypatch, CHATS, verdicts)
+    assert sorted(i["from_name"] for i in items) == ["Cliente Lopez", "Thelsa Operaciones"]
+    by_name = {i["from_name"]: i for i in items}
+    assert by_name["Cliente Lopez"]["snippet"] == "Confirmar fecha de salida del embarque"
+    # no action line from the model -> the raw preview is kept, nothing is lost
+    assert by_name["Thelsa Operaciones"]["snippet"] == "falta la carta de encargo"
+
+
+def test_whatsapp_keeps_everything_when_triage_is_unavailable(client, monkeypatch):
+    u, items = _wa_setup(client, monkeypatch, CHATS, verdicts={})
+    assert len(items) == 3                       # no API key / API failed -> nothing dropped
+    assert {i["snippet"] for i in items} >= {"no olvides la cena"}
+
+
+def test_whatsapp_watch_list_runs_before_the_ai(client, monkeypatch):
+    u, items = _wa_setup(client, monkeypatch, CHATS, verdicts={}, watch="thelsa, cliente")
+    assert sorted(i["from_name"] for i in items) == ["Cliente Lopez", "Thelsa Operaciones"]
+
+
+def test_whatsapp_watch_matching_is_accent_and_case_insensitive():
+    from assistant import wa_triage
+    assert wa_triage.passes_watch("Logística TIM", "logistica")
+    assert wa_triage.passes_watch("Thelsa Operaciones", "THELSA")
+    assert not wa_triage.passes_watch("Mamá", "thelsa")
+    assert wa_triage.passes_watch("Mamá", "")          # empty watch list keeps everything
+    assert wa_triage.passes_watch("Mamá", None)
+
+
+def test_whatsapp_triage_is_off_without_an_api_key(monkeypatch):
+    from assistant import wa_triage
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    assert wa_triage.enabled() is False
+    assert wa_triage.classify(CHATS) == {}          # never calls out, never drops
+
+
+def test_whatsapp_triage_parses_the_model_reply_and_caches_it(monkeypatch):
+    from assistant import wa_triage
+    wa_triage.reset_cache_for_tests()
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    calls = []
+
+    class Resp:
+        status_code = 200
+        def raise_for_status(self): pass
+        def json(self):
+            return {"content": [{"type": "text", "text":
+                    'Here you go:\n[{"n":1,"work":true,"action":"Confirmar salida"},'
+                    '{"n":2,"work":false,"action":""}]'}]}
+
+    monkeypatch.setattr(wa_triage.requests, "post", lambda *a, **k: (calls.append(1), Resp())[1])
+    chats = [{"name": "Cliente Lopez", "unread": 1, "preview": "¿ya salió?"},
+             {"name": "Mamá", "unread": 1, "preview": "la cena"}]
+    v = wa_triage.classify(chats)
+    assert v[wa_triage.key("Cliente Lopez", "¿ya salió?")] == {"work": True,
+                                                              "action": "Confirmar salida"}
+    assert v[wa_triage.key("Mamá", "la cena")]["work"] is False
+    wa_triage.classify(chats)                      # unchanged chats -> served from cache
+    assert len(calls) == 1
+
+
+def test_whatsapp_triage_keeps_chats_when_the_api_errors(monkeypatch):
+    from assistant import wa_triage
+    wa_triage.reset_cache_for_tests()
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+    def boom(*a, **k):
+        raise RuntimeError("503 from Anthropic")
+
+    monkeypatch.setattr(wa_triage.requests, "post", boom)
+    assert wa_triage.classify([{"name": "Cliente", "unread": 1, "preview": "hola"}]) == {}
+
+
+def test_admin_sets_whatsapp_watch_list(client):
+    u = consent("wa2@thelsa.com")
+    login(client, "boss@thelsa.com")
+    client.get("/assistant/admin")
+    client.post(f"/assistant/admin/user/{u['id']}/wa",
+                data={"csrf": "tok", "wa": "Thelsa; TIM , thelsa"})
+    assert db.get_user(u["id"])["wa_watch"] == "Thelsa, TIM"      # de-duped, order kept
+    client.post(f"/assistant/admin/user/{u['id']}/wa", data={"csrf": "tok", "wa": ""})
+    assert db.get_user(u["id"])["wa_watch"] is None
+
+
 def test_moveware_rules():
     today = dt.date(2026, 9, 21)
     files = [

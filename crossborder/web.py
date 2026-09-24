@@ -37,6 +37,7 @@ Routes:
 """
 from __future__ import annotations
 
+import datetime as dt
 import functools
 import logging
 import os
@@ -45,8 +46,8 @@ import time
 
 from flask import Blueprint, jsonify, redirect, request, session, url_for
 
-from . import (alerts, clickup, demo, engine, fx, grouping, metrics, models,
-               notices, plan_history, remisiones, rules, sit, tim, tms)
+from . import (alerts, census, clickup, demo, engine, fx, grouping, metrics,
+               models, notices, plan_history, remisiones, rules, sit, tim, tms)
 from .dashboard import DASHBOARD_HTML
 from .models import Source
 
@@ -577,6 +578,26 @@ def api_consolidation_notice():
         draft["recorded"] = notices.record(draft)
     draft["missing"] = missing
     return jsonify(draft)
+
+
+@crossborder_bp.route("/crossborder/api/census")
+@_login_required
+def api_census():
+    """How many files TIM opened, by month. Counts finished files too.
+
+    Deliberately on demand only: it costs one ClickUp request per shipment
+    list, which is well over the per-minute ceiling and takes a couple of
+    minutes behind the rate limiter. Never called from a page load.
+    """
+    try:
+        year = int(request.args.get("year", "") or dt.date.today().year)
+    except ValueError:
+        year = dt.date.today().year
+    try:
+        return jsonify(census.census(year=year))
+    except Exception as exc:  # noqa: BLE001
+        log.exception("census failed")
+        return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 500
 
 
 @crossborder_bp.route("/crossborder/api/consolidation/notices")

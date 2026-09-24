@@ -254,6 +254,49 @@ def test_admin_sets_whatsapp_watch_list(client):
     assert db.get_user(u["id"])["wa_watch"] is None
 
 
+WEBLINK = ("https://outlook.office365.com/owa/?ItemID=AAMkAGZZZ%2FK0Lqrf%3D"
+           "&exvsurl=1&viewmodel=ReadMessageItem")
+
+
+def test_open_redirects_to_the_message_and_drops_the_desktop_handoff(client):
+    u = consent("open@thelsa.com")
+    db.replace_items(u["id"], "microsoft", [{**mail_item("m1", "Hi"), "url": WEBLINK}])
+    item = db.list_items(u["id"])[0]
+    login(client, "open@thelsa.com")
+    page = client.get("/assistant").data.decode()
+    assert f"/assistant/item/{item['id']}/open" in page        # link goes through us
+    assert "exvsurl" not in page                               # raw deep link is not in the HTML
+    r = client.get(f"/assistant/item/{item['id']}/open")
+    assert r.status_code == 302
+    loc = r.headers["Location"]
+    assert loc.startswith("https://outlook.office365.com/owa/")
+    assert "ItemID=AAMkAGZZZ%2FK0Lqrf%3D" in loc               # id survives intact
+    assert "viewmodel=ReadMessageItem" in loc
+    assert "exvsurl" not in loc
+
+
+def test_open_is_scoped_to_the_owner_and_safe(client):
+    a, b = consent("a2@thelsa.com"), consent("b2@thelsa.com")
+    db.replace_items(a["id"], "microsoft", [{**mail_item("m1", "Hi"), "url": WEBLINK}])
+    a_item = db.list_items(a["id"])[0]
+    login(client, "b2@thelsa.com")
+    assert client.get(f"/assistant/item/{a_item['id']}/open").status_code == 404
+    # a junk or dangerous stored url never becomes a redirect
+    db.replace_items(b["id"], "microsoft",
+                     [{**mail_item("m9", "X"), "url": "javascript:alert(1)"}])
+    bad = db.list_items(b["id"])[0]
+    assert client.get(f"/assistant/item/{bad['id']}/open").status_code == 404
+
+
+def test_open_url_normalization():
+    from assistant.web import open_url
+    assert open_url(WEBLINK).endswith("viewmodel=ReadMessageItem")
+    assert "exvsurl" not in open_url(WEBLINK)
+    assert open_url("https://app.clickup.com/x") == "https://app.clickup.com/x"
+    for bad in ("", None, "   ", "javascript:alert(1)", "data:text/html,x", "/relative"):
+        assert open_url(bad) == ""
+
+
 def test_moveware_rules():
     today = dt.date(2026, 9, 21)
     files = [

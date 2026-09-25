@@ -431,8 +431,15 @@ def screen(s: Shipment) -> str:
     """
     if not s.is_open:
         return "closed or delivered"
-    if _method(s) not in TRUCK_METHODS or _service(s) in NON_TRUCK_SERVICES:
-        return f"not truck freight ({_service(s) or _method(s) or 'method not set'})"
+    # Sea freight used to be screened out here, and rightly so while the board
+    # only planned trucks over the land border — a container is not a truck.
+    # Since 25 Sep it is the opposite: every sea container generates a truck
+    # between the Veracruz warehouse and the customer's city, and THAT leg is
+    # the cost this is meant to reduce. So a shipment with a Veracruz leg skips
+    # the method test; air freight never gets one, so it is still excluded.
+    if not s.veracruz_leg:
+        if _method(s) not in TRUCK_METHODS or _service(s) in NON_TRUCK_SERVICES:
+            return f"not truck freight ({_service(s) or _method(s) or 'method not set'})"
     if s.stage not in READY_STAGES | COMING_STAGES | AT_HUB_STAGES:
         return f"stage {s.stage.value} — past the point of planning a truck"
     blocked = rules.consolidation_block(s)

@@ -353,6 +353,53 @@ def test_moveware_watch_list_adds_other_coordinators(monkeypatch):
     assert moveware.tasks_for_user({**memo, "mw_watch": None}) == []
 
 
+def test_embassy_follow_picks_up_every_embassy_file(monkeypatch):
+    import types, sys
+    def f(job, coord, embassy):
+        return {"job": job, "coordinator_email": coord, "is_embassy": embassy, "status": "W",
+                "pack": dt.date.today() - dt.timedelta(days=6),
+                "delivery": dt.date.today() - dt.timedelta(days=2),
+                "invoiced": False, "act_wt": 5}
+    monkeypatch.setitem(sys.modules, "mw_live", types.SimpleNamespace(
+        have_creds=lambda: True, ensure_auditor=lambda: None,
+        audited_in_window=lambda: [f("E1", "stephaniebarraza@thelsa.com", True),
+                                   f("E2", "someoneelse@thelsa.com", True),
+                                   f("N1", "someoneelse@thelsa.com", False)]))
+    edgar = {"email": "edgarespino@thelsa.com", "moveware_email": None, "mw_watch": None}
+    assert moveware.tasks_for_user(edgar) == []                    # coordinates nothing
+    on = {**edgar, "mw_embassy": True}
+    jobs = sorted({i["meta"]["job"] for i in moveware.tasks_for_user(on)})
+    assert jobs == ["E1", "E2"]                                    # both embassy files, not N1
+
+
+def test_embassy_follow_is_additive_to_the_watch_list(monkeypatch):
+    import types, sys
+    def f(job, coord, embassy):
+        return {"job": job, "coordinator_email": coord, "is_embassy": embassy, "status": "W",
+                "pack": dt.date.today() - dt.timedelta(days=6),
+                "delivery": dt.date.today() - dt.timedelta(days=2),
+                "invoiced": False, "act_wt": 5}
+    monkeypatch.setitem(sys.modules, "mw_live", types.SimpleNamespace(
+        have_creds=lambda: True, ensure_auditor=lambda: None,
+        audited_in_window=lambda: [f("E1", "nobody@thelsa.com", True),
+                                   f("W1", "sarareyes@thelsa.com", False),
+                                   f("X1", "nobody@thelsa.com", False)]))
+    u = {"email": "memo@thelsa.com", "moveware_email": None,
+         "mw_watch": "sarareyes@thelsa.com", "mw_embassy": True}
+    assert sorted({i["meta"]["job"] for i in moveware.tasks_for_user(u)}) == ["E1", "W1"]
+
+
+def test_admin_toggles_embassy_follow(client):
+    u = consent("edgar@thelsa.com")
+    login(client, "boss@thelsa.com")
+    client.get("/assistant/admin")
+    assert db.get_user(u["id"])["mw_embassy"] in (False, 0)        # off by default
+    client.post(f"/assistant/admin/user/{u['id']}/embassy", data={"csrf": "tok", "on": "1"})
+    assert db.get_user(u["id"])["mw_embassy"] in (True, 1)
+    client.post(f"/assistant/admin/user/{u['id']}/embassy", data={"csrf": "tok", "on": "0"})
+    assert db.get_user(u["id"])["mw_embassy"] in (False, 0)
+
+
 def test_watched_emails_normalizes():
     got = moveware.watched_emails({"email": "Memo@Thelsa.com", "moveware_email": "memo.m@thelsa.com",
                                    "mw_watch": " A@x.com ,a@x.com;\nB@x.com , not-an-email "})

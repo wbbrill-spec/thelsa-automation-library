@@ -483,7 +483,12 @@ def api_plan():
     # happened rather than assuming it did. "recorded" counts only the files
     # where somebody wrote it down; TIM's McAllen is policy, not evidence.
     try:
-        imports = [s for s in shipments if (s.extra or {}).get("direction") != "export"]
+        # Land imports only. Sea freight has no land port of entry — it comes
+        # through Veracruz by definition — so counting it here inflated
+        # "not recorded" from 10 to 25 and made the McAllen switch look worse
+        # than it is. The two ports are different questions.
+        imports = [s for s in shipments
+                   if (s.extra or {}).get("direction") != "export" and not s.is_sea]
         ports: dict = {}
         recorded = 0
         for s in imports:

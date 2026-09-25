@@ -713,7 +713,11 @@ never anyone's emails or to-dos.</p>
   <td><form method="post" action="/assistant/admin/user/{{ r.id }}/mwwatch"><input type="hidden" name="csrf" value="{{ csrf }}">
       <input type="text" name="watch" value="{{ r.mw_watch or '' }}" placeholder="coordinator emails, comma-separated" style="width:230px">
       <button class="btn small light" type="submit">Save</button>
-      <br><span class="sub" style="margin:0">Their files appear on this dashboard too.</span></form></td>
+      <br><span class="sub" style="margin:0">Their files appear on this dashboard too.</span></form>
+      <form method="post" action="/assistant/admin/user/{{ r.id }}/embassy"><input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="on" value="{{ '0' if r.mw_embassy else '1' }}">
+        <button class="btn small {{ 'light' if r.mw_embassy else 'light' }}" type="submit">
+          {{ '☑' if r.mw_embassy else '☐' }} All US Embassy / Consulate files</button></form></td>
   <td><form method="post" action="/assistant/admin/user/{{ r.id }}/tim"><input type="hidden" name="csrf" value="{{ csrf }}">
       <select name="scope" onchange="this.form.submit()">
         {% for v, l in [('assigned','Assigned only'),('all','All TIM files'),('none','None')] %}
@@ -753,6 +757,7 @@ def admin(u):
             by_user[usr["id"]]["moveware_email"] = usr["moveware_email"]
             by_user[usr["id"]]["mw_watch"] = usr["mw_watch"]
             by_user[usr["id"]]["wa_watch"] = usr["wa_watch"]
+            by_user[usr["id"]]["mw_embassy"] = usr["mw_embassy"]
             by_user[usr["id"]]["tim_scope"] = usr["tim_scope"]
     return _render("Admin", ADMIN_TPL, u, rows=list(by_user.values()), runs=db.recent_runs(15),
                    stamp=_stamp, vault_ok=vault.is_configured(),
@@ -788,6 +793,15 @@ def admin_moveware(u, user_id):
 def admin_wa_watch(u, user_id):
     _check_csrf()
     db.set_wa_watch(user_id, request.form.get("wa"))
+    return redirect(url_for("assistant.admin"))
+
+
+@bp.route("/assistant/admin/user/<user_id>/embassy", methods=["POST"])
+@admin_required
+def admin_mw_embassy(u, user_id):
+    _check_csrf()
+    db.set_mw_embassy(user_id, request.form.get("on") == "1")
+    scan.scan_user_async(user_id)
     return redirect(url_for("assistant.admin"))
 
 

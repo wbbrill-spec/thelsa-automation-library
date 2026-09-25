@@ -45,6 +45,7 @@ users = Table(
     Column("moveware_email", String(320)),                           # override if Moveware uses another address
     Column("mw_watch", Text),                                        # extra Moveware coordinators this user follows
     Column("wa_watch", Text),                                        # WhatsApp chats to keep (empty = all)
+    Column("mw_embassy", Boolean, nullable=False, default=False),    # follow every US Embassy/Consulate file
     Column("tim_scope", String(20), nullable=False, default="assigned"),  # ClickUp/TIM: all | assigned | none
     Column("lang", String(5)),                                       # en | es (None = follow browser)
     Column("created_at", DateTime(timezone=True), default=now),
@@ -246,6 +247,12 @@ def set_mw_watch(user_id: str, value):
     with engine().begin() as c:
         c.execute(update(users).where(users.c.id == user_id)
                   .values(mw_watch=(",".join(emails) or None)))
+
+
+def set_mw_embassy(user_id: str, on: bool):
+    """Follow every US Embassy / Consulate move file, whoever coordinates it."""
+    with engine().begin() as c:
+        c.execute(update(users).where(users.c.id == user_id).values(mw_embassy=bool(on)))
 
 
 def set_wa_watch(user_id: str, value):

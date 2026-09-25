@@ -138,6 +138,23 @@ def _matches(addr, emails):
     return (addr or "").strip().lower() in emails
 
 
+def wants_file(f, user, emails=None) -> bool:
+    """Does this Moveware file belong on this user's dashboard?
+
+    Two independent reasons, either is enough:
+      * the file's coordinator is the user, their Moveware override, or someone
+        on their watch list (users.mw_watch);
+      * the file is a US Embassy / Consulate booking and the user follows all of
+        those (users.mw_embassy) — for the documentation side, which works every
+        embassy file regardless of whose coordinator name is on it.
+    """
+    if emails is None:
+        emails = watched_emails(user)
+    if _matches(f.get("coordinator_email"), emails):
+        return True
+    return bool(user.get("mw_embassy")) and bool(f.get("is_embassy"))
+
+
 def watched_emails(user) -> set:
     """Every coordinator address whose files this user should see: their own,
     their Moveware override, plus anyone on their watch list (users.mw_watch).
@@ -168,7 +185,7 @@ def tasks_for_user(user) -> list:
     if not files:
         return None
     emails = watched_emails(user)
-    mine = [f for f in files if _matches(f.get("coordinator_email"), emails)]
+    mine = [f for f in files if wants_file(f, user, emails)]
     items = tasks_for_files(mine)
     try:
         import underbilling

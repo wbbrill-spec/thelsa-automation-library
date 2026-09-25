@@ -145,3 +145,30 @@ def test_land_freight_is_untouched_by_any_of_this():
     s = ship(extra={"direction": "import"}, destination_hub=Hub.MEXICO_CITY)
     assert engine.leg_for(s) is Leg.CROSSING
     assert "McAllen" in engine.lane_for(s)[0]
+
+
+# ── the screen, which was silently discarding all of it ──────────────────────
+def test_a_sea_container_is_planned_because_its_inland_leg_is_a_truck():
+    """The bug that made this land as 45 shipments and 0 loads: screen()
+    rejected anything whose method was not road, so every container was
+    discarded as 'not truck freight'. Correct before — a container is not a
+    truck — and exactly wrong once the port leg is the thing being planned."""
+    s = ship(stage=__import__("crossborder.models", fromlist=["x"]).Stage.BOOKED,
+             volume_m3=42.0, destination_hub=Hub.VERACRUZ,
+             extra={"veracruz_leg": "veracruz_in", "is_sea": True,
+                    "method": "SEA", "service": "FCL40"})
+    assert engine.screen(s) == ""
+
+
+def test_air_freight_is_still_not_planned():
+    from crossborder.models import Stage
+    s = ship(stage=Stage.BOOKED, volume_m3=10.0, destination_hub=Hub.MEXICO_CITY,
+             extra={"method": "AIR", "service": "Air"})
+    assert "not truck freight" in engine.screen(s)
+
+
+def test_road_freight_is_screened_exactly_as_before():
+    from crossborder.models import Stage
+    s = ship(stage=Stage.BOOKED, volume_m3=10.0, destination_hub=Hub.MEXICO_CITY,
+             extra={"direction": "import", "method": "", "service": ""})
+    assert engine.screen(s) == ""

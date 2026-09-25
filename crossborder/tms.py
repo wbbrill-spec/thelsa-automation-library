@@ -192,6 +192,82 @@ def direction(row: dict) -> str | None:
     return None
 
 
+# ── sea freight, i.e. Veracruz (Bill, 2026-09-25) ────────────────────────────
+# "All sea freight shipments go in or out of Veracruz. Very few exceptions."
+#
+# That one sentence is what makes this cheap. The port of entry is nowhere in
+# the job record — a container cleared at Veracruz and delivered to Guadalajara
+# shows Guadalajara, the same problem the land border had until the team began
+# writing the crossing into the crew notes. But if sea freight IS Veracruz,
+# then no port field is needed: the shipping method identifies the port.
+#
+# Everything here reads the LIST ROW, so a sea job is recognised before we pay
+# for its detail. That matters — the Moveware performance guardrail is a hard
+# constraint from the provider, and widening the feed must not widen the walk.
+#
+# Measured on the live feed 2026-09-25: `method` is "SEA"/"Sea", `service`
+# carries the container ("FCL 20", "FCL40", "FCL40+40HC") or "Air", and `type`
+# is EXP / IMP / IMA.
+SEA_METHODS = {"sea", "ocean", "maritimo", "maritima", "lcl", "fcl"}
+AIR_MARKERS = {"air", "aereo", "aerea", "airfreight"}
+CONTAINER_MARKERS = ("fcl", "lcl", "container", "contenedor")
+VERACRUZ_PORT = "Veracruz"
+
+
+def is_sea_freight(row: dict) -> bool:
+    """Does this job move by sea — and therefore through Veracruz?
+
+    Two of the eight rows on the live feed said `method: Sea` while `service`
+    said `Air`, so method alone over-captures. A container in `service` is the
+    strongest signal; failing that, method says sea AND service does not
+    contradict it.
+    """
+    method = norm_text(_s(row.get("method")))
+    service = norm_text(_s(row.get("service")))
+    if any(k in service for k in CONTAINER_MARKERS):
+        return True
+    if service in AIR_MARKERS or any(k in service for k in AIR_MARKERS):
+        return False
+    return method in SEA_METHODS or any(k in method for k in SEA_METHODS)
+
+
+def sea_direction(row: dict) -> str | None:
+    """'import' (arriving at Veracruz) / 'export' (leaving through it) / None.
+
+    Prefers Moveware's own EXP/IMP/IMA type code and falls back to the
+    countries, because the type code is occasionally blank on older rows.
+    """
+    if not is_sea_freight(row):
+        return None
+    t = _s(row.get("type")).upper()
+    if t.startswith("EXP"):
+        return "export"
+    if t.startswith("IM"):
+        return "import"
+    _o, _d = _endpoints(row)
+    o, d = _country(_o), _country(_d)
+    if d == MX and o and o != MX:
+        return "import"
+    if o == MX and d and d != MX:
+        return "export"
+    return None
+
+
+def veracruz_leg(row: dict) -> str | None:
+    """The Veracruz movement this job creates, if any.
+
+    An inbound container becomes a truck OUT of the Veracruz warehouse to the
+    customer's city; an outbound one becomes a truck INTO it. Those trucks are
+    the cost this is meant to attack, and they are what the board can plan.
+    """
+    d = sea_direction(row)
+    if d == "import":
+        return "veracruz_out"     # Veracruz → inland
+    if d == "export":
+        return "veracruz_in"      # inland → Veracruz
+    return None
+
+
 def _mw_date(v):
     """Moveware emits '2026-09-05T00:00:00+10:00' style stamps — take the calendar date literally."""
     if isinstance(v, dict):
@@ -519,7 +595,9 @@ def build_shipment(row: dict, detail: dict | None, *, today: dt.date | None = No
     d = detail or {}
     ex = _extras(d)
     meas = _measurements(d)
-    dirn = direction(row) or "import"
+    # A sea job has no US↔MX direction; its direction is the Veracruz leg.
+    sea_leg = veracruz_leg(row)
+    dirn = direction(row) or (sea_direction(row) if sea_leg else None) or "import"
     stage, flags, dates = stage_for(row, d, today)
     flags = flags + date_gap_flags(dates, stage, today)
     list_id = str(row.get("id") or "")
@@ -538,7 +616,16 @@ def build_shipment(row: dict, detail: dict | None, *, today: dt.date | None = No
     oloc, dloc = _loc(d, "origin", row), _loc(d, "destination", row)
     origin = _place(oloc) if oloc else (_place(d.get("origin")) or _country(row.get("origin")))
     destination = _place(dloc) if dloc else (_place(d.get("destination")) or _country(row.get("destination")))
-    hub = hub_for_destination(destination) if dirn == "import" else Hub.UNKNOWN
+    # Where the onward truck goes. A sea IMPORT lands at Veracruz and trucks
+    # inland, so its hub is the customer's city, exactly like a land import.
+    # A sea EXPORT trucks INTO Veracruz to meet the vessel, so Veracruz is its
+    # hub — that is the load the board can fill, and the reason this exists.
+    if sea_leg == "veracruz_in":
+        hub = Hub.VERACRUZ
+    elif dirn == "import":
+        hub = hub_for_destination(destination)
+    else:
+        hub = Hub.UNKNOWN
     # V2 names this dateModified; v1 sent lastUpdated. Read both.
     updated = (_mw_date(row.get("dateModified")) or _mw_date(row.get("lastUpdated"))
                or _mw_date(d.get("dateModified")) or _mw_date(d.get("lastUpdated")))
@@ -596,7 +683,9 @@ def build_shipment(row: dict, detail: dict | None, *, today: dt.date | None = No
         booking_agent=_role(d, "bookingAgent"),
         origin_agent=_role(d, "originAgent"),
         destination_agent=_role(d, "destinationAgent") or _named(dloc.get("agent")),
-        extra={"direction": dirn, "method": method, "job_type": _s(row.get("jobType")), "service": svc,
+        extra={"direction": dirn, "veracruz_leg": sea_leg or "",
+               "is_sea": bool(sea_leg), "port": VERACRUZ_PORT if sea_leg else "",
+               "method": method, "job_type": _s(row.get("jobType")), "service": svc,
                "payer": payer, "branch": _s(d.get("branchName")), "branch_code": _s(d.get("branchCode")),
                "customer_type": _s(d.get("customerType")), "currency": _s(d.get("currency")),
                "coordinator_email": _s(mm.get("email")), "items": meas["items"],
@@ -720,10 +809,24 @@ def fetch_tms_shipments(client: MovewareClient | None = None, *, days: int | Non
         lane = f"{_country(_o) or '?'}→{_country(_d) or '?'}"
         diag["by_lane"][lane] = diag["by_lane"].get(lane, 0) + 1
         dn = direction(r)
-        if dn and st in ACTIVE_STATUSES:
+        # Sea freight joins the feed as of 25 Sep: it all moves through
+        # Veracruz, and the truck in or out of that port is exactly the cost
+        # the board exists to reduce. Recognised from the list row, so the
+        # walk does not get any longer — only the kept set gets wider.
+        sea = veracruz_leg(r) if not dn else None
+        # A sea job we cannot give a direction to is reported, not dropped in
+        # silence — it is a real Veracruz movement the board is failing to see,
+        # and the count is how anyone finds out.
+        if not dn and not sea and is_sea_freight(r) and st in ACTIVE_STATUSES:
+            diag["sea_no_direction"] = diag.get("sea_no_direction", 0) + 1
+        if (dn or sea) and st in ACTIVE_STATUSES:
             xb.append(r)
-            diag["by_direction"][dn] = diag["by_direction"].get(dn, 0) + 1
-    diag["cross_border"] = len(xb)
+            key = dn or sea
+            diag["by_direction"][key] = diag["by_direction"].get(key, 0) + 1
+            if sea:
+                diag["veracruz"] = diag.get("veracruz", 0) + 1
+    diag["cross_border"] = len(xb) - diag.get("veracruz", 0)
+    diag["kept"] = len(xb)
     diag["by_lane"] = dict(sorted(diag["by_lane"].items(), key=lambda kv: -kv[1])[:12])
     # V2: dateModified. v1: lastUpdated. Sorting on a key that no longer exists
     # would have quietly handed max_details the wrong jobs.

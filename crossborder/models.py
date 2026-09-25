@@ -51,6 +51,13 @@ class Hub(str, Enum):
     QUERETARO = "Querétaro"
     SAN_LUIS_POTOSI = "San Luis Potosí"
     TORREON = "Torreón"
+    # Veracruz is Mexico's sea gate: essentially all ocean freight enters and
+    # leaves through it (Bill, 25 Sep), and Thelsa has its own warehouse there.
+    # It used to sit in the Mexico City keyword list, which made the board read
+    # Veracruz freight — and the TRS trucks serving it — as Mexico City. Three
+    # live trucks and 176 m³ of "Mexico City" spare capacity were Veracruz's on
+    # the day this was found. Exactly the San Luis Potosí mistake, same fix.
+    VERACRUZ = "Veracruz"
     UNKNOWN = "Unknown"
 
 
@@ -67,6 +74,10 @@ class Leg(str, Enum):
     ONWARD = "onward"         # entry hub → the customer's city
     EXPORT = "export"         # Mexico → US/Canada
     DOMESTIC = "domestic"     # inside Mexico (TRS / Plan de Viajes)
+    # Sea freight, which all moves through Veracruz (Bill, 25 Sep). The vessel
+    # is not ours to plan; the truck between the port warehouse and the
+    # customer's city is, and it is the cost this leg exists to attack.
+    PORT = "port"             # Veracruz ↔ inland Mexico
 
 
 # ── Capacity constants (spec §5, from the logistics training) ───────────────────
@@ -143,8 +154,21 @@ _HUB_CITIES: dict[Hub, list[str]] = {
         "mexico city", "ciudad de mexico", "cdmx", "distrito federal", "df",
         "estado de mexico", "edomex", "toluca", "naucalpan", "huixquilucan",
         "interlomas", "santa fe", "polanco", "iztapalapa", "cuernavaca", "morelos", "puebla", "atlixco",
-        "pachuca", "hidalgo", "tlaxcala", "veracruz", "xalapa", "oaxaca",
+        # Boroughs seen on live TRS trips that were falling through to Unknown
+        # — "BODEGA THELSA VERACRUZ → CUAJIMALPA", 50 m³, was one of them.
+        "cuajimalpa", "coyoacan", "tlalpan", "azcapotzalco", "benito juarez",
+        "miguel hidalgo", "alvaro obregon", "cuauhtemoc", "atizapan", "satelite",
+        "pachuca", "hidalgo", "tlaxcala", "oaxaca",
         "acapulco", "guerrero", "chiapas", "tuxtla gutierrez",
+    ],
+    # The port city and its immediate catchment only. The state of Veracruz is
+    # long and thin, and places at its far ends are not served by the port
+    # warehouse, so this stays deliberately tight rather than claiming the
+    # whole state. CB_HUB_EXTRA can widen it without a deploy if the team says
+    # a town belongs here.
+    Hub.VERACRUZ: [
+        "veracruz", "boca del rio", "boca del río", "alvarado", "medellin de bravo",
+        "xalapa", "jalapa", "cordoba", "córdoba", "orizaba", "coatzacoalcos",
     ],
     Hub.GUADALAJARA: [
         "guadalajara", "zapopan", "tlaquepaque", "tonala", "tlajomulco", "jalisco",
@@ -178,9 +202,33 @@ def norm_text(s: Optional[str]) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
+def _hub_extra() -> list[tuple[str, Hub]]:
+    """Places the team tells us belong to a hub, without waiting for a deploy.
+
+        CB_HUB_EXTRA="Veracruz:tierra blanca, Guadalajara:tepatitlan"
+
+    A hub name that is not recognised is skipped and logged rather than
+    guessed at, so a typo cannot silently reassign a city.
+    """
+    raw = (os.environ.get("CB_HUB_EXTRA") or "").strip()
+    if not raw:
+        return []
+    by_name = {norm_text(h.value): h for h in Hub}
+    out: list[tuple[str, Hub]] = []
+    for pair in raw.replace(";", ",").split(","):
+        if ":" not in pair:
+            continue
+        hub_name, town = pair.split(":", 1)
+        hub = by_name.get(norm_text(hub_name))
+        if hub and norm_text(town):
+            out.append((norm_text(town), hub))
+    return out
+
+
 # Longest tokens first so "san pedro garza garcia" wins over "san pedro".
 _HUB_INDEX: list[tuple[str, Hub]] = sorted(
-    ((tok, hub) for hub, toks in _HUB_CITIES.items() for tok in toks),
+    (list((tok, hub) for hub, toks in _HUB_CITIES.items() for tok in toks)
+     + _hub_extra()),
     key=lambda t: -len(t[0]),
 )
 
@@ -458,6 +506,15 @@ class Shipment:
                               Stage.DELIVERED, Stage.CLOSED)
 
     # ── which border it crosses (consolidation meeting, 23 Sep) ───────────
+    @property
+    def veracruz_leg(self) -> str:
+        """"veracruz_out" (port → inland), "veracruz_in" (inland → port), ""."""
+        return str((self.extra or {}).get("veracruz_leg") or "")
+
+    @property
+    def is_sea(self) -> bool:
+        return bool((self.extra or {}).get("is_sea"))
+
     @property
     def port_of_entry(self) -> str:
         """"McAllen" / "Laredo" / "" — the crossing this file uses.

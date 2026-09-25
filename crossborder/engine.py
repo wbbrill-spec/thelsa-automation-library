@@ -333,6 +333,7 @@ LEG_LABELS = {
     Leg.ONWARD: f"Stage 2 — onward from {ENTRY_HUB.value}",
     Leg.EXPORT: "Export",
     Leg.DOMESTIC: "Domestic Mexico",
+    Leg.PORT: f"Sea freight — {Hub.VERACRUZ.value} port",
 }
 
 
@@ -344,6 +345,11 @@ def leg_for(s: Shipment) -> Leg:
     carries it from the hub to its city. Which one it needs depends only on
     whether it has crossed yet.
     """
+    # Sea freight is checked first: it has a direction like anything else, but
+    # its truck runs between Veracruz and the customer, never over the land
+    # border, so the crossing/onward split does not apply to it at all.
+    if s.veracruz_leg:
+        return Leg.PORT
     dirn = _direction(s)
     if dirn == "export":
         return Leg.EXPORT
@@ -367,6 +373,15 @@ def lane_for(s: Shipment) -> tuple[str, str, Leg]:
         return f"Export → {region}", region, leg
     if leg is Leg.CROSSING:
         return f"{CROSSING_ORIGIN} → {ENTRY_HUB.value} (crossing)", ENTRY_HUB.value, leg
+    if leg is Leg.PORT:
+        # Everything bound FOR the vessel shares one lane into the port, the
+        # same way everything crossing at McAllen shares one trailer. Freight
+        # coming OFF a vessel splits by the city it is going to.
+        if s.veracruz_leg == "veracruz_in":
+            return f"→ {Hub.VERACRUZ.value} (port)", Hub.VERACRUZ.value, leg
+        city = s.destination_hub
+        end = city.value if city is not Hub.UNKNOWN else "Unassigned hub"
+        return f"{Hub.VERACRUZ.value} → {end}", end, leg
 
     hub = s.destination_hub
     if hub is Hub.UNKNOWN:

@@ -505,3 +505,83 @@ def test_spanish_consent_and_whatsapp_pages(client):
     assert "Acepto que el asistente" in client.get("/assistant").data.decode()
     db.set_consent(u["id"])
     assert "Activar WhatsApp" in client.get("/assistant/whatsapp").data.decode()
+
+
+# ── Diagnostics endpoint ──────────────────────────────────────────────────────
+def _diag_mw(monkeypatch, files):
+    import types, sys
+    monkeypatch.setitem(sys.modules, "mw_live", types.SimpleNamespace(
+        have_creds=lambda: True, ensure_auditor=lambda: None,
+        audited_in_window=lambda: files))
+
+
+def _mwfile(job, coord, embassy=False):
+    return {"job": job, "coordinator_email": coord, "is_embassy": embassy, "status": "W",
+            "pack": dt.date.today() - dt.timedelta(days=3), "invoiced": False, "act_wt": 5}
+
+
+def test_diag_requires_the_token(client, monkeypatch):
+    monkeypatch.setenv("CRON_TOKEN", "s3cret")
+    assert client.get("/assistant/diag").status_code == 403
+    assert client.get("/assistant/diag?token=wrong").status_code == 403
+    assert client.get("/assistant/diag?token=s3cret").status_code == 200
+
+
+def test_diag_refuses_when_no_token_is_configured(client, monkeypatch):
+    monkeypatch.delenv("CRON_TOKEN", raising=False)
+    assert client.get("/assistant/diag?token=").status_code == 403
+
+
+def test_diag_counts_files_per_coordinator(client, monkeypatch):
+    monkeypatch.setenv("CRON_TOKEN", "t")
+    _diag_mw(monkeypatch, [_mwfile("1", "sarareyes@thelsa.com"),
+                           _mwfile("2", "sarareyes@thelsa.com"),
+                           _mwfile("3", "nobody@thelsa.com", embassy=True),
+                           _mwfile("4", "")])
+    mw = client.get("/assistant/diag?token=t").get_json()["moveware"]
+    assert mw["creds"] is True and mw["files_in_window"] == 4 and mw["embassy_files"] == 1
+    by = {r["coordinator_email"]: r for r in mw["coordinators"]}
+    assert by["sarareyes@thelsa.com"]["files"] == 2
+    assert by["nobody@thelsa.com"]["embassy"] == 1
+    assert by["(blank)"]["files"] == 1                      # the silent-failure case
+
+
+def test_diag_never_prints_a_customer_address(client, monkeypatch):
+    monkeypatch.setenv("CRON_TOKEN", "t")
+    _diag_mw(monkeypatch, [_mwfile("1", "maria.gonzalez@bigcorp.com")])
+    body = client.get("/assistant/diag?token=t").get_data(as_text=True)
+    assert "maria.gonzalez" not in body and "(external: bigcorp.com)" in body
+
+
+def test_diag_shows_a_user_whose_watch_list_matches_nothing(client, monkeypatch):
+    monkeypatch.setenv("CRON_TOKEN", "t")
+    u = consent("memo@thelsa.com")
+    db.set_mw_watch(u["id"], "sara.reyes@thelsa.com")      # dotted form
+    _diag_mw(monkeypatch, [_mwfile("1", "sarareyes@thelsa.com")])   # undotted in Moveware
+    row = [r for r in client.get("/assistant/diag?token=t").get_json()["users"]
+           if r["email"] == "memo@thelsa.com"][0]
+    assert row["in_scan_set"] is True                       # he is being scanned
+    assert row["files_matched_now"] == 0                    # but nothing matches
+    assert row["watched_emails"] == ["memo@thelsa.com", "sara.reyes@thelsa.com"]
+
+
+def test_diag_separates_not_scanned_from_no_match(client, monkeypatch):
+    monkeypatch.setenv("CRON_TOKEN", "t")
+    waiting = db.upsert_user("newguy@thelsa.com")           # invited, never opened it
+    db.set_mw_watch(waiting["id"], "sarareyes@thelsa.com")
+    _diag_mw(monkeypatch, [_mwfile("1", "sarareyes@thelsa.com")])
+    row = [r for r in client.get("/assistant/diag?token=t").get_json()["users"]
+           if r["email"] == "newguy@thelsa.com"][0]
+    assert row["consented"] is False and row["in_scan_set"] is False
+    assert row["files_matched_now"] == 1                    # the filter is fine…
+    assert row["items_stored"] == {}                        # …he is simply never scanned
+
+
+def test_diag_reports_a_dead_moveware_connection(client, monkeypatch):
+    monkeypatch.setenv("CRON_TOKEN", "t")
+    import types, sys
+    monkeypatch.setitem(sys.modules, "mw_live", types.SimpleNamespace(
+        have_creds=lambda: True, ensure_auditor=lambda: None,
+        audited_in_window=lambda: (_ for _ in ()).throw(RuntimeError("auditor offline"))))
+    mw = client.get("/assistant/diag?token=t").get_json()["moveware"]
+    assert mw["files_in_window"] == 0 and "auditor offline" in mw["error"]

@@ -22,7 +22,7 @@ from zoneinfo import ZoneInfo
 from flask import (Blueprint, Response, abort, jsonify, redirect, render_template_string,
                    request, session, url_for)
 
-from . import db, drafting, graph, i18n, priority, scan, vault, wa_triage
+from . import db, drafting, graph, i18n, moveware, priority, scan, vault, wa_triage
 
 bp = Blueprint("assistant", __name__)
 MX = ZoneInfo("America/Mexico_City")
@@ -674,6 +674,81 @@ def cron():
         return ("forbidden", 403)
     scan.run_all_async("cron")
     return jsonify({"ok": True, "started": True})
+
+
+# ── Diagnostics ───────────────────────────────────────────────────────────────
+# Why a file "should" be on someone's dashboard and why it actually is are two
+# different questions, and the second one has no error message when it fails: a
+# coordinator address that doesn't match simply produces nothing. This endpoint
+# answers it directly — which coordinator addresses the Moveware auditor has in
+# its window, and how many of those files each user's filter accepts right now.
+#
+# CRON_TOKEN-gated rather than login-gated so it can be read when nobody can get
+# into the admin page. It returns configuration and counts only: no subjects, no
+# snippets, no customer names, and non-staff addresses are reduced to a domain.
+def _safe_addr(addr) -> str:
+    a = (addr or "").strip().lower()
+    if not a:
+        return "(blank)"
+    if a.endswith("@thelsa.com"):
+        return a
+    return f"(external: {a.split('@')[-1]})" if "@" in a else "(external)"
+
+
+@bp.route("/assistant/diag")
+def diag():
+    tok = os.environ.get("CRON_TOKEN", "")
+    if not tok or not secrets.compare_digest(request.args.get("token", ""), tok):
+        return ("forbidden", 403)
+
+    out = {"generated_at": db.now().isoformat(), "moveware": {}, "users": []}
+    mw, files = out["moveware"], []
+    try:
+        import mw_live
+        mw["creds"] = bool(mw_live.have_creds())
+        if mw["creds"]:
+            mw_live.ensure_auditor()
+            files = list(mw_live.audited_in_window() or [])
+    except Exception as exc:
+        mw["creds"] = False
+        mw["error"] = f"{type(exc).__name__}: {exc}"[:300]
+    mw["files_in_window"] = len(files)
+    mw["embassy_files"] = sum(1 for f in files if f.get("is_embassy"))
+
+    tally = {}
+    for f in files:
+        k = _safe_addr(f.get("coordinator_email"))
+        row = tally.setdefault(k, {"coordinator_email": k, "files": 0, "embassy": 0})
+        row["files"] += 1
+        if f.get("is_embassy"):
+            row["embassy"] += 1
+    mw["coordinators"] = sorted(tally.values(), key=lambda r: (-r["files"], r["coordinator_email"]))
+
+    for row in db.list_users():
+        u = dict(row)
+        watched = moveware.watched_emails(u)
+        conn = db.get_connection(u["id"], "microsoft")
+        stored = {}
+        for it in db.list_items(u["id"]):
+            stored[it["source"]] = stored.get(it["source"], 0) + 1
+        out["users"].append({
+            "email": u["email"],
+            "active": bool(u["active"]),
+            "consented": bool(u["consent_at"]),
+            # Both must hold or the scheduled run never touches this user at all,
+            # which looks identical to "Moveware returned nothing".
+            "in_scan_set": bool(u["active"] and u["consent_at"]),
+            "mailbox": conn["status"] if conn else None,
+            "moveware_email": u.get("moveware_email") or None,
+            "mw_watch": u.get("mw_watch") or None,
+            "mw_embassy": bool(u.get("mw_embassy")),
+            "watched_emails": sorted(watched),
+            # The decisive number: how many files in the window this user's own
+            # filter accepts, evaluated live, independent of what was last stored.
+            "files_matched_now": sum(1 for f in files if moveware.wants_file(f, u, watched)),
+            "items_stored": stored,
+        })
+    return jsonify(out)
 
 
 # ── Admin ──────────────────────────────────────────────────────────────────────

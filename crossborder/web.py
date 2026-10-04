@@ -13,6 +13,7 @@ Routes:
   /crossborder/raw?discover=1      the workspace hierarchy (space/folder/list ids).
   /crossborder/raw?list=<id>,<id>  inspect specific lists in full (every task).
   /crossborder/raw?tms=probe       Moveware shape discovery (a few calls; &env=test|prod).
+  /crossborder/raw?tms=filters     falsify Moveware's server-side filters (6 calls).
   /crossborder/raw?tms=1&days=30   a bounded TMS walk with diagnostics (&max_details=N).
   /crossborder                     the dashboard page (dashboard.py).
   /crossborder/api/shipments       JSON: normalized shipments + status +
@@ -359,6 +360,10 @@ def raw():
             client = tms.MovewareClient(env=request.args.get("env"))
             if mode == "probe":
                 out["tms"] = tms.probe(client, sample=int(request.args.get("sample", "3") or 3))
+            elif mode == "filters":
+                # Standing check: ask Moveware for something that cannot exist
+                # and see whether it comes back anyway. Job numbers only.
+                out["tms"] = tms.falsify_filters(client)
             elif mode == "get":
                 # Read-only, allowlisted passthrough for shape discovery (never exposes creds).
                 path = request.args.get("path", "/jobs?limit=3")

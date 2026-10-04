@@ -11,10 +11,14 @@ What we know about the instance (moveware-api-integration-guide.md, mw_live.py):
     company id moved into the URL path (…/64000/api = LIVE, …/08800/api = TEST).
     The live host is literally named rest.moveware-test.app — vendor naming, not
     the test DB. ~2 s per call.
-  • `offset` on /jobs is a 1-indexed PAGE number, feed is oldest-first
-  • filtered lists silently cap at ~50–150 rows → walk small date slices;
-    `updatedAfter` returns 400 on Thelsa's instance, `createdAfter/Before` work
-    (measured 2026-09-08 on the test DB) — so the window is by *created* date
+  • `page` on /jobs is the 1-indexed page number (`offset` was v1). The
+    unfiltered feed is OLDEST-first; with `status=W` it is NEWEST-first.
+  • NO date filter works. `createdAfter=2030-01-01` returns the same 2016 rows
+    as the unfiltered call — accepted and silently ignored (falsified
+    2026-10-04, superseding the 2026-09-08 note that said it worked). `status`
+    IS honoured: an impossible status returns nothing. Everything else is
+    filtered in this module. See falsify_filters() — re-run it after any
+    Moveware upgrade rather than trusting this paragraph.
   • list rows carry only 2-letter country codes for origin/destination — that is
     exactly what identifies a cross-border job (US↔MX) before paying for detail
   • detail carries measurements[] (volume/weight), extras[] (dtpacking,
@@ -170,6 +174,46 @@ def _created(row: dict):
         if c:
             return parse_date(c)
     return parse_date(row.get("created") or row.get("createdDate"))
+
+
+# ── job numbers and sequels (Moveware Data Capture Guide §2) ─────────────────
+_SEQUEL = re.compile(r"^(\d+)([A-Z]{1,2})$")
+
+
+def display_number(row: dict, detail: dict | None = None) -> str:
+    """The number staff see — `111135A` — not Moveware's internal id.
+
+    `id` and `number` are different numbers, and they come apart the moment a
+    file grows a sequel: job id 111145 IS the job staff know as 111135A, and
+    every id after it is offset from its display number. Publishing the id put
+    a reference on the board that nobody can find in Moveware and that no
+    remisión or SIT manifest carries. Measured on the live feed 2026-10-04:
+    111171→111170A, 111145→111135A, 105492→105142A.
+    """
+    for src in (detail or {}, row or {}):
+        if not isinstance(src, dict):
+            continue
+        for key in ("number", "numberOnly", "fileNumber"):
+            v = _s(src.get(key))
+            if v:
+                return v
+    return str((row or {}).get("id") or "")
+
+
+def base_number(number: str) -> str:
+    """`111135A` → `111135`: the FILE behind a removal.
+
+    A file can carry several removals — 412042, 412042A, 412042W. Each is a real
+    move with its own status, dates and volume, so the board counts removals.
+    The file is what was quoted once, so conversion counts files. Both numbers
+    are reported; neither is 'the' count.
+    """
+    m = _SEQUEL.match(_s(number).upper())
+    return m.group(1) if m else _s(number)
+
+
+def is_sequel(number: str) -> bool:
+    return bool(_SEQUEL.match(_s(number).upper()))
 
 
 def _endpoints(row: dict) -> tuple:
@@ -458,6 +502,58 @@ def _activity_dates(obj: dict):
     return get
 
 
+def _merged_dates(row: dict, detail: dict | None):
+    """activityDates from the list row merged with the detail's, detail winning.
+
+    Guide §3. The old code read `_activity_dates(d) or _activity_dates(row)`,
+    but `_activity_dates` always returns a callable, so the `or` could never
+    fire and the list row was never consulted at all. That mattered: on this
+    instance the LIST ROW carries created, survey, pack, uplift, delivery,
+    followup, estimatedMove and estimatedDelivery (measured 2026-10-04), so any
+    date the detail happened to omit was being read as blank — and a blank
+    uplift is the difference between a file that can be planned onto a truck
+    and one that silently cannot.
+    """
+    det = _activity_dates(detail or {})
+    lst = _activity_dates(row or {})
+
+    def get(name: str):
+        return det(name) or lst(name)
+    return get
+
+
+# Dates that mean "this file is still moving", whatever year it was opened.
+ACTIVITY_DATES = ("uplift", "pack", "delivery", "estimatedMove", "estimatedDelivery")
+
+
+def keep_active(row: dict, window_start: dt.date) -> str:
+    """Why this row stays in the window, or "" to drop it (guide §4).
+
+    Moveware's own Removals report selects by COLLECT date, not by when the file
+    was opened, so a window keyed on "opened in the last N days" misses every
+    older file that moves this quarter — and an old file still moving is exactly
+    the kind of job that falls through the cracks this board exists to catch.
+
+    Thelsa's twist: `uplift` is empty on almost every row (the coordinators do
+    not record it), so SELECTING by uplift as the guide's rule 2 says would
+    discard nearly the whole feed. The union is the honest reading here — opened
+    in the window, OR any activity date in the window — which can only widen
+    what we see, never narrow it. A row with no opened date is kept: dropping it
+    would lose it in silence.
+    """
+    opened = _created(row)
+    if not opened:
+        return "no opened date"
+    if opened >= window_start:
+        return "in window"
+    ad = _activity_dates(row)
+    for key in ACTIVITY_DATES:
+        d = ad(key)
+        if d and d >= window_start:
+            return "old file still moving"
+    return ""
+
+
 def _place(v) -> str:
     """Best human-readable place from a list value or a detail address object."""
     if isinstance(v, dict):
@@ -504,7 +600,7 @@ def stage_for(row: dict, detail: dict | None, today: dt.date) -> tuple[Stage, li
     # `uplift` is usually EMPTY and `pack` carries the move-out date — the audit
     # tool (mw_live.py) has always read it that way. Reading only upliftStart,
     # as the v1 mapper did, is why every V2 job looked like it had no dates.
-    ad = _activity_dates(d) or _activity_dates(row)
+    ad = _merged_dates(row, d)
     uplift = (ad("uplift") or ad("pack") or ad("departure")
               or _mw_date(d.get("upliftStart")) or _mw_date(d.get("pack"))
               or _mw_date(row.get("uplift")) or _mw_date(ex.get("dtpacking"))
@@ -601,7 +697,10 @@ def build_shipment(row: dict, detail: dict | None, *, today: dt.date | None = No
     stage, flags, dates = stage_for(row, d, today)
     flags = flags + date_gap_flags(dates, stage, today)
     list_id = str(row.get("id") or "")
-    display = str(d.get("id") or list_id)
+    # The number staff can actually search for in Moveware (guide §2) — NOT the
+    # internal id, which these two lines used to publish.
+    display = display_number(row, d)
+    file_number = base_number(display)
     billing = d.get("billing") if isinstance(d.get("billing"), dict) else {}
     mm = d.get("moveManager") if isinstance(d.get("moveManager"), dict) else {}
     # The list row's `name` is the transferee; `billing.name` is who pays —
@@ -642,8 +741,7 @@ def build_shipment(row: dict, detail: dict | None, *, today: dt.date | None = No
             crew_note = str(n["comment"]).strip()
     revenue = _job_value(d, row, ex)
     currency = _job_currency(d, row)
-    booked_on = (_activity_dates(d)("booked") or _activity_dates(row)("booked")
-                 or _created(d) or _created(row))
+    booked_on = (_merged_dates(row, d)("booked") or _created(d) or _created(row))
     # Books FX needs a month to price the job at. Bill's rule (2026-09-16):
     # exports key off the pack/load date, imports off the delivery date — the
     # point at which the move actually earns. Open files often have neither yet,
@@ -667,8 +765,7 @@ def build_shipment(row: dict, detail: dict | None, *, today: dt.date | None = No
         status_flags=flags, updated_at=updated, url="",
         assignees=[x for x in [_s(mm.get("name")) or _s(row.get("moveManager"))] if x],
         process_format="Moveware", current_step="", steps_done=0, steps_total=0,
-        milestones={"booked": (_activity_dates(d)("booked") or _activity_dates(row)("booked")
-                               or _created(d) or _created(row) or _mw_date(row.get("created"))),
+        milestones={"booked": (booked_on or _mw_date(row.get("created"))),
                     "uplift": dates["uplift"],
                     "crossed": dates.get("clearance") if dates.get("clearance")
                                and dates["clearance"] <= today else None,
@@ -686,7 +783,21 @@ def build_shipment(row: dict, detail: dict | None, *, today: dt.date | None = No
         extra={"direction": dirn, "veracruz_leg": sea_leg or "",
                "is_sea": bool(sea_leg), "port": VERACRUZ_PORT if sea_leg else "",
                "method": method, "job_type": _s(row.get("jobType")), "service": svc,
-               "payer": payer, "branch": _s(d.get("branchName")), "branch_code": _s(d.get("branchCode")),
+               "payer": payer, "branch": _s(d.get("branchName")),
+               # branchCode is on the LIST ROW as well as the detail, and it is
+               # how a job is placed in a branch without a server-side filter
+               # (guide §5.3 — Moveware's own `branch=` filter silently drops
+               # records, so the filtering is done in our code or not at all).
+               "branch_code": _s(d.get("branchCode")) or _s(row.get("branchCode")),
+               # Moveware's internal id, kept beside the display number so a job
+               # can still be traced in the API after the board stopped showing
+               # the id as if it were the job number.
+               "mw_id": list_id, "file_number": file_number,
+               "is_sequel": is_sequel(display),
+               # The rep is `salesRepresentative` and nothing else (guide §7):
+               # no falling back to the move manager or to whoever keyed it in.
+               "sales_rep": _role(d, "salesRepresentative"),
+               "entered_by": _s(d.get("createdBy") or row.get("createdBy")),
                "customer_type": _s(d.get("customerType")), "currency": _s(d.get("currency")),
                "coordinator_email": _s(mm.get("email")), "items": meas["items"],
                "origin_country": _country(oloc) or _country(row.get("origin")),
@@ -720,10 +831,17 @@ def fetch_tms_shipments(client: MovewareClient | None = None, *, days: int | Non
     slice_days = slice_days or int(os.environ.get("TMS_SLICE_DAYS", "7") or 7)
     workers = workers or int(os.environ.get("TMS_WORKERS", "3") or 3)
     max_details = max_details if max_details is not None else int(os.environ.get("TMS_MAX_DETAILS", "150") or 150)
+    # Read FURTHER BACK than the window, then keep an older file only if it is
+    # still moving (guide §3/§4). This is close to free on this feed: the Won
+    # list runs about 0.8 jobs a day, so a year of look-back is ~28 pages.
+    lookback = int(os.environ.get("TMS_LOOKBACK_DAYS", "0") or 0) or max(days, 365)
+    branches = {b for b in (os.environ.get("TMS_BRANCHES", "") or "").replace(" ", "").upper().split(",") if b}
     prog = progress if progress is not None else {}
-    diag: dict = {"env": client.env, "base_url": client.base_url, "days": days, "slices": [],
+    diag: dict = {"env": client.env, "base_url": client.base_url, "days": days,
+                  "lookback_days": lookback, "slices": [],
                   "rows_seen": 0, "cross_border": 0, "by_direction": {}, "by_status": {},
-                  "by_lane": {}, "details_fetched": 0, "detail_errors": [], "errors": client.errors}
+                  "by_lane": {}, "by_branch": {}, "details_fetched": 0, "detail_errors": [],
+                  "errors": client.errors}
 
     # ── the walk (V2) ────────────────────────────────────────────────────────
     # V2 ignores every date filter we tried (createdAfter/createdFrom/
@@ -753,6 +871,7 @@ def fetch_tms_shipments(client: MovewareClient | None = None, *, days: int | Non
     # budget, or when pages stop yielding anything new.
     seen: dict[str, dict] = {}
     cutoff = today - dt.timedelta(days=days)
+    horizon = today - dt.timedelta(days=lookback)
     max_pages = int(os.environ.get("TMS_MAX_PAGES", "40") or 40)
     page_limit = min(page_limit, int(os.environ.get("TMS_PAGE_LIMIT", "10") or 10))
     stopped = "page budget"
@@ -782,10 +901,14 @@ def fetch_tms_shipments(client: MovewareClient | None = None, *, days: int | Non
         diag["slices"].append({"page": page, "rows": len(rows), "new": fresh,
                                "oldest": oldest.isoformat() if oldest else None})
         prog["slices_done"] = len(diag["slices"])
-        # The feed is newest-first, so once a whole page predates the window
-        # every later page does too.
-        if oldest and oldest < cutoff:
-            stopped = "reached the window"
+        # The feed is newest-first by OPENED date, so once a whole page predates
+        # the look-back horizon every later page does too. The stop is at the
+        # horizon, not at the window: the pages in between are where the old
+        # files that are still moving live (guide §4). The created order is also
+        # not strictly monotonic — page 3 ran 09-18, 09-15, 09-14, 09-11, 09-15
+        # — so stopping at the window edge itself would clip real jobs.
+        if oldest and oldest < horizon:
+            stopped = "reached the look-back horizon"
             break
         # If `page` ever stops working the way `offset` already did, every page
         # is the same page. Notice that instead of re-reading it 40 times.
@@ -796,10 +919,36 @@ def fetch_tms_shipments(client: MovewareClient | None = None, *, days: int | Non
 
     diag["pages_walked"] = len(diag["slices"])
     diag["stopped_because"] = stopped
-    # Drop anything older than the window — the last page straddles the cutoff.
-    for rid in [k for k, r in seen.items()
-                if (_created(r) or today) < cutoff]:
-        seen.pop(rid, None)
+    # A walk cut short by the page budget or an HTTP error has NOT seen the
+    # whole window, and the page must say so rather than implying coverage
+    # it does not have (guide §12).
+    diag["complete"] = stopped in ("end of feed", "reached the look-back horizon")
+    diag["rows_scanned"] = len(seen)
+    # Keep by activity, not only by when the file was opened (guide §4).
+    dropped_older = 0
+    old_still_moving = 0
+    for rid in list(seen):
+        why = keep_active(seen[rid], cutoff)
+        if not why:
+            seen.pop(rid, None)
+            dropped_older += 1
+        elif why == "old file still moving":
+            old_still_moving += 1
+    diag["dropped_as_older"] = dropped_older
+    diag["old_files_still_moving"] = old_still_moving
+    # Branch isolation in our own code, never the server's filter (guide §5.3).
+    # Empty TMS_BRANCHES means every branch is in scope — Thelsa's codes (SLU,
+    # MEU, MTU, GUU, QRU, REU, TOU, VIU…) all look like its own offices, but
+    # that is for Bill to confirm before anything is excluded on it.
+    dropped_branch = 0
+    for rid in list(seen):
+        code = _s(seen[rid].get("branchCode")).upper()
+        diag["by_branch"][code or "?"] = diag["by_branch"].get(code or "?", 0) + 1
+        if branches and code not in branches:
+            seen.pop(rid, None)
+            dropped_branch += 1
+    diag["branches_in_scope"] = sorted(branches) or "all"
+    diag["dropped_other_branch"] = dropped_branch
     diag["rows_seen"] = len(seen)
     xb = []
     for r in seen.values():
@@ -827,6 +976,14 @@ def fetch_tms_shipments(client: MovewareClient | None = None, *, days: int | Non
                 diag["veracruz"] = diag.get("veracruz", 0) + 1
     diag["cross_border"] = len(xb) - diag.get("veracruz", 0)
     diag["kept"] = len(xb)
+    # Two counts, both correct (guide §2). A removal is a move — a file with
+    # three sequels is three trucks to plan. A file is the opportunity that was
+    # quoted once. Reporting one number as if it were the other is how a board
+    # and a Moveware report end up disagreeing with nobody able to say why.
+    _numbers = [display_number(r) for r in xb]
+    diag["removals"] = len(_numbers)
+    diag["files"] = len({base_number(n) for n in _numbers})
+    diag["sequels"] = sum(1 for n in _numbers if is_sequel(n))
     diag["by_lane"] = dict(sorted(diag["by_lane"].items(), key=lambda kv: -kv[1])[:12])
     # V2: dateModified. v1: lastUpdated. Sorting on a key that no longer exists
     # would have quietly handed max_details the wrong jobs.
@@ -868,19 +1025,28 @@ def fetch_tms_shipments(client: MovewareClient | None = None, *, days: int | Non
 
 
 def probe(client: MovewareClient | None = None, sample: int = 3) -> dict:
-    """Shape discovery for /crossborder/raw?tms=probe — a handful of calls only."""
+    """Shape discovery for /crossborder/raw?tms=probe — a handful of calls only.
+
+    `createdAfter` used to be sent here as though it narrowed the feed. It does
+    not: asked for jobs created after 2030-01-01 the server returned the same
+    2016 rows as the unfiltered call (measured 2026-10-04). It was never doing
+    harm — the rows were filtered again in our own code — but a filter that
+    looks like it works is the thing that eventually gets trusted.
+    """
     client = client or MovewareClient()
     out: dict = {"env": client.env, "base_url": client.base_url, "have_creds": client.have_creds()}
     try:
-        since = (dt.date.today() - dt.timedelta(days=14)).isoformat()
-        rows = client.jobs(page=1, limit=sample, createdAfter=since)
+        rows = client.jobs(page=1, limit=sample, status=",".join(sorted(ACTIVE_STATUSES)))
         out["recent_rows"] = rows
         out["row_keys"] = sorted(rows[0].keys()) if rows else []
-        xb = [r for r in client.jobs(page=1, limit=50, createdAfter=since) if direction(r)]
-        out["cross_border_in_last_14_days"] = len(xb)
+        out["activity_dates_on_row"] = sorted((rows[0].get("activityDates") or {}).keys()) if rows else []
+        wide = client.jobs(page=1, limit=50, status=",".join(sorted(ACTIVE_STATUSES)))
+        xb = [r for r in wide if direction(r) or veracruz_leg(r)]
+        out["cross_border_on_page_1"] = len(xb)
         out["lanes"] = {}
         for r in xb:
-            lane = f"{_country(r.get('origin'))}→{_country(r.get('destination'))}"
+            _o, _d = _endpoints(r)
+            lane = f"{_country(_o) or '?'}→{_country(_d) or '?'}"
             out["lanes"][lane] = out["lanes"].get(lane, 0) + 1
         if xb:
             d = client.job(str(xb[0]["id"]))
@@ -888,5 +1054,55 @@ def probe(client: MovewareClient | None = None, sample: int = 3) -> dict:
             out["sample_shipment"] = build_shipment(xb[0], d, env=client.env).to_dict()
     except MovewareError as exc:
         out["error"] = str(exc)
+    out["requests_made"] = client.requests_made
+    return out
+
+
+def falsify_filters(client: MovewareClient | None = None) -> dict:
+    """Ask the server for something that cannot exist, and see what comes back.
+
+    The standing rule from the data-capture guide: a filter is not working
+    because it returns rows, it is working because an impossible request
+    returns none. Everything the board counts rests on which of these are
+    real, so this is a permanent check, not a one-off — run it after any
+    Moveware upgrade. Job numbers only; no names, no money (guide §12).
+
+    Measured 2026-10-04 on the live database:
+      createdAfter=2030-01-01  → IGNORED  (returned the same 2016 rows)
+      status=ZZZZ              → honoured (0 rows)
+      status=W                 → honoured, and reverses the feed order:
+                                 unfiltered is oldest-first, status=W is
+                                 newest-first. The whole walk depends on that.
+    """
+    client = client or MovewareClient()
+    out: dict = {"env": client.env, "checked": dt.date.today().isoformat(), "filters": {}}
+
+    def ids(path_kwargs: dict) -> list[str]:
+        return [str(r.get("id")) for r in client.jobs(page=1, limit=5, **path_kwargs)]
+
+    try:
+        plain = ids({})
+        out["filters"]["createdAfter=2030-01-01"] = {
+            "rows": len(ids({"createdAfter": "2030-01-01"})),
+            "same_as_unfiltered": ids({"createdAfter": "2030-01-01"}) == plain,
+            "verdict": "ignored — do not use",
+        }
+        impossible = ids({"status": "ZZZZ"})
+        won = client.jobs(page=1, limit=5, status=",".join(sorted(ACTIVE_STATUSES)))
+        out["filters"]["status"] = {
+            "impossible_status_rows": len(impossible),
+            "won_rows": len(won),
+            "verdict": "honoured" if not impossible and won else "SUSPECT — re-measure before trusting",
+        }
+        out["feed_order"] = {
+            "unfiltered_first_opened": (_created(client.jobs(page=1, limit=1)[0]).isoformat()
+                                        if client.jobs(page=1, limit=1) else None),
+            "won_first_opened": _created(won[0]).isoformat() if won and _created(won[0]) else None,
+            "note": "unfiltered is oldest-first; status=W is newest-first",
+        }
+    except MovewareError as exc:
+        out["error"] = str(exc)
+    except (IndexError, AttributeError) as exc:  # a shape change, not an outage
+        out["error"] = f"{type(exc).__name__}: {exc}"
     out["requests_made"] = client.requests_made
     return out

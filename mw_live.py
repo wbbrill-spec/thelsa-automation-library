@@ -496,6 +496,35 @@ def _weight_from_measurements(measurements) -> float | None:
     return None
  
  
+_CUFT_PER_M3 = 35.3147
+
+
+def _v2_volume_weight(src: dict):
+    """V2 carries size on the job detail as `measures[]`, each line with
+    `volume.{net,gross}.{m3,f3}` and `weight.{net,gross}.{kg,lb}` (per the Moveware
+    Data Capture Guide §8). Prefer NET (what ships), fall back to gross; take the
+    metric figure, else convert f3->m3 / lb->kg. Returns (volume_m3, weight_kg),
+    each None if unmeasured (never 0, so blanks don't drag averages)."""
+    vol = wt = None
+    for m in (src.get("measures") if isinstance(src, dict) else None) or []:
+        if not isinstance(m, dict):
+            continue
+        v, w = m.get("volume"), m.get("weight")
+        if vol is None and isinstance(v, dict):
+            for side in ("net", "gross"):
+                s = v.get(side) if isinstance(v.get(side), dict) else {}
+                n = _num(s.get("m3")) or (round(_num(s.get("f3")) / _CUFT_PER_M3, 2) if _num(s.get("f3")) else 0)
+                if n:
+                    vol = round(n, 2); break
+        if wt is None and isinstance(w, dict):
+            for side in ("net", "gross"):
+                s = w.get(side) if isinstance(w.get(side), dict) else {}
+                n = _num(s.get("kg")) or (round(_num(s.get("lb")) * 0.4536, 1) if _num(s.get("lb")) else 0)
+                if n:
+                    wt = round(n, 1); break
+    return vol, wt
+
+
 def _map_job(job: dict) -> dict | None:
     job_id = _first(job, "id", "jobId", "jobNumber", "jobFile", "externalId")
     if not job_id:
@@ -531,6 +560,19 @@ def _map_job(job: dict) -> dict | None:
     except Exception:
         detail = {}
     src = detail or job
+
+    # Display number vs internal id (Data Capture Guide §2): `number`/`numberOnly`
+    # is what staff see and what coordinator emails quote (e.g. 412042W on a sequel);
+    # `id` is Moveware's internal integer, never shown. Show the display number
+    # everywhere; keep the internal id for tracing/gap-fill. For most Thelsa files the
+    # two are equal, but sequels diverge.
+    display_number = str(_first(src, "number", "numberOnly", "fileNumber", default="")
+                         or _first(job, "number", "numberOnly", "fileNumber", default="")
+                         or job_id)
+    branch = _code_text(_first(src, "branchCode", "branch", default="")
+                        or _first(job, "branchCode", "branch", default=""))
+    # Size: net volume (m3) and weight (kg) from the V2 measures[] (guide §8).
+    est_vol, est_wt = _v2_volume_weight(src)
 
     # Client / transferee name.
     if not client:
@@ -718,7 +760,10 @@ def _map_job(job: dict) -> dict | None:
     status = str(_code_text(_jstat)).strip().upper()
 
     return {
-        "job": job_id,
+        "job": display_number,     # display number staff/emails use (guide §2)
+        "job_id": job_id,          # Moveware internal integer id (tracing/gap-fill)
+        "number": display_number,
+        "branch": branch,
         "client": client or "",
         "mode": mode,
         "status": status,

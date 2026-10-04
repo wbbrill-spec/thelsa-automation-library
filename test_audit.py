@@ -816,3 +816,37 @@ def test_v2_coordinator_ignores_external_client_email(monkeypatch):
     monkeypatch.setattr(mw, "_get", lambda path: job if path == "/jobs/111135" else {})
     m = mw._map_job({"id": "111135", "status": "W"})
     assert m["coordinator_email"] == ""   # external client is never taken as coordinator
+
+
+# ── Data Capture Guide incorporation (2026-10-04) ────────────────────────────
+def test_v2_display_number_and_branch_and_measures(monkeypatch):
+    """Guide §2/§8: show the display number (number/numberOnly), keep the internal
+    id for tracing, capture branchCode, and read net volume/weight from measures[]."""
+    job = {
+        "id": 111136, "number": "111136A", "numberOnly": "111136A", "status": "W",
+        "branchCode": "MEM", "jobValue": 5000,
+        "activityDates": {"created": {"date": "2026-09-14"}},
+        "measures": [{"volume": {"net": {"m3": 25, "f3": 883}, "gross": {"m3": 26}},
+                      "weight": {"net": {"kg": 2603, "lb": 5739}}}],
+        "roles": {},
+    }
+    monkeypatch.setattr(mw, "_get", lambda path: job if path == "/jobs/111136" else {})
+    m = mw._map_job({"id": "111136", "number": "111136A", "status": "W"})
+    assert m["job"] == "111136A"      # display number (sequel letter kept)
+    assert m["job_id"] == "111136"    # internal id preserved for tracing
+    assert m["number"] == "111136A"
+    assert m["branch"] == "MEM"
+    assert m["est_vol"] == 25         # net m3 from measures[]
+    assert m["est_wt"] == 2603        # net kg from measures[]
+
+
+def test_v2_volume_weight_converts_imperial_when_metric_absent():
+    src = {"measures": [{"volume": {"net": {"f3": 3531.47}}, "weight": {"net": {"lb": 1000}}}]}
+    vol, wt = mw._v2_volume_weight(src)
+    assert vol == 100.0           # 3531.47 f3 / 35.3147
+    assert wt == 453.6            # 1000 lb * 0.4536
+
+
+def test_v2_volume_weight_blank_when_unmeasured():
+    assert mw._v2_volume_weight({"measures": []}) == (None, None)
+    assert mw._v2_volume_weight({}) == (None, None)

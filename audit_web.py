@@ -1168,7 +1168,7 @@ TEMPLATE = r"""<!DOCTYPE html>
   {% else %}
   <div class="row">
     <div class="tile" style="flex:1;min-width:240px"><div class="label">Revenue (checked so far)</div><div class="value num">{{ "{:,.0f}".format(m.tot_revenue) }}</div><div class="sub">invoiced where billed, else quoted · {{ "{:,}".format(m.sample_n) }} files</div></div>
-    <div class="tile" style="flex:2;min-width:320px;background:var(--tint)"><div class="label" style="color:var(--rust-dark)">Cost &amp; profit — not available yet</div><div class="sub" style="margin-top:6px;line-height:1.5">Moveware RestV1 does not expose supplier/creditor cost (the account endpoint returns client receivables, not what Thelsa pays agents/carriers). Profit and margin are hidden rather than shown as fabricated zeros. Restoring them needs a real cost source — RestV2 or a confirmed creditor endpoint.</div></div>
+    <div class="tile" style="flex:2;min-width:320px;background:var(--tint)"><div class="label" style="color:var(--rust-dark)">Cost &amp; profit — not available yet</div><div class="sub" style="margin-top:6px;line-height:1.5">The Moveware API does not expose supplier/creditor cost yet (confirmed with MoveConnect): the option/charge lines carry sell values only, and there is no per-job cost endpoint. Profit and margin are hidden rather than shown as fabricated zeros. MoveConnect is scoping a cost endpoint for us; margin turns on automatically once that data is available.</div></div>
   </div>
   {% endif %}
   <h2>Workload &amp; Pipeline</h2>

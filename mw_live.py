@@ -632,16 +632,26 @@ def _map_job(job: dict, prefetched: dict | None = None) -> dict | None:
                     coordinator_email = em
                     break
         # 2) any @thelsa.com email on the file (the client is never @thelsa.com).
+        #    Do NOT adopt that role's person-name — on these files it is usually the
+        #    CLIENT's name with a Thelsa handler's email attached. Take the email only;
+        #    the readable name is derived from the email below.
         if not coordinator_email:
             for r in role_rows:
                 em = (_first(r, "email", default="") or "").strip()
                 if em.lower().endswith("@thelsa.com"):
                     coordinator_email = em
-                    if not coordinator:
-                        nm = (f"{_first(r, 'firstName', default='') or ''} "
-                              f"{_first(r, 'lastName', default='') or ''}").strip()
-                        coordinator = nm or coordinator
                     break
+
+    # Never show the client as the coordinator. If the resolved name matches the
+    # client (bad role data), drop it; then derive a readable handler name from the
+    # @thelsa.com email (e.g. maria.gonzalez@ -> "Maria Gonzalez") rather than a
+    # client name. No @thelsa.com email -> genuinely "Unassigned".
+    if coordinator and client and coordinator.strip().lower() == client.strip().lower():
+        coordinator = ""
+    if not coordinator and coordinator_email.lower().endswith("@thelsa.com"):
+        _local = coordinator_email.split("@")[0]
+        _parts = [p for p in re.split(r"[._\-]+", _local) if p]
+        coordinator = " ".join(p.capitalize() for p in _parts) if _parts else coordinator_email
 
     # Options → accepted-option sell + sell charge lines (quote scope). Only the
     # charge-line sub-calls are gated by AUDIT_DEEP_LINES (they add calls/file);

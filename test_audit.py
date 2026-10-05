@@ -904,3 +904,25 @@ def test_gapfill_cycle_fills_hidden_and_remembers_foreign(monkeypatch):
     assert mw._AUDIT["gap_foreign"] >= 1              # the empty ids were remembered
     assert len(mw._AUDIT["foreign_ids"]) >= 1
     _reset_gap_state()
+
+
+def test_v2_coordinator_never_shows_client_name(monkeypatch):
+    """The coordinator column must never show the client's own name. When the only
+    @thelsa.com email is attached to a client-named role, derive the handler name
+    from the email instead (maria.gonzalez@ -> 'Maria Gonzalez')."""
+    job = {
+        "id": 110921, "status": "W", "jobValue": 5000,
+        "name": "Paul Andersen",
+        "activityDates": {"created": {"date": "2026-09-01"}},
+        "roles": {
+            "coordinator": {"firstName": "", "lastName": "", "email": ""},
+            "originClient": {"firstName": "Paul", "lastName": "Andersen",
+                             "email": "maria.gonzalez@thelsa.com"},
+        },
+    }
+    monkeypatch.setattr(mw, "_get", lambda path: job if path == "/jobs/110921" else {})
+    m = mw._map_job({"id": "110921", "status": "W"})
+    assert m["client"] == "Paul Andersen"
+    assert m["coordinator"] != "Paul Andersen"          # never the client
+    assert m["coordinator"] == "Maria Gonzalez"          # derived from the handler email
+    assert m["coordinator_email"] == "maria.gonzalez@thelsa.com"

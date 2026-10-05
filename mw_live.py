@@ -525,7 +525,10 @@ def _v2_volume_weight(src: dict):
     return vol, wt
 
 
-def _map_job(job: dict) -> dict | None:
+def _map_job(job: dict, prefetched: dict | None = None) -> dict | None:
+    # `prefetched` is the GET /jobs/{id} detail if the caller already has it
+    # (the gap-fill reads the detail to decide tenant vs foreign, then passes it
+    # here to avoid fetching it twice).
     job_id = _first(job, "id", "jobId", "jobNumber", "jobFile", "externalId")
     if not job_id:
         return None
@@ -554,11 +557,14 @@ def _map_job(job: dict) -> dict | None:
     est_vol = est_wt = act_wt = None
 
     detail = {}
-    try:
-        d = _get(f"/jobs/{job_id}") or {}
-        detail = _first(d, "data", default=d) or d
-    except Exception:
-        detail = {}
+    if prefetched is not None:
+        detail = _first(prefetched, "data", default=prefetched) or prefetched
+    else:
+        try:
+            d = _get(f"/jobs/{job_id}") or {}
+            detail = _first(d, "data", default=d) or d
+        except Exception:
+            detail = {}
     src = detail or job
 
     # Display number vs internal id (Data Capture Guide §2): `number`/`numberOnly`
@@ -887,6 +893,11 @@ _AUDIT = {
     "last_full_at": None, # unix time the last COMPLETE scan finished (persisted)
     "saved_at": None,     # unix time the snapshot was last written to disk
     "refetch": False,     # True during a scheduled refresh (re-fetch cached files)
+    # Gap-fill (Data Capture Guide §5.1): the /jobs list hides jobs (lost/cancelled
+    # and some booked), so after the list backfill we read the id range directly.
+    "foreign_ids": set(), # ids that 404/aren't tenant jobs — remembered, skipped next time
+    "gapfill_done": False,
+    "gap_read": 0, "gap_kept": 0, "gap_foreign": 0,
 }
 _AUDIT_LOCK = threading.Lock()
 _AUDIT_THREAD = None
@@ -902,12 +913,87 @@ _AUDIT_PAGE = _FEED_PAGE_MAX  # ids fetched + classified per cycle (V2 caps ~18)
 _AUDIT_WORKERS = 12       # concurrent per-file fetches (I/O-bound; GIL released)
 _AUDIT_BATCH = _AUDIT_PAGE  # back-compat alias (per-cycle deep-check count)
 
+# ── Gap-fill: read the jobs the /jobs list hides, by id (Data Capture Guide §5.1)
+# The list omits most lost/cancelled jobs and some booked ones. We open each id in
+# a band below the newest id that the list didn't already give us. For company
+# 64000 (TMS-only) a non-tenant id simply 404s, so "foreign" == not found — no
+# branch isolation needed. Runs in the background after the list backfill, bounded
+# per cycle, persisted, and skips ids already known foreign. Kill-switch: set
+# AUDIT_GAPFILL=0 in the env to disable.
+_GAPFILL = os.environ.get("AUDIT_GAPFILL", "1") == "1"
+_GAP_SPAN = int(os.environ.get("AUDIT_GAP_SPAN", "4000") or 4000)   # ids below max to probe
+_GAP_CHUNK = int(os.environ.get("AUDIT_GAP_CHUNK", "60") or 60)     # ids per cycle (gentle on the beta)
+_GAP_WORKERS = min(_AUDIT_WORKERS, 8)   # Dave: "don't hammer it" — cap gap concurrency
+
 
 def _safe_map(job):
     try:
         return _map_job(job)
     except Exception:
         return None
+
+
+def _map_gap(jid_int: int):
+    """Read one id directly and classify it. Returns (status, mapped):
+    'kept' with the mapped record for a real tenant job, else 'foreign' (a 404 or a
+    payload with no real job fields — on 64000 that means the id isn't a TMS job)."""
+    jid = str(jid_int)
+    try:
+        d = _get(f"/jobs/{jid}")
+    except Exception:
+        return ("foreign", None)
+    job = _first(d, "data", default=d) or d
+    if not isinstance(job, dict):
+        return ("foreign", None)
+    # A real job carries a status and/or activityDates and/or a name. An empty /
+    # not-found payload does not — so it can never be kept as a blank file.
+    real = bool(_first(job, "status", default="")
+                or job.get("activityDates")
+                or _first(job, "name", "fullname", "searchName", default=""))
+    if not real:
+        return ("foreign", None)
+    job.setdefault("id", jid)
+    try:
+        m = _map_job(job, prefetched=job)
+    except Exception:
+        return ("foreign", None)
+    return ("kept", m) if m else ("foreign", None)
+
+
+def _gapfill_cycle():
+    """One bounded pass of gap-fill (guide §5.1). Reads up to _GAP_CHUNK not-yet-seen
+    ids from the band [max_id - _GAP_SPAN, max_id], newest first; keeps real tenant
+    jobs (window-classified like the list walk), remembers the rest as foreign. Sets
+    gapfill_done when the band is exhausted."""
+    with _AUDIT_LOCK:
+        ids_have = {int(k) for k in _AUDIT["files"] if str(k).isdigit()}
+        foreign = set(_AUDIT["foreign_ids"])
+        old = {int(k) for k in _AUDIT["old_ids"] if str(k).isdigit()}
+    if not ids_have:
+        return
+    hi = max(ids_have)
+    lo = max(1, hi - _GAP_SPAN)
+    seen = ids_have | foreign | old
+    candidates = [i for i in range(hi, lo - 1, -1) if i not in seen][:_GAP_CHUNK]
+    if not candidates:
+        with _AUDIT_LOCK:
+            _AUDIT["gapfill_done"] = True
+        return
+    results = {}
+    with ThreadPoolExecutor(max_workers=_GAP_WORKERS) as ex:
+        futs = {ex.submit(_map_gap, i): i for i in candidates}
+        for fut in futs:
+            results[futs[fut]] = fut.result()
+    with _AUDIT_LOCK:
+        for i, (st, m) in results.items():
+            if st == "kept" and m:
+                _AUDIT["files"][str(i)] = _trim_historical(m) if _is_out_of_window(m) else m
+                _AUDIT["gap_kept"] += 1
+            else:
+                _AUDIT["foreign_ids"].add(i)
+                _AUDIT["gap_foreign"] += 1
+            _AUDIT["gap_read"] += 1
+        _AUDIT["cycles"] += 1
 
 # ── Rolling audit window ──────────────────────────────────────────────────
 # The audit only covers recent files: in the moving industry, over-charges on
@@ -1019,6 +1105,8 @@ def _persist_snapshot():
             "full_coverage": _FULL_COVERAGE,
             "window_days": _WINDOW_DAYS,
             "last_full_at": _AUDIT["last_full_at"],
+            "foreign_ids": list(_AUDIT["foreign_ids"]),
+            "gapfill_done": _AUDIT["gapfill_done"],
             "saved_at": time.time(),
         }
     try:
@@ -1070,6 +1158,10 @@ def _load_snapshot() -> bool:
         _AUDIT["last_full_at"] = snap.get("last_full_at") if wc else None
         _AUDIT["saved_at"] = snap.get("saved_at")
         _AUDIT["page"] = _auditor_last_page(total or 1)
+        # Gap-fill state: keep the remembered foreign ids (so later builds stay fast);
+        # only treat gap-fill as done if the book backfill is also complete.
+        _AUDIT["foreign_ids"] = set(snap.get("foreign_ids") or [])
+        _AUDIT["gapfill_done"] = bool(snap.get("gapfill_done")) and wc
     return True
 
 
@@ -1272,6 +1364,7 @@ def _auditor_loop():
                     complete = _AUDIT["window_complete"]   # full backfill done?
                     ready = _AUDIT["window_ready"]
                     last_full = _AUDIT["last_full_at"] or 0
+                    gap_done = _AUDIT["gapfill_done"]
                 if not complete:
                     # Backfill phase: walk the whole book, auditing every file.
                     with _AUDIT_LOCK:
@@ -1290,10 +1383,21 @@ def _auditor_loop():
                     elif (now_ready and not was_ready) or (cyc % _BACKFILL_PERSIST_EVERY == 0):
                         _persist_snapshot()
                     time.sleep(_AUDIT_SLEEP)
+                elif _GAPFILL and not gap_done:
+                    # List backfill done — now read the jobs the list hid, by id.
+                    _gapfill_cycle()
+                    with _AUDIT_LOCK:
+                        now_gap_done = _AUDIT["gapfill_done"]
+                        cyc = _AUDIT["cycles"]
+                    if now_gap_done or (cyc % _BACKFILL_PERSIST_EVERY == 0):
+                        _persist_snapshot()
+                    time.sleep(_AUDIT_SLEEP)
                 elif (time.time() - last_full) >= _REFRESH_SECONDS:
                     _refresh_recent()
                     with _AUDIT_LOCK:
                         _AUDIT["last_full_at"] = time.time()
+                        if _GAPFILL:
+                            _AUDIT["gapfill_done"] = False   # re-gap after a refresh
                     _persist_snapshot()
                 else:
                     time.sleep(_AUDIT_IDLE_SLEEP)
@@ -1418,6 +1522,15 @@ def audit_progress():
             "refreshing": _AUDIT["refetch"],
             "refresh_seconds": _REFRESH_SECONDS,
             "persisted": bool(_AUDIT["saved_at"]),
+            # Gap-fill (hidden jobs read by id, guide §5.1)
+            "gapfill_enabled": _GAPFILL,
+            "gapfill_done": _AUDIT["gapfill_done"],
+            "gap_read": _AUDIT["gap_read"],
+            "gap_kept": _AUDIT["gap_kept"],
+            "gap_foreign": _AUDIT["gap_foreign"],
+            "foreign_ids": len(_AUDIT["foreign_ids"]),
+            # "complete" per the guide: both the list backfill AND the gap-fill done.
+            "complete": bool(_AUDIT["window_complete"] and (_AUDIT["gapfill_done"] or not _GAPFILL)),
         }
 
 

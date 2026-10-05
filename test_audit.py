@@ -850,3 +850,57 @@ def test_v2_volume_weight_converts_imperial_when_metric_absent():
 def test_v2_volume_weight_blank_when_unmeasured():
     assert mw._v2_volume_weight({"measures": []}) == (None, None)
     assert mw._v2_volume_weight({}) == (None, None)
+
+
+# ── Gap-fill: read hidden jobs by id (guide §5.1) ────────────────────────────
+def _reset_gap_state():
+    mw._AUDIT.update({"files": {}, "old_ids": set(), "foreign_ids": set(),
+                      "gapfill_done": False, "gap_read": 0, "gap_kept": 0,
+                      "gap_foreign": 0, "cycles": 0})
+
+
+def test_map_gap_keeps_real_job_and_flags_404(monkeypatch):
+    real = {"id": 110999, "status": "W", "jobValue": 4000,
+            "activityDates": {"created": {"date": "2026-09-01"}}, "roles": {}}
+
+    def fake_get(path):
+        if path == "/jobs/110999":
+            return real
+        if path == "/jobs/110998":
+            raise urllib.error.HTTPError("u", 404, "Not Found", {}, None) if False else Exception("404")
+        return {}   # sub-calls (options/invoices/roles) and empty jobs
+
+    monkeypatch.setattr(mw, "_get", fake_get)
+    st, m = mw._map_gap(110999)
+    assert st == "kept" and m["job"] == "110999" and m["sell"] == 4000
+    st2, m2 = mw._map_gap(110998)       # raises -> foreign
+    assert st2 == "foreign" and m2 is None
+    st3, m3 = mw._map_gap(100000)       # returns {} (no real fields) -> foreign
+    assert st3 == "foreign" and m3 is None
+
+
+def test_gapfill_cycle_fills_hidden_and_remembers_foreign(monkeypatch):
+    import datetime as _dt
+    _reset_gap_state()
+    recent = (mw.dt.date.today() - _dt.timedelta(days=10)).isoformat()
+    # seed one known listed file so hi = 111000
+    mw._AUDIT["files"]["111000"] = {"job": "111000", "anchor": mw.dt.date.today()}
+
+    def fake_get(path):
+        if path == "/jobs/110999":    # a hidden, in-window booked job the list omitted
+            return {"id": 110999, "status": "W", "jobValue": 9000,
+                    "activityDates": {"uplift": {"date": recent}}, "roles": {}}
+        if path.startswith("/jobs/110999/"):
+            return {}
+        # every other id in the band: not a tenant job -> empty payload -> foreign
+        return {}
+
+    monkeypatch.setattr(mw, "_get", fake_get)
+    monkeypatch.setattr(mw, "_GAP_CHUNK", 50)   # small band per cycle for the test
+    mw._gapfill_cycle()
+    assert "110999" in mw._AUDIT["files"]              # hidden job recovered
+    assert mw._AUDIT["files"]["110999"]["sell"] == 9000
+    assert mw._AUDIT["gap_kept"] >= 1
+    assert mw._AUDIT["gap_foreign"] >= 1              # the empty ids were remembered
+    assert len(mw._AUDIT["foreign_ids"]) >= 1
+    _reset_gap_state()

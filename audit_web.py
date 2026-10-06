@@ -994,6 +994,75 @@ def audit_rawjob():
     return jsonify(out)
 
 
+@audit_bp.route("/audit/costcheck")
+def audit_costcheck():
+    """PUBLIC, read-only status check: has MoveWare's cost-fields update reached
+    Thelsa's beta yet? Returns ONLY API field names + one job number (no customer
+    names, no money, no credentials) — safe to be unauthenticated. Used by the
+    scheduled 11pm check. When `cost_fields_present` flips to true, the `cost_keys`
+    list names the exact fields to map into the audit's est/actual cost.
+
+    MoveConnect (Dave Pile, 2026-10-06) is releasing cost fields on
+    /jobs/{id}/options/{optId}/charges (and /options/{optId}?include=charges)."""
+    from flask import jsonify, request
+    import mw_live
+    # The known SELL-only charge keys before the update — anything outside this set
+    # (or any key naming cost/buy/creditor/supplier/purchase) is the new cost data.
+    SELL_KEYS = {"calctype", "currency", "currencysymbol", "datemodified", "description",
+                 "guid", "id", "links", "onetotal", "parent", "quantity", "rateexclusive",
+                 "rateinclusive", "ratetax", "taxcode", "valueexclusive", "valueinclusive"}
+    COST_HINT = ("cost", "buy", "creditor", "supplier", "purchase", "payable")
+    out = {"base_url": mw_live.BASE_URL, "checked_at": dt.datetime.utcnow().isoformat() + "Z",
+           "cost_fields_present": False, "cost_keys": [], "new_keys": [], "charge_keys": []}
+    try:
+        jid = (request.args.get("id") or "").strip()
+        if not jid:
+            # newest Won job (status=W is newest-first on this feed)
+            payload = mw_live._get_timed("/jobs?limit=10&page=1&offset=1&status=W", 12)
+            jobs = mw_live._page_jobs(payload)
+            jid = str((jobs[0] or {}).get("id")) if jobs else ""
+        out["checked_job"] = jid
+        if not jid:
+            out["error"] = "no job id found on the feed"
+            return jsonify(out)
+
+        def _charge_keys_from(charges):
+            ks = set()
+            for ch in (charges or []):
+                if isinstance(ch, dict):
+                    ks.update(ch.keys())
+            return ks
+
+        keys = set()
+        # Form 1: /jobs/{id}/options/{optId}/charges
+        try:
+            od = mw_live._get_timed(f"/jobs/{jid}/options", 10) or {}
+            opts = mw_live._first(od, "options", default=[]) or []
+            if opts:
+                oid = (opts[0] or {}).get("id")
+                out["option_id"] = oid
+                cd = mw_live._get_timed(f"/jobs/{jid}/options/{oid}/charges", 10) or {}
+                keys |= _charge_keys_from(mw_live._first(cd, "charges", default=[]) or [])
+                # Form 2: /jobs/{id}/options/{optId}?include=charges
+                try:
+                    inc = mw_live._get_timed(f"/jobs/{jid}/options/{oid}?include=charges", 10) or {}
+                    inc_opt = mw_live._first(inc, "options", default=[inc]) or [inc]
+                    inc_opt = inc_opt[0] if isinstance(inc_opt, list) and inc_opt else inc
+                    keys |= _charge_keys_from(mw_live._first(inc_opt, "charges", default=[]) or [])
+                except Exception as e:
+                    out["include_charges_error"] = str(e)[:140]
+        except Exception as e:
+            out["options_error"] = str(e)[:140]
+
+        out["charge_keys"] = sorted(keys)
+        out["new_keys"] = sorted(k for k in keys if k.lower() not in SELL_KEYS)
+        out["cost_keys"] = sorted(k for k in keys if any(h in k.lower() for h in COST_HINT))
+        out["cost_fields_present"] = bool(out["cost_keys"]) or bool(out["new_keys"])
+    except Exception as e:
+        out["error"] = str(e)[:200]
+    return jsonify(out)
+
+
 @audit_bp.route("/audit/v2feed")
 @_login_required
 def audit_v2feed():

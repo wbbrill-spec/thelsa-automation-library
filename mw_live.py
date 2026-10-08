@@ -588,6 +588,13 @@ def _map_job(job: dict, prefetched: dict | None = None) -> dict | None:
 
     # Sell = the job's headline quote value (V2 puts it on the job object).
     sell = _num(_first(src, "jobValue", "value", default=0))
+    # Per-file currency (guide §8: jobValue comes with `currency`). Kept as booked;
+    # audit_web converts to the display currency. Blank = unknown (AUDIT_DEFAULT_CCY).
+    try:
+        import fx as _fx
+        currency = _fx.normalize(_first(src, "currency", "currencyCode", default=None)) or ""
+    except Exception:
+        currency = ""
 
     # Coordinator (name + email) from job.roles.coordinator || moveManager — each
     # role is an object carrying firstName/lastName/email.
@@ -788,6 +795,7 @@ def _map_job(job: dict, prefetched: dict | None = None) -> dict | None:
         "act": round(actual_cost, 2),
         "sell": round(sell, 2),
         "inv_amt": round(invoiced_amt, 2),
+        "currency": currency,
         "invoiced": invoiced,
         "declared": declared,
         "ins": ins,

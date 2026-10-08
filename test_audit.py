@@ -926,3 +926,111 @@ def test_v2_coordinator_never_shows_client_name(monkeypatch):
     assert m["coordinator"] != "Paul Andersen"          # never the client
     assert m["coordinator"] == "Maria Gonzalez"          # derived from the handler email
     assert m["coordinator_email"] == "maria.gonzalez@thelsa.com"
+
+
+# ── Display currency + interim Finance cost ─────────────────────────────────
+import audit_web
+def _fx_stub(monkeypatch, tmp_path):
+    import fx
+    monkeypatch.setenv("FX_CACHE_PATH", str(tmp_path / "fx.json"))
+    monkeypatch.setattr(fx, "_fetch_yahoo", lambda c: {"MXN": 20.0})
+    monkeypatch.setenv("AUDIT_DISPLAY_CCY", "USD")
+    monkeypatch.setenv("AUDIT_DEFAULT_CCY", "MXN")
+    fx._mem.clear()
+
+
+def _fin_file(tmp_path, monkeypatch, files):
+    import json
+    p = tmp_path / "fin.json"
+    p.write_text(json.dumps({"currency": "MXN", "files": files}))
+    monkeypatch.setenv("FINANCE_COST_PATH", str(p))
+    audit_web._FIN_CACHE.clear()
+
+
+def test_normalize_converts_copies_not_cache(monkeypatch, tmp_path):
+    _fx_stub(monkeypatch, tmp_path)
+    _fin_file(tmp_path, monkeypatch, {})
+    src = [{"job": "111001", "currency": "MXN", "sell": 2000.0, "inv_amt": 1000.0,
+            "est": 0, "act": 0, "q_lines": [{"desc": "x", "value": 400.0}]},
+           {"job": "111002", "currency": "USD", "sell": 50.0, "inv_amt": 0.0, "est": 0, "act": 0},
+           {"job": "111003", "currency": "", "sell": 200.0, "inv_amt": 0.0, "est": 0, "act": 0}]
+    out = audit_web._normalize_and_cost(src)
+    assert out[0]["sell"] == 100.0 and out[0]["inv_amt"] == 50.0
+    assert out[0]["q_lines"][0]["value"] == 20.0
+    assert out[1]["sell"] == 50.0
+    assert out[2]["sell"] == 10.0            # blank currency -> AUDIT_DEFAULT_CCY (MXN)
+    assert src[0]["sell"] == 2000.0 and src[0]["q_lines"][0]["value"] == 400.0
+
+
+def test_finance_join_cost_pending_never_full_margin(monkeypatch, tmp_path):
+    _fx_stub(monkeypatch, tmp_path)
+    _fin_file(tmp_path, monkeypatch, {
+        "111001": {"net_sales": 2000, "total_cost": 1500, "has_cost": True, "type": "CORP-PART"},
+        "111002": {"net_sales": 4000, "total_cost": 0, "has_cost": False, "type": "CORP-PART"},
+        "111003": {"net_sales": 1000, "total_cost": 1200, "has_cost": True, "type": "AGENTE"},
+    })
+    files = [{"job": "111001", "currency": "MXN", "sell": 0, "inv_amt": 0, "est": 0, "act": 0},
+             {"job": "111001A", "currency": "MXN", "sell": 0, "inv_amt": 0, "est": 0, "act": 0},
+             {"job": "111002", "currency": "MXN", "sell": 0, "inv_amt": 0, "est": 0, "act": 0},
+             {"job": "111003", "currency": "MXN", "sell": 0, "inv_amt": 0, "est": 0, "act": 0},
+             {"job": "119999", "currency": "MXN", "sell": 0, "inv_amt": 0, "est": 0, "act": 0}]
+    out = audit_web._normalize_and_cost(files)
+    by = {f["job"]: f for f in out}
+    assert by["111001"]["fin_margin"] == 25.0 and by["111001"]["cost_status"] == "posted"
+    assert by["111001A"]["fin_matched"]               # sequel folds into base file
+    assert by["111002"]["fin_margin"] is None          # never 100% margin
+    assert by["111002"]["cost_status"] == "cost pending"
+    assert by["119999"]["cost_status"] == "not in Finance report"
+    m = audit_web._finance_metrics(out)
+    assert m["fin_costed_n"] == 2 and m["fin_pending_n"] == 1 and m["fin_matched_n"] == 3
+    assert m["fin_sales"] == 150 and m["fin_cost"] == 135   # pending file excluded
+    assert m["fin_neg_n"] == 1
+    assert m["display_ccy"] == "USD"
+
+
+def test_finance_cost_json_shipped_is_pii_free():
+    import json, os
+    d = json.load(open(os.path.join(os.path.dirname(audit_web.__file__), "finance_cost.json")))
+    assert d["currency"] == "MXN" and d["files"]
+    assert d["ledger"]
+    for rec in d["ledger"].values():
+        assert set(rec) <= {"type", "inv_usd", "inv_mxn", "inv_orig", "n_inv", "n_credit", "first", "last", "cost_mxn"}
+    allowed = {"type", "net_sales", "supplier_cost", "intercompany_cost", "total_cost",
+               "gross_margin", "has_cost"}
+    for rec in d["files"].values():
+        assert set(rec) <= allowed
+        if not rec["has_cost"]:
+            assert rec["total_cost"] == 0
+
+
+def test_finance_reconcile_flags_each_kind(monkeypatch, tmp_path):
+    _fx_stub(monkeypatch, tmp_path)
+    fin = {"files": {"110005": {"net_sales": 0, "total_cost": 900, "has_cost": True}},
+           "ledger": {
+               "110001": {"inv_usd": 1000, "inv_mxn": 20000, "inv_orig": {"USD": 1000}, "type": "CORP-PART"},
+               "110002": {"inv_usd": 500, "inv_mxn": 10000, "inv_orig": {"USD": 500}, "type": "CORP-PART"},
+               "110003": {"inv_usd": 100, "inv_mxn": 2000, "inv_orig": {"MXN": 2000}, "type": "DIPLOM"},
+               "110004": {"inv_usd": 300, "inv_mxn": 6000, "inv_orig": {"USD": 300}, "type": "TMS"},
+               "110009": {"inv_usd": 50, "inv_mxn": 1000, "inv_orig": {"MXN": 1000}, "type": "AGENTE"}}}
+    mw = [{"job": "110001", "inv_amt": 600.0, "sell": 1000, "currency": "USD", "status": "W"},
+          {"job": "110001A", "inv_amt": 400.0, "sell": 0, "currency": "USD", "status": "W"},
+          {"job": "110002", "inv_amt": 0.0, "sell": 0, "currency": "USD", "status": "C"},
+          {"job": "110003", "inv_amt": 2500.0, "sell": 2500, "currency": "MXN", "status": "W", "is_embassy": False},
+          {"job": "110004", "inv_amt": 300.0, "sell": 300, "currency": "", "status": "W"},
+          {"job": "110007", "inv_amt": 800.0, "sell": 800, "currency": "MXN", "status": "W"}]
+    r = audit_web.finance_reconcile(mw, fin)
+    d = {k: [x["job"] for x in v] for k, v in r["discrepancies"].items()}
+    assert "110001" not in d["invoice_amount_diff"]            # sequel invoices summed: 600+400 == 1000
+    assert d["invoiced_finance_not_moveware"] == ["110002"]
+    assert d["cancelled_but_invoiced"] == ["110002"]
+    assert d["no_price_in_moveware"] == ["110002"]
+    assert d["invoice_amount_diff"] == ["110003"]
+    assert r["discrepancies"]["invoice_amount_diff"][0]["diff"] == 500.0
+    assert d["diplomatic_flag_mismatch"] == ["110003"]
+    assert "110004" not in d["invoice_amount_diff"]            # blank ccy matched on USD
+    assert d["invoiced_moveware_not_finance"] == ["110007"]
+    assert d["in_finance_not_moveware"] == ["110009"]
+    assert d["finance_cost_without_sales"] == ["110005"]
+    assert r["summary"]["matched"] == 4
+    import json
+    assert "client" not in json.dumps(r)

@@ -107,6 +107,209 @@ def load_move_files():
     return files
 
 
+# ── Currency + interim Finance cost ─────────────────────────────────────────────
+_MONEY_KEYS = ("est", "act", "sell", "inv_amt", "rev_reported", "rev_lines", "cost_lines",
+               "declared", "ins")
+_FIN_CACHE = {}
+
+
+def _load_finance_cost():
+    """finance_cost.json (Lupita's margin workbook, MXN, keyed by base file number)."""
+    path = os.environ.get("FINANCE_COST_PATH")
+    if not path:
+        for cand in ("/etc/secrets/finance_cost.json", "/var/data/finance_cost.json",
+                     os.path.join(os.path.dirname(os.path.abspath(__file__)), "finance_cost.json")):
+            if os.path.exists(cand):
+                path = cand
+                break
+        else:
+            path = "finance_cost.json"
+    try:
+        mt = os.path.getmtime(path)
+        if _FIN_CACHE.get("mtime") != mt:
+            import json
+            with open(path) as fh:
+                d = json.load(fh)
+            _FIN_CACHE.clear()
+            _FIN_CACHE.update(mtime=mt, files=d.get("files") or {},
+                              currency=d.get("currency") or "MXN", source=d.get("source"),
+                              path=path)
+    except Exception:
+        return {"files": {}, "currency": "MXN", "source": None}
+    return _FIN_CACHE
+
+
+def _base_file(job):
+    """'111136A' -> '111136' (sequel letters fold into the base file, guide §2)."""
+    s = str(job or "").strip()
+    while s and not s[-1].isdigit():
+        s = s[:-1]
+    return s
+
+
+def _normalize_and_cost(files):
+    """Return COPIES of `files` with money in the display currency and the Finance
+    cost joined. Never mutates the auditor cache.
+
+    Business rule: every move has a cost. A file with no cost posted yet is
+    'cost pending' (timing), never 100% margin.
+    """
+    import fx
+    disp, dflt = fx.display_ccy(), fx.default_ccy()
+    fin = _load_finance_cost()
+    fin_files, fin_ccy = fin["files"], fin["currency"]
+    out = []
+    for f in files:
+        g = dict(f)
+        src = fx.normalize(f.get("currency"), dflt) or dflt
+        r = fx.rate(src, disp)
+        g["currency_src"] = src
+        g["currency"] = disp
+        if r != 1.0:
+            for k in _MONEY_KEYS:
+                v = g.get(k)
+                if isinstance(v, (int, float)) and not isinstance(v, bool):
+                    g[k] = round(v * r, 2)
+            for lk in ("q_lines", "sel_lines", "i_lines"):
+                if isinstance(g.get(lk), list):
+                    g[lk] = [dict(x, value=round((x.get("value") or 0) * r, 2))
+                             if isinstance(x, dict) else x for x in g[lk]]
+        rec = fin_files.get(_base_file(f.get("job") or f.get("number")))
+        if rec is not None:
+            fr = fx.rate(fin_ccy, disp)
+            g["fin_matched"] = True
+            g["fin_type"] = rec.get("type") or ""
+            g["fin_has_cost"] = bool(rec.get("has_cost"))
+            g["fin_sales"] = round((rec.get("net_sales") or 0) * fr, 2)
+            g["fin_cost"] = round((rec.get("total_cost") or 0) * fr, 2)
+            g["fin_margin"] = round(g["fin_sales"] - g["fin_cost"], 2) if g["fin_has_cost"] else None
+        else:
+            g["fin_matched"] = False
+            g["fin_has_cost"] = False
+            g["fin_margin"] = None
+        g["cost_status"] = ("posted" if g["fin_has_cost"]
+                            else ("cost pending" if g["fin_matched"] else "not in Finance report"))
+        out.append(g)
+    return out
+
+
+def _finance_metrics(files):
+    """Gross-margin tiles from Finance actuals — over COSTED files only."""
+    import fx
+    seen, costed, pending = set(), [], 0
+    for f in files:
+        b = _base_file(f.get("job"))
+        if not f.get("fin_matched") or b in seen:
+            continue          # one Finance row per base file; don't count sequels twice
+        seen.add(b)
+        if f.get("fin_has_cost"):
+            costed.append(f)
+        else:
+            pending += 1
+    sales = sum(f["fin_sales"] for f in costed)
+    cost = sum(f["fin_cost"] for f in costed)
+    margin = sales - cost
+    rt = fx.rates()
+    try:
+        fx_mxn = round(rt["per_usd"].get("MXN", 0) / rt["per_usd"].get(fx.display_ccy(), 1), 4)
+    except Exception:
+        fx_mxn = None
+    return {
+        "display_ccy": fx.display_ccy(), "fx_date": rt.get("date"), "fx_source": rt.get("source"),
+        "fx_mxn_per_disp": fx_mxn,
+        "fin_matched_n": len(seen), "fin_costed_n": len(costed), "fin_pending_n": pending,
+        "fin_sales": round(sales), "fin_cost": round(cost), "fin_margin": round(margin),
+        "fin_margin_pct": round(margin / sales * 100, 1) if sales else None,
+        "fin_neg_n": sum(1 for f in costed if (f.get("fin_margin") or 0) < 0),
+    }
+
+
+def finance_reconcile(mw_files, fin, window_jobs=None, tol_pct=0.01, tol_abs=50.0):
+    """Line up Lupita's Finance workbooks against MoveWare, file by file.
+
+    `mw_files` are RAW auditor records (amounts in each file's own currency).
+    `fin` is finance_cost.json ({"files": 2026 margin, "ledger": 2021-26 invoices}).
+    Returns job numbers + amounts only — no client names (guide §11/§12).
+    """
+    import fx
+    ledger = fin.get("ledger") or {}
+    margin = fin.get("files") or {}
+    mw = {}
+    for f in mw_files:
+        b = _base_file(f.get("job") or f.get("number"))
+        if not b:
+            continue
+        e = mw.setdefault(b, {"inv": 0.0, "sell": 0.0, "ccy": set(), "status": set(),
+                              "embassy": False, "n": 0})
+        e["inv"] += f.get("inv_amt") or 0
+        e["sell"] += f.get("sell") or 0
+        if f.get("currency"):
+            e["ccy"].add(fx.normalize(f["currency"]))
+        if f.get("status"):
+            e["status"].add(str(f["status"]).upper())
+        e["embassy"] = e["embassy"] or bool(f.get("is_embassy"))
+        e["n"] += 1
+    lo = min((int(b) for b in mw if b.isdigit()), default=0)
+
+    def _close(a, b):
+        return abs(a - b) <= max(tol_abs, tol_pct * max(abs(a), abs(b)))
+
+    out = {k: [] for k in ("in_finance_not_moveware", "invoiced_finance_not_moveware",
+                           "invoice_amount_diff", "invoiced_moveware_not_finance",
+                           "cancelled_but_invoiced", "diplomatic_flag_mismatch",
+                           "no_price_in_moveware", "finance_cost_without_sales")}
+    matched = 0
+    for b, L in ledger.items():
+        net_mxn = L.get("inv_mxn") or 0
+        if b not in mw:
+            # only files in MoveWare's job-number range can be "missing" from it
+            if b.isdigit() and int(b) >= lo and abs(net_mxn) > tol_abs:
+                out["in_finance_not_moveware"].append(
+                    {"job": b, "finance_invoiced_mxn": round(net_mxn), "last_invoice": L.get("last")})
+            continue
+        matched += 1
+        M = mw[b]
+        orig = L.get("inv_orig") or {}
+        if net_mxn > tol_abs and M["inv"] <= 0:
+            out["invoiced_finance_not_moveware"].append(
+                {"job": b, "finance_invoiced": orig, "moveware_invoiced": 0,
+                 "last_invoice": L.get("last")})
+        elif M["inv"] > 0 and abs(net_mxn) > tol_abs:
+            # compare in MoveWare's currency; blank currency -> accept the closer one
+            cands = list(M["ccy"]) or ["USD", "MXN"]
+            fin_vals = {c: (L.get("inv_usd") if c == "USD" else L.get("inv_mxn") if c == "MXN"
+                            else orig.get(c, 0)) or 0 for c in cands}
+            best = min(fin_vals, key=lambda c: abs(fin_vals[c] - M["inv"]))
+            if not _close(fin_vals[best], M["inv"]):
+                out["invoice_amount_diff"].append(
+                    {"job": b, "currency": best, "finance": round(fin_vals[best], 2),
+                     "moveware": round(M["inv"], 2), "diff": round(M["inv"] - fin_vals[best], 2),
+                     "ccy_known": bool(M["ccy"])})
+        if "C" in M["status"] and net_mxn > tol_abs:
+            out["cancelled_but_invoiced"].append({"job": b, "finance_invoiced_mxn": round(net_mxn)})
+        if (L.get("type") == "DIPLOM") != M["embassy"] and L.get("type") in ("DIPLOM", "CORP-PART", "TMS"):
+            out["diplomatic_flag_mismatch"].append(
+                {"job": b, "finance_type": L.get("type"), "moveware_embassy": M["embassy"]})
+        if net_mxn > tol_abs and M["sell"] <= 0:
+            out["no_price_in_moveware"].append({"job": b, "finance_invoiced_mxn": round(net_mxn)})
+    scope = window_jobs if window_jobs is not None else set(mw)
+    for b in sorted(scope):
+        M = mw.get(b)
+        if M and M["inv"] > tol_abs and b not in ledger:
+            out["invoiced_moveware_not_finance"].append(
+                {"job": b, "moveware_invoiced": round(M["inv"], 2), "currency": ",".join(sorted(M["ccy"])) or "?"})
+    for b, r in margin.items():
+        if r.get("has_cost") and (r.get("net_sales") or 0) <= 0:
+            out["finance_cost_without_sales"].append(
+                {"job": b, "cost_mxn": r.get("total_cost"), "net_sales_mxn": r.get("net_sales")})
+    for k in out:
+        key = {"invoice_amount_diff": lambda r: -abs(r["diff"])}.get(k, lambda r: r["job"])
+        out[k].sort(key=key)
+    return {"summary": {"finance_files": len(ledger), "moveware_files": len(mw),
+                        "matched": matched, **{k: len(v) for k, v in out.items()}},
+            "discrepancies": out}
+
+
 # ── Reconciliation ──────────────────────────────────────────────────────────────
 def _revenue(f):
     return f["inv_amt"] if f["invoiced"] else f["sell"]
@@ -445,7 +648,8 @@ def compute_metrics(files, live_counts=None, cost_available=True):
     worklist = sorted(
         [{"job": f["job"], "client": f["client"], "mode": f["mode"], "stage": f["stage"],
           "margin": round(_margin(f) * 100, 1), "profit": round(_actual_profit(f)),
-          "open_gaps": f["open_gaps"], "gap_value": round(f["gap_value"])} for f in files],
+          "open_gaps": f["open_gaps"], "gap_value": round(f["gap_value"]),
+          "cost_status": f.get("cost_status", ""), "fin_margin": f.get("fin_margin")} for f in files],
         key=lambda r: (-r["open_gaps"], r["margin"]),
     )
 
@@ -563,7 +767,12 @@ def compute_metrics(files, live_counts=None, cost_available=True):
     # template hides profit / margin / leakage rather than showing 0s.
     tot_revenue = round(tot_rev)
 
+    try:
+        _fin = _finance_metrics(files)
+    except Exception:
+        _fin = {"display_ccy": "", "fin_matched_n": 0}
     return {
+        **_fin,
         "as_of": today.isoformat(),
         "cost_available": cost_available,
         "tot_revenue": tot_revenue,
@@ -660,6 +869,10 @@ def _load_checked():
                 counts["underbilling_rows"] = []
                 counts["underbilling_have_creds"] = False
                 counts["underbilling_error"] = str(_e)
+            try:
+                audited = _normalize_and_cost(audited)
+            except Exception:
+                pass
             files = reconcile(audited, cost_available=False) if audited else []
             check_calculations(files)
             return files, True, counts
@@ -994,6 +1207,42 @@ def audit_rawjob():
     return jsonify(out)
 
 
+@audit_bp.route("/audit/financecheck")
+@_login_required
+def audit_financecheck():
+    """Finance workbooks vs MoveWare, file by file. Job numbers + amounts, no names.
+    ?fmt=csv downloads the discrepancy rows."""
+    from flask import jsonify, request, Response
+    import mw_live
+    fin = _load_finance_cost()
+    try:
+        import json
+        with open(fin.get("path") or "") as fh:
+            raw = json.load(fh)
+    except Exception:
+        raw = {"files": fin.get("files") or {}, "ledger": {}}
+    try:
+        allf = mw_live.audited_files() or []
+        win = {_base_file(f.get("job")) for f in (mw_live.audited_in_window() or [])}
+        prog = mw_live.audit_progress()
+    except Exception as e:
+        return jsonify({"error": f"moveware snapshot unavailable: {e}"})
+    res = finance_reconcile(allf, raw, window_jobs=win)
+    res["moveware_coverage"] = {k: prog.get(k) for k in
+                                ("audited_total", "full_coverage", "backfill_complete", "complete")}
+    res["finance_source"] = raw.get("source")
+    if request.args.get("fmt") == "csv":
+        import csv, io
+        buf = io.StringIO(); w = csv.writer(buf)
+        w.writerow(["check", "job", "detail"])
+        for k, rows in res["discrepancies"].items():
+            for r in rows:
+                w.writerow([k, r["job"], "; ".join(f"{a}={b}" for a, b in r.items() if a != "job")])
+        return Response("\ufeff" + buf.getvalue(), mimetype="text/csv",
+                        headers={"Content-Disposition": "attachment; filename=finance_vs_moveware.csv"})
+    return jsonify(res)
+
+
 @audit_bp.route("/audit/costcheck")
 def audit_costcheck():
     """PUBLIC, read-only status check: has MoveWare's cost-fields update reached
@@ -1236,8 +1485,13 @@ TEMPLATE = r"""<!DOCTYPE html>
   </div>
   {% else %}
   <div class="row">
-    <div class="tile" style="flex:1;min-width:240px"><div class="label">Revenue (checked so far)</div><div class="value num">{{ "{:,.0f}".format(m.tot_revenue) }}</div><div class="sub">invoiced where billed, else quoted · {{ "{:,}".format(m.sample_n) }} files</div></div>
-    <div class="tile" style="flex:2;min-width:320px;background:var(--tint)"><div class="label" style="color:var(--rust-dark)">Cost &amp; profit — not available yet</div><div class="sub" style="margin-top:6px;line-height:1.5">The Moveware API does not expose supplier/creditor cost yet (confirmed with MoveConnect): the option/charge lines carry sell values only, and there is no per-job cost endpoint. Profit and margin are hidden rather than shown as fabricated zeros. MoveConnect is scoping a cost endpoint for us; margin turns on automatically once that data is available.</div></div>
+    <div class="tile" style="flex:1;min-width:240px"><div class="label">Revenue (checked so far)</div><div class="value num">{{ "{:,.0f}".format(m.tot_revenue) }}</div><div class="sub">{% if m.display_ccy %}{{ m.display_ccy }} · {% endif %}invoiced where billed, else quoted · {{ "{:,}".format(m.sample_n) }} files</div></div>
+    {% if m.fin_matched_n %}
+    <div class="tile" style="flex:1;min-width:220px"><div class="label">Gross margin (Finance actuals)</div><div class="value num {{ 'good' if m.fin_margin>=0 else 'bad' }}">{{ "{:,.0f}".format(m.fin_margin) }}</div><div class="sub">{% if m.fin_margin_pct is not none %}{{ m.fin_margin_pct }}% on {{ "{:,.0f}".format(m.fin_sales) }} sales · {% endif %}{{ m.fin_costed_n }} costed files{% if m.fin_neg_n %} · {{ m.fin_neg_n }} below cost{% endif %}</div></div>
+    <div class="tile" style="flex:1;min-width:220px"><div class="label">Cost pending</div><div class="value num warn">{{ m.fin_pending_n }}</div><div class="sub">in the Finance report with no cost posted yet — margin not shown until cost is posted</div></div>
+    {% else %}
+    <div class="tile" style="flex:2;min-width:320px;background:var(--tint)"><div class="label" style="color:var(--rust-dark)">Cost &amp; profit — not available yet</div><div class="sub" style="margin-top:6px;line-height:1.5">Supplier cost is not in the MoveWare API yet and no Finance cost file is loaded. Profit and margin are hidden rather than shown as fabricated zeros.</div></div>
+    {% endif %}
   </div>
   {% endif %}
   <h2>Workload &amp; Pipeline</h2>
@@ -1349,15 +1603,17 @@ TEMPLATE = r"""<!DOCTYPE html>
     <td class="num {{ 'bad' if r.margin<0 else '' }}">{{ r.margin }}%</td><td class="num">{{ "{:,.0f}".format(r.profit) }}</td>
     <td class="num">{{ r.open_gaps }}</td><td class="num">{{ "{:,.0f}".format(r.gap_value) }}</td></tr>{% endfor %}</table>
   {% else %}
-  <table><tr><th>Job</th><th>Client</th><th>Mode</th><th>Stage</th></tr>
+  <table><tr><th>Job</th><th>Client</th><th>Mode</th><th>Stage</th><th>Cost (Finance)</th><th>Gross margin</th></tr>
   {% for r in m.worklist %}<tr>
     <td class="num">{{ r.job }}</td><td>{{ r.client }}</td><td>{{ r.mode }}</td>
-    <td>{% if r.stage=='gap_flagged' %}<span class="pill gap">gap flagged</span>{% elif r.stage in ('resolved','closed') %}<span class="pill ok">{{ r.stage }}</span>{% else %}<span class="pill rev">{{ r.stage.replace('_',' ') }}</span>{% endif %}</td></tr>{% endfor %}</table>
-  <p class="sub" style="color:var(--muted);margin-top:8px">Sample of {{ m.sample_n }} files deep-checked this load (of {{ m.total_active }} active). Cost/margin columns hidden — supplier cost not available from Moveware RestV1.</p>
+    <td>{% if r.stage=='gap_flagged' %}<span class="pill gap">gap flagged</span>{% elif r.stage in ('resolved','closed') %}<span class="pill ok">{{ r.stage }}</span>{% else %}<span class="pill rev">{{ r.stage.replace('_',' ') }}</span>{% endif %}</td>
+    <td>{% if r.cost_status=='posted' %}<span class="pill ok">posted</span>{% elif r.cost_status=='cost pending' %}<span class="pill gap">cost pending</span>{% else %}<span style="color:var(--muted)">{{ r.cost_status }}</span>{% endif %}</td>
+    <td class="num {{ 'bad' if (r.fin_margin is not none and r.fin_margin<0) else '' }}">{% if r.fin_margin is not none %}{{ "{:,.0f}".format(r.fin_margin) }}{% else %}—{% endif %}</td></tr>{% endfor %}</table>
+  <p class="sub" style="color:var(--muted);margin-top:8px">Sample of {{ m.sample_n }} files deep-checked this load (of {{ m.total_active }} active). Cost comes from Finance actuals until MoveWare exposes supplier cost; files without posted cost are marked <b>cost pending</b>, never shown as full margin.</p>
   {% endif %}
   </section>
 
-  <footer>Thelsa Automation Library · the audit runs on imperfect data and flags it — figures in file currency (mixed).</footer>
+  <footer>Thelsa Automation Library · the audit runs on imperfect data and flags it — figures in {% if m.display_ccy and not demo %}{{ m.display_ccy }} at today's spot rate ({{ m.fx_date }}{% if m.fx_source=='fallback' %}, fallback rates{% endif %}){% else %}file currency (mixed){% endif %}.</footer>
 </main>
 <script>
 (function(){

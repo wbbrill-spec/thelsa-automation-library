@@ -35,6 +35,10 @@ from flask import (
 
 audit_bp = Blueprint("audit", __name__)
 
+# Lupita / Finance's Finance-vs-MoveWare query sheet (Google Sheets).
+QUERY_SHEET_URL = ("https://docs.google.com/spreadsheets/d/"
+                   "1o4rDT3oa2o7RiUzO0lXdibYhfKdhOyW4oapyHaUFu_A/edit")
+
 # Insurance benchmark bands (fraction of declared value), tune vs Pac Global.
 INS_RATE = {"sea": 0.012, "air": 0.009, "road": 0.012}
 INS_TOL = 0.003
@@ -132,10 +136,11 @@ def _load_finance_cost():
                 d = json.load(fh)
             _FIN_CACHE.clear()
             _FIN_CACHE.update(mtime=mt, files=d.get("files") or {},
+                              ledger=d.get("ledger") or {},
                               currency=d.get("currency") or "MXN", source=d.get("source"),
                               path=path)
     except Exception:
-        return {"files": {}, "currency": "MXN", "source": None}
+        return {"files": {}, "ledger": {}, "currency": "MXN", "source": None}
     return _FIN_CACHE
 
 
@@ -1009,7 +1014,28 @@ def audit():
     # Live RestV1 data has NO supplier cost (see mw_live._map_job), so profit and
     # margin can't be computed from it — hide them rather than show fabricated 0s.
     m = compute_metrics(files, live_counts=counts, cost_available=not is_live)
-    return render_template_string(TEMPLATE, m=m, demo=not is_live)
+    if not is_live:
+        return render_template_string(TEMPLATE, m=m, demo=True)
+    import exec_dash
+    import mw_live
+    raw = mw_live.audited_in_window()
+    ex = exec_dash.build(raw, _load_finance_cost())
+    # Self-heal: records cached before the per-invoice mapping existed are re-read
+    # in the background so revenue/currency fill in without waiting for a full scan.
+    if ex["stale_records"] and not mw_live.remap_status().get("running"):
+        try:
+            mw_live.remap_jobs([f.get("job_id") for f in raw if "inv_list" not in f])
+        except Exception:
+            pass
+    ex["remap"] = mw_live.remap_status()
+    ex["query_sheet"] = os.environ.get("AUDIT_QUERY_SHEET_URL", QUERY_SHEET_URL)
+    # Under-billing (quote vs invoice) amounts are in the display currency (USD).
+    for r in m.get("disc_worklist") or []:
+        r["pair"] = [0.0, r.get("value") or 0]
+    for c in m.get("by_coordinator_disc") or []:
+        c["pair"] = [0.0, c.get("value") or 0]
+    m["total_disc_pair"] = [0.0, m.get("total_disc") or 0]
+    return render_template_string(EXEC_TEMPLATE, m=m, ex=ex)
 
 
 @audit_bp.route("/audit/alerts")
@@ -1479,6 +1505,8 @@ def audit_v2probe():
         out["sup0_tx_error"] = str(e)[:200]
     return jsonify(out)
 
+
+from exec_template import EXEC_TEMPLATE  # noqa: E402  (live executive view)
 
 TEMPLATE = r"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">

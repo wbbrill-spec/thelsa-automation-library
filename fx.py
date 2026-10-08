@@ -134,6 +134,103 @@ def convert(amount, src, dst) -> float:
         return 0.0
 
 
+# ── Dashboard bases (same methodology as the TMS Executive Dashboard) ────────────
+# Plan  = the rate the 2026 budget was struck at (TMS dashboard data/finance.json).
+# Spot  = the month-end USD/MXN of the most recent COMPLETED month (Bill, 21 Sep 2026):
+#         Banxico FIX (needs BANXICO_TOKEN) → ECB via frankfurter.app → today's Yahoo
+#         spot as a last resort, flagged stale.
+PLAN_MXN_PER_USD = 17.4479
+_me_lock = threading.Lock()
+_me: dict = {}
+
+
+def plan_rate() -> float:
+    try:
+        return float(os.environ.get("AUDIT_FX_PLAN") or PLAN_MXN_PER_USD)
+    except ValueError:
+        return PLAN_MXN_PER_USD
+
+
+def _last_day(y: int, m: int) -> _dt.date:      # m 1-based
+    nxt = _dt.date(y + (m == 12), 1 if m == 12 else m + 1, 1)
+    return nxt - _dt.timedelta(days=1)
+
+
+def _prev_month(today: _dt.date):
+    return (today.year - 1, 12) if today.month == 1 else (today.year, today.month - 1)
+
+
+def _banxico(y, m):
+    tok = os.environ.get("BANXICO_TOKEN")
+    if not tok:
+        return None
+    import requests
+    a, b = f"{y}-{m:02d}-01", _last_day(y, m).isoformat()
+    r = requests.get(f"https://www.banxico.org.mx/SieAPIRest/service/v1/series/SF43718/datos/{a}/{b}",
+                     headers={"Bmx-Token": tok, "Accept": "application/json"}, timeout=15)
+    r.raise_for_status()
+    obs = (((r.json().get("bmx") or {}).get("series") or [{}])[0].get("datos") or [])
+    good = [o for o in obs if o.get("dato") and o["dato"].replace(",", "").replace(".", "", 1).isdigit()]
+    if not good:
+        return None
+    dd, mm, yy = good[-1]["fecha"].split("/")
+    return {"rate": float(good[-1]["dato"].replace(",", "")), "date": f"{yy}-{mm}-{dd}",
+            "source": "Banxico FIX (DOF)"}
+
+
+def _ecb(y, m):
+    import requests
+    r = requests.get(f"https://api.frankfurter.app/{_last_day(y, m).isoformat()}",
+                     params={"from": "USD", "to": "MXN"}, timeout=15)
+    r.raise_for_status()
+    j = r.json()
+    if not j.get("rates", {}).get("MXN") or not str(j.get("date", "")).startswith(f"{y}-{m:02d}"):
+        return None
+    return {"rate": float(j["rates"]["MXN"]), "date": j["date"], "source": "ECB reference rate"}
+
+
+def month_end_spot(today: _dt.date | None = None) -> dict:
+    """{"rate","asOf","month","source","stale"} — MXN per USD at the end of the latest
+    completed month. Fetched at most once per UTC day; cached to disk."""
+    today = today or _dt.datetime.now(_dt.timezone.utc).date()
+    y, m = _prev_month(today)
+    want = f"{y}-{m:02d}"
+    with _me_lock:
+        if _me.get("checked") == today.isoformat() and _me.get("rate"):
+            return dict(_me)
+        path = _cache_path().replace("fx_cache", "fx_monthend")
+        try:
+            with open(path) as fh:
+                disk = json.load(fh)
+            if disk.get("month") == want and disk.get("rate"):
+                _me.clear(); _me.update(disk, checked=today.isoformat(), stale=False)
+                return dict(_me)
+        except Exception:
+            pass
+        got = None
+        for fn in (_banxico, _ecb):
+            try:
+                got = fn(y, m)
+            except Exception:
+                got = None
+            if got:
+                break
+        if got:
+            data = {"rate": round(got["rate"], 4), "asOf": got["date"], "month": want,
+                    "source": got["source"], "stale": False}
+            try:
+                with open(path, "w") as fh:
+                    json.dump(data, fh)
+            except Exception:
+                pass
+        else:
+            pu = rates()["per_usd"]
+            data = {"rate": round(pu.get("MXN", FALLBACK_PER_USD["MXN"]), 4), "asOf": today.isoformat(),
+                    "month": None, "source": rates().get("source"), "stale": True}
+        _me.clear(); _me.update(data, checked=today.isoformat())
+        return dict(_me)
+
+
 def display_ccy() -> str:
     return normalize(os.environ.get("AUDIT_DISPLAY_CCY"), "USD") or "USD"
 

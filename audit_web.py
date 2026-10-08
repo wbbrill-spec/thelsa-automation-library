@@ -224,6 +224,23 @@ def _finance_metrics(files):
     }
 
 
+def _likely_cause(fin_mxn, mw_mxn, rate):
+    """Best guess at why two totals differ — a hint for whoever checks the file."""
+    if not mw_mxn:
+        return "no numbered invoice in MoveWare"
+    if not fin_mxn:
+        return "not in Finance"
+    q = mw_mxn / fin_mxn
+    near = lambda t, tol=0.03: abs(q - t) <= tol * t
+    if near(rate) or near(1 / rate):
+        return "currency label (pesos vs dollars)"
+    if near(1.16) or near(1 / 1.16):
+        return "IVA included on one side"
+    if near(2) or near(0.5):
+        return "billed twice / half recorded"
+    return "MoveWare higher" if q > 1 else "MoveWare lower"
+
+
 def finance_reconcile(mw_files, fin, window_jobs=None, tol_pct=0.03, tol_abs=50.0,
                       since="2021-01-01"):
     """Line up Lupita's Finance workbooks against MoveWare, file by file.
@@ -250,7 +267,8 @@ def finance_reconcile(mw_files, fin, window_jobs=None, tol_pct=0.03, tol_abs=50.
                 if iv.get("d") and iv["d"] < since:
                     continue                         # dated before the Finance ledger starts
                 if not iv.get("n"):
-                    e["drafts"].append(iv)          # unnumbered: counted, but noted
+                    e["drafts"].append(iv)          # unnumbered (pro-forma?): listed, not counted
+                    continue
                 e["issued"].append(iv)
                 c = iv.get("c") or "?"
                 e["net"][c] = e["net"].get(c, 0.0) + (iv.get("net") or 0)
@@ -320,6 +338,7 @@ def finance_reconcile(mw_files, fin, window_jobs=None, tol_pct=0.03, tol_abs=50.
                 out["invoice_amount_diff"].append(
                     {"job": b, "finance_mxn": round(net_mxn, 2), "moveware_mxn": round(mw_mxn, 2),
                      "diff_mxn": round(mw_mxn - net_mxn, 2), "rate": round(rate, 4),
+                     "likely_cause": _likely_cause(net_mxn, mw_mxn, rate),
                      "finance_by_ccy": orig, "moveware_by_ccy": {k: round(v, 2) for k, v in M["net"].items()}})
         elif M["inv"] > 0 and abs(net_mxn) > tol_abs:
             out_pending.append(b)

@@ -1087,10 +1087,11 @@ def test_finance_reconcile_old_invoices_unnumbered_and_duplicates(monkeypatch, t
         m["inv_amt"] = sum(i["net"] for i in m["inv_list"])
     r = audit_web.finance_reconcile(mw, fin)
     d = {k: [x["job"] for x in v] for k, v in r["discrepancies"].items()}
-    assert "110010" not in d["invoice_amount_diff"]
     assert d["unnumbered_invoices_in_moveware"] == ["110010"]
+    assert "110010" in d["invoice_amount_diff"]              # unnumbered not counted: 1000 vs 2000
     assert d["possible_duplicate_invoice"] == ["110011"]      # recurring storage not flagged
-    assert d["invoice_amount_diff"] == ["110011"]            # 4000 billed vs 2000 in Finance
+    rows = {x["job"]: x for x in r["discrepancies"]["invoice_amount_diff"]}
+    assert rows["110011"]["likely_cause"] == "billed twice / half recorded"
     assert "110012" not in d["invoice_amount_diff"]
 
 
@@ -1109,4 +1110,11 @@ def test_finance_reconcile_only_drafts_counts_as_not_issued(monkeypatch, tmp_pat
            "inv_list": [{"n": "", "d": "", "c": "MXN", "net": 1000.0}]}]
     r = audit_web.finance_reconcile(mw, fin)
     assert r["summary"]["amount_check_pending_remap"] == 0
-    assert r["summary"]["invoice_amount_diff"] == 0           # unnumbered invoice counts as issued
+    row = r["discrepancies"]["invoice_amount_diff"][0]
+    assert row["likely_cause"] == "no numbered invoice in MoveWare"
+    assert r["summary"]["unnumbered_invoices_in_moveware"] == 1
+
+
+def test_likely_cause_currency_label():
+    assert audit_web._likely_cause(1000.0, 20000.0, 20.0) == "currency label (pesos vs dollars)"
+    assert audit_web._likely_cause(1000.0, 1160.0, 20.0) == "IVA included on one side"

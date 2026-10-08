@@ -224,7 +224,8 @@ def _finance_metrics(files):
     }
 
 
-def finance_reconcile(mw_files, fin, window_jobs=None, tol_pct=0.01, tol_abs=50.0):
+def finance_reconcile(mw_files, fin, window_jobs=None, tol_pct=0.01, tol_abs=50.0,
+                      since="2021-01-01"):
     """Line up Lupita's Finance workbooks against MoveWare, file by file.
 
     `mw_files` are RAW auditor records (amounts in each file's own currency).
@@ -240,12 +241,20 @@ def finance_reconcile(mw_files, fin, window_jobs=None, tol_pct=0.01, tol_abs=50.
         if not b:
             continue
         e = mw.setdefault(b, {"inv": 0.0, "sell": 0.0, "ccy": set(), "status": set(),
-                              "embassy": False, "n": 0, "net": {}, "has_net": True})
+                              "embassy": False, "n": 0, "net": {}, "has_net": True,
+                              "drafts": [], "issued": []})
         e["inv"] += f.get("inv_amt") or 0
-        nb = f.get("inv_net_by_ccy")
-        if isinstance(nb, dict):
-            for c, v in nb.items():
-                e["net"][c] = e["net"].get(c, 0.0) + (v or 0)
+        il = f.get("inv_list")
+        if isinstance(il, list):
+            for iv in il:
+                if not iv.get("n") or not iv.get("d"):
+                    e["drafts"].append(iv)          # never issued: no number / date
+                    continue
+                if iv["d"] < since:
+                    continue                         # before the Finance ledger starts
+                e["issued"].append(iv)
+                c = iv.get("c") or "?"
+                e["net"][c] = e["net"].get(c, 0.0) + (iv.get("net") or 0)
         else:
             e["has_net"] = False      # cached before the per-invoice remap
         e["sell"] += f.get("sell") or 0
@@ -263,7 +272,8 @@ def finance_reconcile(mw_files, fin, window_jobs=None, tol_pct=0.01, tol_abs=50.
     out = {k: [] for k in ("in_finance_not_moveware", "invoiced_finance_not_moveware",
                            "invoice_amount_diff", "invoiced_moveware_not_finance",
                            "cancelled_but_invoiced", "diplomatic_flag_mismatch",
-                           "no_price_in_moveware", "finance_cost_without_sales")}
+                           "no_price_in_moveware", "finance_cost_without_sales",
+                           "draft_invoices_in_moveware", "possible_duplicate_invoice")}
     matched = 0
     out_pending = []
     for b, L in ledger.items():
@@ -276,6 +286,19 @@ def finance_reconcile(mw_files, fin, window_jobs=None, tol_pct=0.01, tol_abs=50.
             continue
         matched += 1
         M = mw[b]
+        if M["drafts"]:
+            out["draft_invoices_in_moveware"].append(
+                {"job": b, "drafts": len(M["drafts"]),
+                 "draft_net": {c: round(sum(x["net"] for x in M["drafts"] if x["c"] == c), 2)
+                               for c in {x["c"] for x in M["drafts"]}}})
+        seen_amt = {}
+        for iv in M["issued"]:
+            k = (iv["c"], round(iv["net"], 2))
+            if iv["net"] > tol_abs and k in seen_amt and seen_amt[k] != iv["n"]:
+                out["possible_duplicate_invoice"].append(
+                    {"job": b, "currency": iv["c"], "net": iv["net"],
+                     "invoices": [seen_amt[k], iv["n"]]})
+            seen_amt.setdefault(k, iv["n"])
         orig = L.get("inv_orig") or {}
         if net_mxn > tol_abs and M["inv"] <= 0:
             out["invoiced_finance_not_moveware"].append(

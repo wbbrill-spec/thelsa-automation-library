@@ -752,6 +752,7 @@ def _map_job(job: dict, prefetched: dict | None = None) -> dict | None:
     invoiced = False
     i_lines = []
     inv_net_by_ccy = {}
+    inv_list = []          # per invoice: number, date, currency, net — for Finance reconciliation
     try:
         inv = _get(f"/jobs/{job_id}/invoices") or {}
         for it in (_first(inv, "invoices", default=[]) or []):
@@ -762,6 +763,10 @@ def _map_job(job: dict, prefetched: dict | None = None) -> dict | None:
             _ic = _fx_norm(_first(it, "currency", default=None)) or "?"
             _net = _num(_first(it, "valueExclusive", "valueInclusive", "value", "total", "amount"))
             inv_net_by_ccy[_ic] = round(inv_net_by_ccy.get(_ic, 0.0) + _net, 2)
+            inv_list.append({"n": str(_first(it, "number", default="") or ""),
+                             "d": str(_first(it, "date", default="") or "")[:10],
+                             "c": _ic, "net": round(_net, 2),
+                             "st": str(_first(it, "status", default="") or "")})
             iid = _first(it, "id")
             got = False
             if _DEEP_LINES and iid is not None:
@@ -816,6 +821,7 @@ def _map_job(job: dict, prefetched: dict | None = None) -> dict | None:
         "inv_amt": round(invoiced_amt, 2),
         "currency": currency,
         "inv_net_by_ccy": inv_net_by_ccy,   # ex-IVA invoiced, per invoice currency
+        "inv_list": inv_list,
         "invoiced": invoiced,
         "declared": declared,
         "ins": ins,

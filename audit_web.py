@@ -224,7 +224,7 @@ def _finance_metrics(files):
     }
 
 
-def finance_reconcile(mw_files, fin, window_jobs=None, tol_pct=0.01, tol_abs=50.0,
+def finance_reconcile(mw_files, fin, window_jobs=None, tol_pct=0.03, tol_abs=50.0,
                       since="2021-01-01"):
     """Line up Lupita's Finance workbooks against MoveWare, file by file.
 
@@ -247,11 +247,10 @@ def finance_reconcile(mw_files, fin, window_jobs=None, tol_pct=0.01, tol_abs=50.
         il = f.get("inv_list")
         if isinstance(il, list):
             for iv in il:
-                if not iv.get("n") or not iv.get("d"):
-                    e["drafts"].append(iv)          # never issued: no number / date
-                    continue
-                if iv["d"] < since:
-                    continue                         # before the Finance ledger starts
+                if iv.get("d") and iv["d"] < since:
+                    continue                         # dated before the Finance ledger starts
+                if not iv.get("n"):
+                    e["drafts"].append(iv)          # unnumbered: counted, but noted
                 e["issued"].append(iv)
                 c = iv.get("c") or "?"
                 e["net"][c] = e["net"].get(c, 0.0) + (iv.get("net") or 0)
@@ -273,7 +272,7 @@ def finance_reconcile(mw_files, fin, window_jobs=None, tol_pct=0.01, tol_abs=50.
                            "invoice_amount_diff", "invoiced_moveware_not_finance",
                            "cancelled_but_invoiced", "diplomatic_flag_mismatch",
                            "no_price_in_moveware", "finance_cost_without_sales",
-                           "draft_invoices_in_moveware", "possible_duplicate_invoice")}
+                           "unnumbered_invoices_in_moveware", "possible_duplicate_invoice")}
     matched = 0
     out_pending = []
     for b, L in ledger.items():
@@ -287,33 +286,41 @@ def finance_reconcile(mw_files, fin, window_jobs=None, tol_pct=0.01, tol_abs=50.
         matched += 1
         M = mw[b]
         if M["drafts"]:
-            out["draft_invoices_in_moveware"].append(
-                {"job": b, "drafts": len(M["drafts"]),
-                 "draft_net": {c: round(sum(x["net"] for x in M["drafts"] if x["c"] == c), 2)
+            out["unnumbered_invoices_in_moveware"].append(
+                {"job": b, "unnumbered": len(M["drafts"]),
+                 "unnumbered_net": {c: round(sum(x["net"] for x in M["drafts"] if x["c"] == c), 2)
                                for c in {x["c"] for x in M["drafts"]}}})
-        seen_amt = {}
+        groups = {}
         for iv in M["issued"]:
-            k = (iv["c"], round(iv["net"], 2))
-            if iv["net"] > tol_abs and k in seen_amt and seen_amt[k] != iv["n"]:
+            if iv.get("n") and iv.get("d") and iv["net"] > tol_abs:
+                groups.setdefault((iv["c"], round(iv["net"], 2)), []).append(iv)
+        for (c, amt), ivs in groups.items():
+            if len(ivs) != 2:
+                continue                  # 3+ identical = recurring billing (e.g. storage)
+            import datetime as _d
+            d1, d2 = (_d.date.fromisoformat(x["d"]) for x in ivs)
+            if abs((d2 - d1).days) <= 45:
                 out["possible_duplicate_invoice"].append(
-                    {"job": b, "currency": iv["c"], "net": iv["net"],
-                     "invoices": [seen_amt[k], iv["n"]]})
-            seen_amt.setdefault(k, iv["n"])
+                    {"job": b, "currency": c, "net": amt, "invoices": [x["n"] for x in ivs],
+                     "dates": [x["d"] for x in ivs]})
         orig = L.get("inv_orig") or {}
         if net_mxn > tol_abs and M["inv"] <= 0:
             out["invoiced_finance_not_moveware"].append(
                 {"job": b, "finance_invoiced": orig, "moveware_invoiced": 0,
                  "last_invoice": L.get("last")})
         elif M["has_net"] and abs(net_mxn) > tol_abs and (M["net"] or M["inv"] > 0):
-            # Net (ex-IVA) per invoice currency vs Finance's net per invoice currency.
-            for c in sorted(set(M["net"]) | set(orig)):
-                if c == "?":
-                    continue
-                a, b2 = orig.get(c, 0.0), M["net"].get(c, 0.0)
-                if not _close(a, b2):
-                    out["invoice_amount_diff"].append(
-                        {"job": b, "currency": c, "finance": round(a, 2), "moveware": round(b2, 2),
-                         "diff": round(b2 - a, 2), "ccy_known": True, "basis": "net"})
+            # Same bill can be booked in MXN in Finance and USD in MoveWare, so compare
+            # totals in MXN at the rate Finance itself booked for this file.
+            fusd = L.get("inv_usd") or 0
+            rate = (net_mxn / fusd) if fusd and net_mxn and 5 < net_mxn / fusd < 40 else fx.rate("USD", "MXN")
+            mw_mxn = 0.0
+            for c, v in M["net"].items():
+                mw_mxn += v * (1.0 if c == "MXN" else rate if c == "USD" else fx.rate(c, "MXN"))
+            if not _close(net_mxn, mw_mxn) and abs(net_mxn - mw_mxn) > max(500.0, 0.03 * abs(net_mxn)):
+                out["invoice_amount_diff"].append(
+                    {"job": b, "finance_mxn": round(net_mxn, 2), "moveware_mxn": round(mw_mxn, 2),
+                     "diff_mxn": round(mw_mxn - net_mxn, 2), "rate": round(rate, 4),
+                     "finance_by_ccy": orig, "moveware_by_ccy": {k: round(v, 2) for k, v in M["net"].items()}})
         elif M["inv"] > 0 and abs(net_mxn) > tol_abs:
             out_pending.append(b)
         if "C" in M["status"] and net_mxn > tol_abs:
@@ -334,7 +341,7 @@ def finance_reconcile(mw_files, fin, window_jobs=None, tol_pct=0.01, tol_abs=50.
             out["finance_cost_without_sales"].append(
                 {"job": b, "cost_mxn": r.get("total_cost"), "net_sales_mxn": r.get("net_sales")})
     for k in out:
-        key = {"invoice_amount_diff": lambda r: -abs(r["diff"])}.get(k, lambda r: r["job"])
+        key = {"invoice_amount_diff": lambda r: -abs(r["diff_mxn"])}.get(k, lambda r: r["job"])
         out[k].sort(key=key)
     if not mw:
         out["in_finance_not_moveware"] = []   # snapshot not loaded: nothing is "missing"

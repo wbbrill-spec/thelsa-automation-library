@@ -1015,7 +1015,7 @@ def test_finance_reconcile_flags_each_kind(monkeypatch, tmp_path):
     mw = [{"job": "110001", "inv_amt": 696.0, "sell": 1000, "currency": "USD", "status": "W", "inv_list": [{"n": "1", "d": "2026-01-01", "c": "USD", "net": 600.0}]},
           {"job": "110001A", "inv_amt": 464.0, "sell": 0, "currency": "USD", "status": "W", "inv_list": [{"n": "2", "d": "2026-01-02", "c": "USD", "net": 400.0}]},
           {"job": "110002", "inv_amt": 0.0, "sell": 0, "currency": "USD", "status": "C", "inv_list": []},
-          {"job": "110003", "inv_amt": 2900.0, "sell": 2500, "currency": "MXN", "status": "W", "is_embassy": False, "inv_list": [{"n": "3", "d": "2026-01-03", "c": "MXN", "net": 2500.0}]},
+          {"job": "110003", "inv_amt": 3480.0, "sell": 3000, "currency": "MXN", "status": "W", "is_embassy": False, "inv_list": [{"n": "3", "d": "2026-01-03", "c": "MXN", "net": 3000.0}]},
           {"job": "110004", "inv_amt": 348.0, "sell": 300, "currency": "", "status": "W", "inv_list": [{"n": "4", "d": "2026-01-04", "c": "USD", "net": 300.0}]},
           {"job": "110007", "inv_amt": 800.0, "sell": 800, "currency": "MXN", "status": "W", "inv_list": [{"n": "5", "d": "2026-01-05", "c": "MXN", "net": 800.0}]}]
     r = audit_web.finance_reconcile(mw, fin)
@@ -1025,7 +1025,7 @@ def test_finance_reconcile_flags_each_kind(monkeypatch, tmp_path):
     assert d["cancelled_but_invoiced"] == ["110002"]
     assert d["no_price_in_moveware"] == ["110002"]
     assert d["invoice_amount_diff"] == ["110003"]
-    assert r["discrepancies"]["invoice_amount_diff"][0]["diff"] == 500.0
+    assert r["discrepancies"]["invoice_amount_diff"][0]["diff_mxn"] == 1000.0
     assert d["diplomatic_flag_mismatch"] == ["110003"]
     assert "110004" not in d["invoice_amount_diff"]            # net USD matches; IVA ignored
     assert d["invoiced_moveware_not_finance"] == ["110007"]
@@ -1068,27 +1068,39 @@ def test_remap_jobs_replaces_cached_records(monkeypatch):
     assert mw_live._AUDIT["files"]["110001"]["inv_net_by_ccy"] == {"MXN": 1.0}
 
 
-def test_finance_reconcile_drafts_old_invoices_and_duplicates(monkeypatch, tmp_path):
+def test_finance_reconcile_old_invoices_unnumbered_and_duplicates(monkeypatch, tmp_path):
     _fx_stub(monkeypatch, tmp_path)
     fin = {"files": {}, "ledger": {
-        "110010": {"inv_usd": 50, "inv_mxn": 1000, "inv_orig": {"MXN": 1000}},
-        "110011": {"inv_usd": 100, "inv_mxn": 2000, "inv_orig": {"MXN": 2000}}}}
-    mw = [{"job": "110010", "inv_amt": 0, "sell": 1, "status": "W", "inv_list": [
+        "110010": {"inv_usd": 100, "inv_mxn": 2000, "inv_orig": {"MXN": 2000}},
+        "110011": {"inv_usd": 100, "inv_mxn": 2000, "inv_orig": {"MXN": 2000}},
+        "110012": {"inv_usd": 300, "inv_mxn": 6000, "inv_orig": {"USD": 300}}}}
+    mw = [{"job": "110010", "sell": 1, "status": "W", "inv_list": [
               {"n": "900", "d": "2018-05-01", "c": "MXN", "net": 7777.0},    # pre-ledger: ignored
               {"n": "901", "d": "2026-02-01", "c": "MXN", "net": 1000.0},
-              {"n": "", "d": "", "c": "MXN", "net": 1000.0}]},             # draft: not billed
-          {"job": "110011", "inv_amt": 0, "sell": 1, "status": "W", "inv_list": [
+              {"n": "", "d": "", "c": "MXN", "net": 1000.0}]},             # unnumbered: counted
+          {"job": "110011", "sell": 1, "status": "W", "inv_list": [
               {"n": "910", "d": "2026-03-01", "c": "MXN", "net": 2000.0},
-              {"n": "911", "d": "2026-03-15", "c": "MXN", "net": 2000.0}]}]
+              {"n": "911", "d": "2026-03-15", "c": "MXN", "net": 2000.0}]},
+          {"job": "110012", "sell": 1, "status": "W", "inv_list": [          # storage: monthly, same amount
+              {"n": str(920 + k), "d": f"2026-0{k+1}-01", "c": "USD", "net": 100.0} for k in range(3)]}]
     for m in mw:
         m["inv_amt"] = sum(i["net"] for i in m["inv_list"])
     r = audit_web.finance_reconcile(mw, fin)
     d = {k: [x["job"] for x in v] for k, v in r["discrepancies"].items()}
     assert "110010" not in d["invoice_amount_diff"]
-    assert d["draft_invoices_in_moveware"] == ["110010"]
-    assert d["possible_duplicate_invoice"] == ["110011"]
-    assert d["invoice_amount_diff"] == ["110011"]       # 4000 billed vs 2000 in Finance
+    assert d["unnumbered_invoices_in_moveware"] == ["110010"]
+    assert d["possible_duplicate_invoice"] == ["110011"]      # recurring storage not flagged
+    assert d["invoice_amount_diff"] == ["110011"]            # 4000 billed vs 2000 in Finance
+    assert "110012" not in d["invoice_amount_diff"]
 
+
+def test_finance_reconcile_currency_booked_differently(monkeypatch, tmp_path):
+    _fx_stub(monkeypatch, tmp_path)
+    fin = {"files": {}, "ledger": {"110030": {"inv_usd": 14400, "inv_mxn": 290000, "inv_orig": {"MXN": 290000}}}}
+    mw = [{"job": "110030", "inv_amt": 14413, "sell": 1, "status": "W",
+           "inv_list": [{"n": "1", "d": "2026-04-29", "c": "USD", "net": 14413.0}]}]
+    r = audit_web.finance_reconcile(mw, fin)
+    assert r["summary"]["invoice_amount_diff"] == 0           # same bill, different currency
 
 def test_finance_reconcile_only_drafts_counts_as_not_issued(monkeypatch, tmp_path):
     _fx_stub(monkeypatch, tmp_path)
@@ -1097,5 +1109,4 @@ def test_finance_reconcile_only_drafts_counts_as_not_issued(monkeypatch, tmp_pat
            "inv_list": [{"n": "", "d": "", "c": "MXN", "net": 1000.0}]}]
     r = audit_web.finance_reconcile(mw, fin)
     assert r["summary"]["amount_check_pending_remap"] == 0
-    row = r["discrepancies"]["invoice_amount_diff"][0]
-    assert row["job"] == "110020" and row["moveware"] == 0 and row["finance"] == 1000
+    assert r["summary"]["invoice_amount_diff"] == 0           # unnumbered invoice counts as issued

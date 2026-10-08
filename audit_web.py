@@ -1114,6 +1114,21 @@ def audit_raw():
         return jsonify({"error": str(e)})
 
 
+@audit_bp.route("/audit/dump")
+@_login_required
+def audit_dump():
+    """Debug: the in-window files exactly as the auditor mapped them (no line
+    detail), so the dashboard figures can be traced back to MoveWare."""
+    from flask import jsonify
+    import mw_live
+    skip = ("q_lines", "sel_lines", "i_lines")
+    rows = []
+    for f in mw_live.audited_in_window():
+        rows.append({k: (v.isoformat() if hasattr(v, "isoformat") else v)
+                     for k, v in f.items() if k not in skip})
+    return jsonify({"n": len(rows), "files": rows})
+
+
 @audit_bp.route("/audit/counts")
 @_login_required
 def audit_counts():

@@ -240,8 +240,14 @@ def finance_reconcile(mw_files, fin, window_jobs=None, tol_pct=0.01, tol_abs=50.
         if not b:
             continue
         e = mw.setdefault(b, {"inv": 0.0, "sell": 0.0, "ccy": set(), "status": set(),
-                              "embassy": False, "n": 0})
+                              "embassy": False, "n": 0, "net": {}, "has_net": True})
         e["inv"] += f.get("inv_amt") or 0
+        nb = f.get("inv_net_by_ccy")
+        if isinstance(nb, dict):
+            for c, v in nb.items():
+                e["net"][c] = e["net"].get(c, 0.0) + (v or 0)
+        else:
+            e["has_net"] = False      # cached before the per-invoice remap
         e["sell"] += f.get("sell") or 0
         if f.get("currency"):
             e["ccy"].add(fx.normalize(f["currency"]))
@@ -259,6 +265,7 @@ def finance_reconcile(mw_files, fin, window_jobs=None, tol_pct=0.01, tol_abs=50.
                            "cancelled_but_invoiced", "diplomatic_flag_mismatch",
                            "no_price_in_moveware", "finance_cost_without_sales")}
     matched = 0
+    out_pending = []
     for b, L in ledger.items():
         net_mxn = L.get("inv_mxn") or 0
         if b not in mw:
@@ -274,17 +281,18 @@ def finance_reconcile(mw_files, fin, window_jobs=None, tol_pct=0.01, tol_abs=50.
             out["invoiced_finance_not_moveware"].append(
                 {"job": b, "finance_invoiced": orig, "moveware_invoiced": 0,
                  "last_invoice": L.get("last")})
+        elif M["inv"] > 0 and abs(net_mxn) > tol_abs and M["has_net"] and M["net"]:
+            # Net (ex-IVA) per invoice currency vs Finance's net per invoice currency.
+            for c in sorted(set(M["net"]) | set(orig)):
+                if c == "?":
+                    continue
+                a, b2 = orig.get(c, 0.0), M["net"].get(c, 0.0)
+                if not _close(a, b2):
+                    out["invoice_amount_diff"].append(
+                        {"job": b, "currency": c, "finance": round(a, 2), "moveware": round(b2, 2),
+                         "diff": round(b2 - a, 2), "ccy_known": True, "basis": "net"})
         elif M["inv"] > 0 and abs(net_mxn) > tol_abs:
-            # compare in MoveWare's currency; blank currency -> accept the closer one
-            cands = list(M["ccy"]) or ["USD", "MXN"]
-            fin_vals = {c: (L.get("inv_usd") if c == "USD" else L.get("inv_mxn") if c == "MXN"
-                            else orig.get(c, 0)) or 0 for c in cands}
-            best = min(fin_vals, key=lambda c: abs(fin_vals[c] - M["inv"]))
-            if not _close(fin_vals[best], M["inv"]):
-                out["invoice_amount_diff"].append(
-                    {"job": b, "currency": best, "finance": round(fin_vals[best], 2),
-                     "moveware": round(M["inv"], 2), "diff": round(M["inv"] - fin_vals[best], 2),
-                     "ccy_known": bool(M["ccy"])})
+            out_pending.append(b)
         if "C" in M["status"] and net_mxn > tol_abs:
             out["cancelled_but_invoiced"].append({"job": b, "finance_invoiced_mxn": round(net_mxn)})
         if (L.get("type") == "DIPLOM") != M["embassy"] and L.get("type") in ("DIPLOM", "CORP-PART", "TMS"):
@@ -305,8 +313,11 @@ def finance_reconcile(mw_files, fin, window_jobs=None, tol_pct=0.01, tol_abs=50.
     for k in out:
         key = {"invoice_amount_diff": lambda r: -abs(r["diff"])}.get(k, lambda r: r["job"])
         out[k].sort(key=key)
+    if not mw:
+        out["in_finance_not_moveware"] = []   # snapshot not loaded: nothing is "missing"
     return {"summary": {"finance_files": len(ledger), "moveware_files": len(mw),
-                        "matched": matched, **{k: len(v) for k, v in out.items()}},
+                        "matched": matched, "amount_check_pending_remap": len(out_pending),
+                        **{k: len(v) for k, v in out.items()}},
             "discrepancies": out}
 
 
@@ -1227,7 +1238,14 @@ def audit_financecheck():
         prog = mw_live.audit_progress()
     except Exception as e:
         return jsonify({"error": f"moveware snapshot unavailable: {e}"})
+    if request.args.get("remap") == "1":
+        # Re-read every MoveWare job that lines up with a Finance file (by internal id).
+        want = set((raw.get("ledger") or {}).keys())
+        ids = [f.get("job_id") or f.get("job") for f in allf if _base_file(f.get("job")) in want]
+        started = mw_live.remap_jobs(ids)
+        return jsonify({"remap_started": started, "jobs": len(ids), "status": mw_live.remap_status()})
     res = finance_reconcile(allf, raw, window_jobs=win)
+    res["remap"] = mw_live.remap_status()
     res["moveware_coverage"] = {k: prog.get(k) for k in
                                 ("audited_total", "full_coverage", "backfill_complete", "complete")}
     res["finance_source"] = raw.get("source")

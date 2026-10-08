@@ -1012,12 +1012,12 @@ def test_finance_reconcile_flags_each_kind(monkeypatch, tmp_path):
                "110003": {"inv_usd": 100, "inv_mxn": 2000, "inv_orig": {"MXN": 2000}, "type": "DIPLOM"},
                "110004": {"inv_usd": 300, "inv_mxn": 6000, "inv_orig": {"USD": 300}, "type": "TMS"},
                "110009": {"inv_usd": 50, "inv_mxn": 1000, "inv_orig": {"MXN": 1000}, "type": "AGENTE"}}}
-    mw = [{"job": "110001", "inv_amt": 600.0, "sell": 1000, "currency": "USD", "status": "W"},
-          {"job": "110001A", "inv_amt": 400.0, "sell": 0, "currency": "USD", "status": "W"},
-          {"job": "110002", "inv_amt": 0.0, "sell": 0, "currency": "USD", "status": "C"},
-          {"job": "110003", "inv_amt": 2500.0, "sell": 2500, "currency": "MXN", "status": "W", "is_embassy": False},
-          {"job": "110004", "inv_amt": 300.0, "sell": 300, "currency": "", "status": "W"},
-          {"job": "110007", "inv_amt": 800.0, "sell": 800, "currency": "MXN", "status": "W"}]
+    mw = [{"job": "110001", "inv_amt": 696.0, "sell": 1000, "currency": "USD", "status": "W", "inv_net_by_ccy": {"USD": 600.0}},
+          {"job": "110001A", "inv_amt": 464.0, "sell": 0, "currency": "USD", "status": "W", "inv_net_by_ccy": {"USD": 400.0}},
+          {"job": "110002", "inv_amt": 0.0, "sell": 0, "currency": "USD", "status": "C", "inv_net_by_ccy": {}},
+          {"job": "110003", "inv_amt": 2900.0, "sell": 2500, "currency": "MXN", "status": "W", "is_embassy": False, "inv_net_by_ccy": {"MXN": 2500.0}},
+          {"job": "110004", "inv_amt": 348.0, "sell": 300, "currency": "", "status": "W", "inv_net_by_ccy": {"USD": 300.0}},
+          {"job": "110007", "inv_amt": 800.0, "sell": 800, "currency": "MXN", "status": "W", "inv_net_by_ccy": {"MXN": 800.0}}]
     r = audit_web.finance_reconcile(mw, fin)
     d = {k: [x["job"] for x in v] for k, v in r["discrepancies"].items()}
     assert "110001" not in d["invoice_amount_diff"]            # sequel invoices summed: 600+400 == 1000
@@ -1027,10 +1027,42 @@ def test_finance_reconcile_flags_each_kind(monkeypatch, tmp_path):
     assert d["invoice_amount_diff"] == ["110003"]
     assert r["discrepancies"]["invoice_amount_diff"][0]["diff"] == 500.0
     assert d["diplomatic_flag_mismatch"] == ["110003"]
-    assert "110004" not in d["invoice_amount_diff"]            # blank ccy matched on USD
+    assert "110004" not in d["invoice_amount_diff"]            # net USD matches; IVA ignored
     assert d["invoiced_moveware_not_finance"] == ["110007"]
     assert d["in_finance_not_moveware"] == ["110009"]
     assert d["finance_cost_without_sales"] == ["110005"]
     assert r["summary"]["matched"] == 4
     import json
     assert "client" not in json.dumps(r)
+
+
+def test_finance_reconcile_old_cache_rows_are_pending_not_flagged(monkeypatch, tmp_path):
+    _fx_stub(monkeypatch, tmp_path)
+    fin = {"files": {}, "ledger": {"110001": {"inv_usd": 1000, "inv_mxn": 20000, "inv_orig": {"USD": 1000}}}}
+    mw = [{"job": "110001", "inv_amt": 5000.0, "sell": 1, "status": "W"}]   # no inv_net_by_ccy yet
+    r = audit_web.finance_reconcile(mw, fin)
+    assert r["summary"]["invoice_amount_diff"] == 0
+    assert r["summary"]["amount_check_pending_remap"] == 1
+
+
+def test_finance_reconcile_empty_snapshot_reports_nothing_missing(monkeypatch, tmp_path):
+    _fx_stub(monkeypatch, tmp_path)
+    fin = {"files": {}, "ledger": {"110001": {"inv_usd": 1000, "inv_mxn": 20000, "inv_orig": {"USD": 1000}}}}
+    r = audit_web.finance_reconcile([], fin)
+    assert r["summary"]["in_finance_not_moveware"] == 0
+
+
+def test_remap_jobs_replaces_cached_records(monkeypatch):
+    import mw_live, time
+    monkeypatch.setattr(mw_live, "_map_gap", lambda i: ("kept", {"job": str(i), "job_id": str(i), "inv_net_by_ccy": {"MXN": 1.0}}))
+    monkeypatch.setattr(mw_live, "_is_out_of_window", lambda m: False)
+    monkeypatch.setattr(mw_live, "_persist_snapshot", lambda: None)
+    mw_live._AUDIT["files"]["110001"] = {"job": "110001"}
+    assert mw_live.remap_jobs(["110001", "x"]) is True
+    for _ in range(50):
+        if not mw_live.remap_status()["running"]:
+            break
+        time.sleep(0.05)
+    st = mw_live.remap_status()
+    assert st["total"] == 1 and st["kept"] == 1
+    assert mw_live._AUDIT["files"]["110001"]["inv_net_by_ccy"] == {"MXN": 1.0}

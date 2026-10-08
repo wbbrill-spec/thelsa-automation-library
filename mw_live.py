@@ -525,6 +525,14 @@ def _v2_volume_weight(src: dict):
     return vol, wt
 
 
+def _fx_norm(v):
+    try:
+        import fx
+        return fx.normalize(v)
+    except Exception:
+        return None
+
+
 def _map_job(job: dict, prefetched: dict | None = None) -> dict | None:
     # `prefetched` is the GET /jobs/{id} detail if the caller already has it
     # (the gap-fill reads the detail to decide tenant vs foreign, then passes it
@@ -743,11 +751,17 @@ def _map_job(job: dict, prefetched: dict | None = None) -> dict | None:
     invoiced_amt = 0.0
     invoiced = False
     i_lines = []
+    inv_net_by_ccy = {}
     try:
         inv = _get(f"/jobs/{job_id}/invoices") or {}
         for it in (_first(inv, "invoices", default=[]) or []):
             iv = _num(_first(it, "valueInclusive", "value", "valueExclusive", "total", "amount"))
             invoiced_amt += iv
+            # Net (ex-IVA) amount per invoice currency — what Finance books. A job can
+            # carry invoices in more than one currency, so keep them apart.
+            _ic = _fx_norm(_first(it, "currency", default=None)) or "?"
+            _net = _num(_first(it, "valueExclusive", "valueInclusive", "value", "total", "amount"))
+            inv_net_by_ccy[_ic] = round(inv_net_by_ccy.get(_ic, 0.0) + _net, 2)
             iid = _first(it, "id")
             got = False
             if _DEEP_LINES and iid is not None:
@@ -767,6 +781,11 @@ def _map_job(job: dict, prefetched: dict | None = None) -> dict | None:
         invoiced = invoiced_amt > 0
     except Exception:
         pass
+    # Job-level currency is often blank on V2; the invoices carry it.
+    if not currency:
+        _known = [c for c in inv_net_by_ccy if c != "?"]
+        if len(_known) == 1:
+            currency = _known[0]
 
     # Actual (supplier/creditor) cost is NOT exposed by RestV2 yet (MoveConnect,
     # 2026-09-17: option charges are sell-only). Leave it 0 so profit/margin stay
@@ -796,6 +815,7 @@ def _map_job(job: dict, prefetched: dict | None = None) -> dict | None:
         "sell": round(sell, 2),
         "inv_amt": round(invoiced_amt, 2),
         "currency": currency,
+        "inv_net_by_ccy": inv_net_by_ccy,   # ex-IVA invoiced, per invoice currency
         "invoiced": invoiced,
         "declared": declared,
         "ins": ins,
@@ -1504,6 +1524,49 @@ def force_refresh():
 
     threading.Thread(target=_run, daemon=True, name="force-refresh").start()
     return True
+
+
+_REMAP = {"running": False, "total": 0, "done": 0, "kept": 0, "errors": 0}
+
+
+def remap_jobs(job_ids, workers: int = 6) -> bool:
+    """Re-read specific MoveWare jobs by internal id in the background and replace
+    their cached records, so a mapping change applies to them now instead of at the
+    next 6h full re-scan. Bounded concurrency (beta API: "don't hammer it").
+    Returns False if a remap is already running."""
+    ids = sorted({str(i) for i in job_ids if str(i).isdigit()})
+    with _AUDIT_LOCK:
+        if _REMAP["running"]:
+            return False
+        _REMAP.update(running=True, total=len(ids), done=0, kept=0, errors=0)
+
+    def _one(jid):
+        st, m = _map_gap(int(jid))
+        with _AUDIT_LOCK:
+            _REMAP["done"] += 1
+            if st == "kept" and m:
+                _AUDIT["files"][jid] = _trim_historical(m) if _is_out_of_window(m) else m
+                _REMAP["kept"] += 1
+            else:
+                _REMAP["errors"] += 1
+
+    def _run():
+        try:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=max(1, min(workers, 8))) as ex:
+                list(ex.map(_one, ids))
+            _persist_snapshot()
+        except Exception:
+            pass
+        finally:
+            _REMAP["running"] = False
+
+    threading.Thread(target=_run, daemon=True, name="remap-jobs").start()
+    return True
+
+
+def remap_status() -> dict:
+    return dict(_REMAP)
 
 
 def audited_in_window():

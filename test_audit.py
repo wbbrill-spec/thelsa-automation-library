@@ -1088,3 +1088,14 @@ def test_finance_reconcile_drafts_old_invoices_and_duplicates(monkeypatch, tmp_p
     assert d["draft_invoices_in_moveware"] == ["110010"]
     assert d["possible_duplicate_invoice"] == ["110011"]
     assert d["invoice_amount_diff"] == ["110011"]       # 4000 billed vs 2000 in Finance
+
+
+def test_finance_reconcile_only_drafts_counts_as_not_issued(monkeypatch, tmp_path):
+    _fx_stub(monkeypatch, tmp_path)
+    fin = {"files": {}, "ledger": {"110020": {"inv_usd": 50, "inv_mxn": 1000, "inv_orig": {"MXN": 1000}}}}
+    mw = [{"job": "110020", "inv_amt": 1160.0, "sell": 1, "status": "W",
+           "inv_list": [{"n": "", "d": "", "c": "MXN", "net": 1000.0}]}]
+    r = audit_web.finance_reconcile(mw, fin)
+    assert r["summary"]["amount_check_pending_remap"] == 0
+    row = r["discrepancies"]["invoice_amount_diff"][0]
+    assert row["job"] == "110020" and row["moveware"] == 0 and row["finance"] == 1000

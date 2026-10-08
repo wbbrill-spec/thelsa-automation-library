@@ -304,7 +304,7 @@ def finance_reconcile(mw_files, fin, window_jobs=None, tol_pct=0.01, tol_abs=50.
             out["invoiced_finance_not_moveware"].append(
                 {"job": b, "finance_invoiced": orig, "moveware_invoiced": 0,
                  "last_invoice": L.get("last")})
-        elif M["inv"] > 0 and abs(net_mxn) > tol_abs and M["has_net"] and M["net"]:
+        elif M["has_net"] and abs(net_mxn) > tol_abs and (M["net"] or M["inv"] > 0):
             # Net (ex-IVA) per invoice currency vs Finance's net per invoice currency.
             for c in sorted(set(M["net"]) | set(orig)):
                 if c == "?":

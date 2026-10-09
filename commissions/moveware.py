@@ -15,7 +15,8 @@ Two things are needed from Moveware and nowhere else:
 How Moveware marks an agent job, a corporate one, a private one and a
 diplomatic one is NOT assumed here. `type_crosstab` measures it: it lines up
 Finance's type for every job in the margin report against the three things
-Moveware records (customer type, booking agent, corporate account) and counts
+Moveware records (bill-to type, customer type, booking agent, corporate
+account) and counts
 the combinations. The rule is then written into Settings from that table and
 confirmed with Lupita. Until then `bookings_by_month` only counts jobs Finance
 has already typed.
@@ -77,10 +78,15 @@ def _month(v) -> str:
 
 
 def signature(f: dict) -> tuple:
-    """How Moveware classes one job: (customer type, booking agent?, corporate account?)."""
+    """How Moveware classes one job: (bill-to type, customer type, booking
+    agent?, corporate account?). The bill-to type comes first because it is the
+    one mark seen to differ between lots of one file (110771A Agent, 110771B
+    Private, measured 8 Oct 2026)."""
     def yn(v):
         return "?" if v is None else ("yes" if v else "no")
-    return (str(f.get("customer_type") or "").strip() or "(blank)",
+    bt = f.get("bill_to_type")
+    return ("?" if bt is None else (str(bt).strip() or "(blank)"),
+            str(f.get("customer_type") or "").strip() or "(blank)",
             yn(f.get("has_booking_agent")), yn(f.get("has_corporate_account")))
 
 

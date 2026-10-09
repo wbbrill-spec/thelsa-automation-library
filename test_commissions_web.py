@@ -258,3 +258,73 @@ def test_records_round_trip_and_refuse_anything_the_reader_did_not_write(tmp_pat
         with pytest.raises(F.FinanceReportError) as e:
             F.from_records(bad)
         assert "stored line 4" in str(e.value) and str(value) not in str(e.value)
+
+
+# ── MXN / USD and EN / ES ────────────────────────────────────────────────────
+def test_page_carries_both_languages_and_both_currencies(client, tmp_path):
+    import re
+    login(client)
+    upload(client, xlsx(tmp_path))
+    page = client.get("/commissions").data.decode()
+    assert 'id="ccySeg"' in page and 'data-c="usd"' in page and 'id="langSeg"' in page and 'data-l="es"' in page
+    for es in ("Reporte de comisiones TMS", "Prueba. No usar para pago.", "Facturado", "Costo real", "Margen bruto",
+               "Alcance de ventas", "Por mes de factura", "Puntos por revisar en el reporte de Finanzas",
+               "Ventas contratadas por mes", "Subir reporte", "Descargar en Excel", "Cálculo nuevo",
+               "El tipo de cambio parece mal capturado", "fila 17: tipo de cambio 12.6231", "espera costo",
+               "Compradora y Gerente de Costos (Lupita)", "Reporte cargado: 19 líneas", "mayo 2026"):
+        assert es in page, es
+    rep = R.build(F.load_base(io.BytesIO(xlsx(tmp_path))), W.settings())
+    spans = re.findall(r'class="m" data-x="([-0-9.]+)" data-u="([-0-9.]*)" data-d="(\d)">([^<]*)<', page)
+    assert len(spans) > 100
+    assert all(u != "" for _x, u, _d, _t in spans)                  # every amount has its dollar figure
+    pairs = {(round(float(x), 2), round(float(u), 2)) for x, u, _d, _t in spans}
+    new = rep["total_new"]
+    assert (round(new["total"], 2), round(new["usd"]["total"], 2)) in pairs
+    may = rep["months"][0]
+    assert may["month"] == "2026-05" and may["rate"] == pytest.approx(17.5)       # middle rate, not the mistyped 12.62
+    assert (round(may["billed"], 2), round(may["billed"] / 17.5, 2)) in pairs
+    # without the script the page still reads in pesos
+    assert f">{new['total']:,.2f}<" in page
+
+
+def test_dollar_view_uses_each_months_own_rate_and_adds_up():
+    from test_commissions_finance import D, USD
+    rows = [row("110001", 175000, usd=10000, ccy=USD, fx=17.5), row("110002", 12623.1, usd=1000, ccy=USD, fx=12.6231, folio=2),
+            row("110003", 176000, usd=10000, ccy=USD, fx=17.6, folio=3),
+            row("110004", 180000, usd=10000, ccy=USD, fx=18.0, folio=4, date=D(2026, 6, 3)),
+            row("110005", 90000, folio=5, date=D(2026, 7, 3))]                    # a month with no dollar invoice
+    import tempfile, pathlib
+    lines = F.load_base(book(pathlib.Path(tempfile.mkdtemp()) / "r.xlsx", rows))
+    rep = R.build(lines, W.settings())
+    rates = rep["rates"]["by_month"]
+    assert rates["2026-05"] == pytest.approx(17.5) and rates["2026-06"] == pytest.approx(18.0)
+    assert rates["2026-07"] == pytest.approx(17.55) == rep["rates"]["other"]      # the middle of all of them
+    for m in rep["months"]:
+        assert m["usd"]["billed"] == pytest.approx(m["billed"] / m["rate"])
+    for k in R.MONEY:
+        assert rep["total_all"]["usd"][k] == pytest.approx(sum(m["usd"][k] for m in rep["months"]))
+    assert sum(p["usd"]["if_collected"] for p in rep["people"]) == pytest.approx(rep["total_new"]["usd"]["total"])
+    assert sum(x["usd"]["total"] for x in rep["lines"]) == pytest.approx(rep["total_all"]["usd"]["total"])
+    none = R.build([ln for ln in lines if ln.job == "110005"], W.settings())
+    assert none["rates"]["from_report"] is False and none["rates"]["other"] == 16.5
+
+
+def test_every_point_and_every_label_has_its_spanish(tmp_path):
+    assert set(R.LABELS_ES) == set(R.LABELS)
+    assert all(R.LABELS_ES[k] != R.LABELS[k] for k in R.LABELS)
+    lines = F.load_base(book(tmp_path / "r.xlsx", ROWS))
+    for s in (E.Settings(), E.Settings(sales_fx="internal")):
+        for p in F.problems(lines, s):
+            assert p["detail_es"] and p["detail_es"] != p["detail"], p["kind"]
+            assert "row " not in p["detail_es"]
+
+
+def test_messages_come_in_both_languages(client, tmp_path):
+    login(client)
+    upload(client, xlsx(tmp_path, [row("110001", "ver nota")], "t.xlsx"))
+    page = client.get("/commissions").data.decode()
+    assert "the cell holds text, not an amount" in page and "la celda tiene texto, no un importe" in page
+    assert "No se cambió nada" in page
+    client.post("/commissions/bookings", data={"csrf": "tok", "b_2026-05": "abc"})
+    page = client.get("/commissions").data.decode()
+    assert "May 2026" in page and "No se guardaron las ventas contratadas" in page and "mayo 2026" in page

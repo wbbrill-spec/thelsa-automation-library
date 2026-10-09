@@ -93,7 +93,11 @@ def lines(tmp_path_factory):
     return F.load_base(book(tmp_path_factory.mktemp("fin") / "Margen x Expediente.xlsx", ROWS))
 
 
-S = E.Settings()
+# Most tests below fix dollars at the internal rate (16.5), the harder path.
+# The default, dollars at the rate of the invoice day, has its own section at
+# the end of the file.
+S = E.Settings(sales_fx="internal")
+SPOT = E.Settings()
 
 
 def by_job(cl):
@@ -180,7 +184,7 @@ def test_cancel_and_rebill_nets_out_by_month(lines):
 
 
 def test_margin_part_is_the_same_however_cost_is_spread(lines):
-    s = E.Settings(budgets={"2026-05": 1e6, "2026-06": 1e6})
+    s = E.Settings(budgets={"2026-05": 1e6, "2026-06": 1e6}, sales_fx="internal")
     cl = F.commission_lines(lines, s)
     parts = [E.calc_line(ln, 0.6, s).margin for m in ("2026-05", "2026-06")
              for ln in cl[m] if ln.job == "110003"]
@@ -695,3 +699,94 @@ def test_error_messages_carry_no_text_from_the_workbook(tmp_path):
     with pytest.raises(E.SettingsError) as e:
         E.to_mxn(100, "Libra de Garcia", S, usd_equivalent=5)
     assert "Garcia" not in str(e.value)
+
+
+# ── dollars at the rate of the invoice day (the default since 8 Oct 2026) ────
+def test_by_default_a_dollar_sale_counts_at_finances_peso_amount(lines):
+    """Bill, 8 Oct 2026: 16.5 would throw off the profitability figures, because
+    costs are in pesos at the day's rate. Sales now are too."""
+    assert E.Settings().sales_fx == "spot"
+    j = F.jobs(lines, SPOT)
+    a = j[("110001", "CORP-PART")]
+    assert a["billed_mxn"] == a["billed_fin_mxn"] == pytest.approx(175000)      # 10,000 dollars at 17.5
+    for job in j.values():
+        assert job["billed_mxn"] == pytest.approx(job["billed_fin_mxn"])
+    may = by_job(F.commission_lines(lines, SPOT))["2026-05"]["110001"]
+    assert (may.billed, may.cost) == (pytest.approx(175000), pytest.approx(110000))
+    r = E.calc_line(may, 0.6, SPOT)
+    assert r.margin == pytest.approx((175000 - 110000) * 0.03)                  # the margin Finance sees
+
+
+def test_cancel_and_rebill_at_the_days_rates(lines):
+    cl = by_job(F.commission_lines(lines, SPOT))
+    assert cl["2026-05"]["110003"].billed == pytest.approx(344000.1234)
+    assert cl["2026-06"]["110003"].billed == pytest.approx(-346000.5678 + 415200.9876)
+
+
+def test_with_spot_the_currency_of_a_sale_raises_no_point(lines, load):
+    kinds = kinds_of(F.problems(lines, SPOT))
+    assert "currency_missing" not in kinds and "no_dollar_amount" not in kinds
+    # the same sheet at the internal rate does raise them
+    assert "currency_missing" in kinds_of(F.problems(lines, S))
+    ls = load([row("110100", 20000, usd=900, ccy="Libra Esterlina"), row("110101", 17500, usd=None, ccy=USD, fx=17.5)])
+    assert F.problems(ls, SPOT) == [p for p in F.problems(ls, SPOT) if p["kind"] == "no_cost_posted"]
+
+
+def test_with_spot_a_mistyped_rate_does_change_the_commission_and_says_so(lines):
+    found = kinds_of(F.problems(lines, SPOT))["fx_outlier"]
+    assert [x["job"] for x in found] == ["110633"] and "too low" in found[0]["detail"]
+    assert "too low" not in kinds_of(F.problems(lines, S))["fx_outlier"][0]["detail"]
+    j = F.jobs(lines, SPOT)[("110633", "CORP-PART")]
+    assert j["billed_mxn"] == pytest.approx(243636.18)                          # Finance's (understated) pesos
+
+
+def test_with_spot_dollars_and_pesos_that_disagree_are_still_reported(load):
+    ls = load([row("110102", 175000, usd=1000, ccy=USD, fx=17.5),               # a zero dropped from the dollars
+               row("110103", 175000, usd=0, ccy=USD, fx=17.5, folio=2),
+               row("110104", -175000, usd=10000, ccy=USD, fx=17.5, series="NCCORP", folio=3),
+               row("110105", 175000, usd=10000, ccy=USD, fx=17.5, folio=4)])
+    found = kinds_of(F.problems(ls, SPOT))["dollar_amount_mismatch"]
+    assert [x["job"] for x in found] == ["110102", "110103", "110104"]
+    assert all("uses the pesos" in x["detail"] for x in found)
+    j = F.jobs(ls, SPOT)
+    assert [j[(k, "CORP-PART")]["billed_mxn"] for k in ("110102", "110103", "110104")] == [175000, 175000, -175000]
+
+
+def test_every_other_check_still_runs_on_a_dollar_line_with_spot(load):
+    """A dollar line with an unusable dollar amount must not skip its other checks."""
+    ls = load([row("110106", -5000, usd=None, ccy=USD, series="NCCORP", folio=2, cancels="see the email",
+                   billto="EMBAJADA DE LOS ESTADOS UNIDOS", date=None)])
+    kinds = kinds_of(F.problems(ls, SPOT))
+    assert {"credit_reference_unreadable", "embassy_billed_in_scope", "no_date"} <= set(kinds)
+
+
+def test_the_setting_must_be_one_of_the_two():
+    with pytest.raises(E.SettingsError):
+        E.Settings(sales_fx="budget").check()
+    assert E.Settings(sales_fx="internal").check().sales_fx == "internal"
+
+
+def test_with_spot_a_cancelled_dollar_job_does_not_carry_its_cost(load):
+    """Invoice 10,000 dollars at 17.50, credit note at 17.60: in pesos the job
+    is -1,000, not zero. It is still a cancelled job, so its cost stays off the
+    lines and is reported; only the exchange difference is left."""
+    ls = load([row("110110", 175000, usd=10000, ccy=USD, fx=17.5),
+               row("110110", -176000, usd=-10000, ccy=USD, fx=17.6, date=D(2026, 6, 2), series="NCCORP", folio=2,
+                   cancels="CORP 1"),
+               cost("110110", 50000),
+               # the other way round: the difference is positive, and it is not "billed, no cost yet"
+               row("110111", 176000, usd=10000, ccy=USD, fx=17.6, folio=3),
+               row("110111", -175000, usd=-10000, ccy=USD, fx=17.5, date=D(2026, 6, 2), series="NCCORP", folio=4,
+                   cancels="CORP 3")])
+    cl = F.commission_lines(ls, SPOT)
+    assert all(ln.cost == 0 and ln.cost_posted for m in cl.values() for ln in m)
+    total = sum(E.calc_line(ln, 0.6, SPOT).total for m in cl.values() for ln in m)
+    assert abs(total) < 1e-6                                   # -1,000 and +1,000 of exchange difference
+    kinds = kinds_of(F.problems(ls, SPOT))
+    assert [(x["job"], x["amount_mxn"]) for x in kinds["cost_not_counted"]] == [("110110", 50000.0)]
+    assert "no_cost_posted" not in kinds
+    # a job that is partly credited is not cancelled: its cost counts
+    part = load([row("110112", 175000, usd=10000, ccy=USD, fx=17.5),
+                 row("110112", -88000, usd=-5000, ccy=USD, fx=17.6, date=D(2026, 6, 2), series="NCCORP", folio=2),
+                 cost("110112", 50000)])
+    assert sum(ln.cost for m in F.commission_lines(part, SPOT).values() for ln in m) == pytest.approx(50000)

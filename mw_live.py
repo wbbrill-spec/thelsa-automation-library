@@ -533,6 +533,16 @@ def _fx_norm(v):
         return None
 
 
+def _role_present(roles_obj, name: str) -> bool:
+    """True when the job detail carries a real party in this role (an entity with
+    an id, code or name). Returns a yes/no only; the party itself is not kept."""
+    r = roles_obj.get(name) if isinstance(roles_obj, dict) else None
+    if not isinstance(r, dict):
+        return False
+    ent = r.get("entity") if isinstance(r.get("entity"), dict) else r
+    return any(ent.get(k) not in (None, "", 0) for k in ("id", "code", "name", "lastName"))
+
+
 def _map_job(job: dict, prefetched: dict | None = None) -> dict | None:
     # `prefetched` is the GET /jobs/{id} detail if the caller already has it
     # (the gap-fill reads the detail to decide tenant vs foreign, then passes it
@@ -831,6 +841,13 @@ def _map_job(job: dict, prefetched: dict | None = None) -> dict | None:
         "pack": pack,
         "delivery": delivery,
         "created": created,
+        "booked": _adate("booked"),   # Date Won — detail only (guide §3); commission sales reach
+        # How Moveware itself classes the job, for telling Corporate, Private, agent and
+        # diplomatic work apart. Codes and yes/no only — never the account's name.
+        "customer_type": _code_text(_first(src, "customerType", default="")),
+        # None = not known: some details come back with an empty roles block (guide §6).
+        "has_booking_agent": _role_present(roles_obj, "bookingAgent") if roles_obj else None,
+        "has_corporate_account": _role_present(roles_obj, "corporateAccount") if roles_obj else None,
         "anchor": anchor,   # most-recent activity date; window filter uses this
         # Line-level reconciliation: every quoted charge line vs every invoiced
         # charge line, plus the quote's estimated size vs the actual. audit_web

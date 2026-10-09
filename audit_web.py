@@ -1457,10 +1457,24 @@ def audit_v2probe():
     (+charges), and the supplier COST side (/suppliers/{id}/transactions?job=)."""
     from flask import jsonify, request
     import mw_live
+    import mw_lots
     jid = request.args.get("id", "").strip()
+    asked = request.args.get("number", "").strip()
+    # The number staff use is not the id the API opens a job by: lot 110771A is
+    # id 110782 (Data Capture Guide §2). `?number=110771A` — or a lot typed into
+    # `?id=` — is looked up first. A plain `?id=` stays Moveware's internal id.
+    if not asked and jid and not jid.isdigit():
+        asked, jid = jid, ""
+    if asked:
+        found = mw_lots.find(asked)
+        if found.get("status") != "found":
+            return jsonify({"error": f"{found.get('number') or asked} was not found by the quick checks.",
+                            "lookup": found,
+                            "next": f"/audit/lot?number={found.get('number') or asked}"})
+        jid = found["job"]["id"]
     out = {"id": jid, "base_url": mw_live.BASE_URL}
     if not jid:
-        return jsonify({"error": "pass ?id=JOBID"})
+        return jsonify({"error": "pass ?number=110771A (the number staff use) or ?id= (Moveware's internal id)"})
 
     def grab(key, path, t=10):
         try:
@@ -1469,6 +1483,11 @@ def audit_v2probe():
             out[key + "_error"] = str(e)[:200]
 
     grab("job", f"/jobs/{jid}")
+    # Say which job this id really is — on a lot the two numbers differ.
+    _job = out.get("job") if isinstance(out.get("job"), dict) else {}
+    out["number"] = mw_lots.display_number(_job.get("data") if isinstance(_job.get("data"), dict) else _job)
+    if asked and out["number"] != mw_lots.normalize(asked):
+        out["warning"] = f"asked for {asked}, this id is {out['number'] or 'unknown'}"
     grab("roles", f"/jobs/{jid}/roles")
     grab("quotations", f"/jobs/{jid}/quotations")
     grab("options", f"/jobs/{jid}/options")
@@ -1503,6 +1522,40 @@ def audit_v2probe():
             grab("sup0_tx_for_job", f"/suppliers/{sid}/transactions?job={jid}")
     except Exception as e:
         out["sup0_tx_error"] = str(e)[:200]
+    return jsonify(out)
+
+
+@audit_bp.route("/audit/lot")
+@_login_required
+def audit_lot():
+    """Find a job by the number staff use, lots included (110771A, 110771B…).
+
+      /audit/lot?number=110771A            quick checks; starts the id-by-id
+                                           search in the background if they miss
+      /audit/lot?number=110771A&result=1   collect the background search
+      /audit/lot?number=110771&all=1       search for every lot on the file
+      &ids=2000                            open more ids in one search
+
+    Job numbers, ids, status, branch and dates only — no names, no money.
+    Read-only. See mw_lots.py and the Moveware Data Capture Guide §2 / §5.1."""
+    from flask import jsonify, request
+    import mw_lots
+    number = request.args.get("number", "").strip()
+    if not mw_lots.normalize(number):
+        return jsonify({"error": "pass ?number=110771A (digits with an optional lot letter)"})
+    norm = mw_lots.normalize(number)
+    collect = f"/audit/lot?number={norm}&result=1"
+    if request.args.get("result"):
+        return jsonify(mw_lots.search_result(number))
+    every_lot = bool(request.args.get("all"))
+    out = mw_lots.find(number)
+    if out["status"] == "not_found_yet" or (every_lot and out["status"] == "found"):
+        try:
+            ids = int(request.args.get("ids") or 0) or None
+        except ValueError:
+            ids = None
+        out["search"] = mw_lots.start_search(number, limit=ids, every_lot=every_lot)
+        out["collect"] = collect
     return jsonify(out)
 
 

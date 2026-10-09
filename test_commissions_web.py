@@ -281,13 +281,28 @@ def test_page_carries_both_languages_and_both_currencies(client, tmp_path):
     new = rep["total_new"]
     assert (round(new["total"], 2), round(new["usd"]["total"], 2)) in pairs
     may = rep["months"][0]
-    assert may["month"] == "2026-05" and may["rate"] == pytest.approx(17.5)       # middle rate, not the mistyped 12.62
-    assert (round(may["billed"], 2), round(may["billed"] / 17.5, 2)) in pairs
+    assert may["month"] == "2026-05" and may["rate"] == 16.5                      # the commission's own rate
+    assert (round(may["billed"], 2), round(may["billed"] / 16.5, 2)) in pairs
+    assert "internal rate of 16.50 pesos per dollar" in page and "tipo de cambio interno de 16.50" in page
     # without the script the page still reads in pesos
     assert f">{new['total']:,.2f}<" in page
 
 
-def test_dollar_view_uses_each_months_own_rate_and_adds_up():
+def test_dollar_view_at_the_internal_rate_shows_the_dollars_invoiced():
+    from test_commissions_finance import USD
+    import tempfile, pathlib
+    lines = F.load_base(book(pathlib.Path(tempfile.mkdtemp()) / "r.xlsx",
+                             [row("110001", 175000, usd=10000, ccy=USD, fx=17.5), row("110002", 33000, folio=2)]))
+    rep = R.build(lines, W.settings())
+    assert W.settings().sales_fx == "internal"
+    assert rep["rates"] == {"by_month": {"2026-05": 16.5}, "other": 16.5, "from_report": False}
+    by = {x["job"]: x for x in rep["lines"]}
+    assert by["110001"]["billed"] == pytest.approx(165000) and by["110001"]["usd"]["billed"] == pytest.approx(10000)
+    assert by["110002"]["usd"]["billed"] == pytest.approx(2000)
+    assert rep["total_all"]["usd"]["total"] == pytest.approx(rep["total_all"]["total"] / 16.5)
+
+
+def test_dollar_view_with_spot_uses_each_months_own_rate_and_adds_up():
     from test_commissions_finance import D, USD
     rows = [row("110001", 175000, usd=10000, ccy=USD, fx=17.5), row("110002", 12623.1, usd=1000, ccy=USD, fx=12.6231, folio=2),
             row("110003", 176000, usd=10000, ccy=USD, fx=17.6, folio=3),
@@ -295,7 +310,8 @@ def test_dollar_view_uses_each_months_own_rate_and_adds_up():
             row("110005", 90000, folio=5, date=D(2026, 7, 3))]                    # a month with no dollar invoice
     import tempfile, pathlib
     lines = F.load_base(book(pathlib.Path(tempfile.mkdtemp()) / "r.xlsx", rows))
-    rep = R.build(lines, W.settings())
+    spot = E.Settings(budgets=dict(E.BUDGET_2026), sales_fx="spot")
+    rep = R.build(lines, spot)
     rates = rep["rates"]["by_month"]
     assert rates["2026-05"] == pytest.approx(17.5) and rates["2026-06"] == pytest.approx(18.0)
     assert rates["2026-07"] == pytest.approx(17.55) == rep["rates"]["other"]      # the middle of all of them
@@ -305,7 +321,7 @@ def test_dollar_view_uses_each_months_own_rate_and_adds_up():
         assert rep["total_all"]["usd"][k] == pytest.approx(sum(m["usd"][k] for m in rep["months"]))
     assert sum(p["usd"]["if_collected"] for p in rep["people"]) == pytest.approx(rep["total_new"]["usd"]["total"])
     assert sum(x["usd"]["total"] for x in rep["lines"]) == pytest.approx(rep["total_all"]["usd"]["total"])
-    none = R.build([ln for ln in lines if ln.job == "110005"], W.settings())
+    none = R.build([ln for ln in lines if ln.job == "110005"], spot)
     assert none["rates"]["from_report"] is False and none["rates"]["other"] == 16.5
 
 

@@ -93,11 +93,11 @@ def lines(tmp_path_factory):
     return F.load_base(book(tmp_path_factory.mktemp("fin") / "Margen x Expediente.xlsx", ROWS))
 
 
-# Most tests below fix dollars at the internal rate (16.5), the harder path.
-# The default, dollars at the rate of the invoice day, has its own section at
-# the end of the file.
+# The rule for the commission is dollars at the internal rate, 16.5, and most
+# tests below use it. The other setting, dollars at the rate of the invoice
+# day, has its own section at the end of the file.
 S = E.Settings(sales_fx="internal")
-SPOT = E.Settings()
+SPOT = E.Settings(sales_fx="spot")
 
 
 def by_job(cl):
@@ -701,11 +701,17 @@ def test_error_messages_carry_no_text_from_the_workbook(tmp_path):
     assert "Garcia" not in str(e.value)
 
 
-# ── dollars at the rate of the invoice day (the default since 8 Oct 2026) ────
-def test_by_default_a_dollar_sale_counts_at_finances_peso_amount(lines):
-    """Bill, 8 Oct 2026: 16.5 would throw off the profitability figures, because
-    costs are in pesos at the day's rate. Sales now are too."""
-    assert E.Settings().sales_fx == "spot"
+def test_the_commission_uses_16_5_unless_told_otherwise(lines):
+    """Bill, 9 Oct 2026: the day's rate would raise the pesos payable. 1 dollar
+    = 16.5 pesos stays the rule; "spot" has to be asked for."""
+    assert E.Settings().sales_fx == "internal" and E.Settings().usd_mxn == 16.5
+    assert F.jobs(lines)[("110001", "CORP-PART")]["billed_mxn"] == pytest.approx(165000)
+    assert F.jobs(lines, E.Settings())[("110001", "CORP-PART")]["billed_mxn"] == pytest.approx(165000)
+    assert "currency_missing" in kinds_of(F.problems(lines))
+
+
+# ── the other setting: dollars at the rate of the invoice day ────────────────
+def test_with_spot_a_dollar_sale_counts_at_finances_peso_amount(lines):
     j = F.jobs(lines, SPOT)
     a = j[("110001", "CORP-PART")]
     assert a["billed_mxn"] == a["billed_fin_mxn"] == pytest.approx(175000)      # 10,000 dollars at 17.5

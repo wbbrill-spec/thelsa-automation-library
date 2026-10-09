@@ -92,10 +92,16 @@ def clean_bookings(bookings) -> dict:
 
 
 def month_rates(lines, s: E.Settings) -> tuple:
-    """Pesos per dollar for showing the report in dollars: for each month, the
-    middle rate of that month's dollar invoices in Finance's own report (the
-    middle one, so a mistyped rate does not move it). Returns ({month: rate},
-    rate for a month with no dollar invoice, whether any rate was found)."""
+    """Pesos per dollar for showing the report in dollars.
+
+    With dollar sales at the internal rate, that rate is used for every month,
+    so a dollar invoice shows as the dollars it was invoiced for. With dollar
+    sales at the day's rate, each month uses the middle rate of its dollar
+    invoices in Finance's own report (the middle one, so a mistyped rate does
+    not move it). Returns ({month: rate}, rate for any other month, whether the
+    rates were taken from the report)."""
+    if s.sales_fx == "internal":
+        return {}, s.usd_mxn, False
     by = defaultdict(list)
     for ln in lines:
         if (ln.is_sale and ln.date and ln.currency == "USD" and ln.currency_source == "stated" and ln.fx

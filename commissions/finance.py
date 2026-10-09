@@ -30,10 +30,10 @@ Two promises this module keeps:
     Cost that ends up not counted (nothing billed, a fully cancelled job) and
     every guess about a currency is listed by `problems`.
 
-For the commission, a sale invoiced in dollars counts at the peso amount Finance
-booked, the rate of the day of the invoice (Settings.sales_fx = "spot", Bill's
-decision of 8 Oct 2026), so sales and costs are on the same footing. The other
-setting, "internal", converts dollars at the fixed rate in Settings (16.5).
+For the commission, a sale invoiced in dollars is converted at the internal rate
+in Settings, 1 dollar = 16.5 pesos (Settings.sales_fx = "internal"), not at the
+day's rate Finance books. The other setting, "spot", takes Finance's peso
+amount; it was tried on 8 Oct 2026 and withdrawn the next day.
 """
 from __future__ import annotations
 

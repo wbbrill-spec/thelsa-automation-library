@@ -297,9 +297,10 @@ input[type=file]{font:inherit}button.go,.btn{background:var(--navy);color:#fff;b
 'Este servicio no tiene una base de datos conectada, así que el reporte subido se pierde cuando el servicio se reconstruye.') }}</div>{% endif %}
 
 {% if rep %}
-<div class="note info usdnote">{{ t('Shown in US dollars: the pesos of each month divided by the middle exchange rate of that month\'s dollar invoices in Finance\'s report',
+<div class="note info usdnote">{% if rep.rates.from_report %}{{ t('Shown in US dollars: the pesos of each month divided by the middle exchange rate of that month\'s dollar invoices in Finance\'s report',
 'Se muestra en dólares: los pesos de cada mes entre el tipo de cambio central de las facturas en dólares de ese mes en el reporte de Finanzas') }}
-({% for r in rep.months %}{{ mon(r.month) }} {{ '%.2f'|format(r.rate) }}{% if not loop.last %} · {% endif %}{% endfor %}).
+({% for r in rep.months %}{{ mon(r.month) }} {{ '%.2f'|format(r.rate) }}{% if not loop.last %} · {% endif %}{% endfor %}).{% else %}{{ t('Shown in US dollars at the internal rate of ' ~ '%.2f'|format(rep.rates.other) ~ ' pesos per dollar, the rate the commission uses for dollar invoices.',
+'Se muestra en dólares al tipo de cambio interno de ' ~ '%.2f'|format(rep.rates.other) ~ ' pesos por dólar, el que usa la comisión para las facturas en dólares.') }}{% endif %}
 {{ t('The commission is calculated in pesos; percentages do not change with the currency shown. The check list and the bookings table stay in pesos.',
 'La comisión se calcula en pesos; los porcentajes no cambian con la moneda mostrada. La lista de puntos por revisar y la tabla de ventas contratadas siguen en pesos.') }}</div>
 

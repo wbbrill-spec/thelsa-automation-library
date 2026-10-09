@@ -71,13 +71,17 @@ class Settings:
     target_margin: float = 0.30            # D15, as the margin a file should make
     usd_mxn: float = 16.5                  # internal rate Rogelio gave TMS (see sales_fx)
     # How a sale invoiced in dollars becomes pesos:
+    #   "internal"  the fixed rate usd_mxn, 1 dollar = 16.5 pesos. This is the
+    #               rule for the commission (Lupita, 7 Oct 2026; Bill, 9 Oct
+    #               2026: the day's rate "will raise the peso amount that is
+    #               payable and drive up cost").
     #   "spot"      the rate of the day of the invoice, i.e. the peso amount
-    #               Finance books. Sales and costs are then on the same footing
-    #               and the margin is the one in Finance's report (Bill, 8 Oct 2026:
-    #               "16.5 will throw off the profitability calculations").
-    #   "internal"  the fixed rate usd_mxn (Lupita's answer of 7 Oct 2026).
-    # usd_mxn is still used for bookings entered in dollars, which have no invoice.
-    sales_fx: str = "spot"
+    #               Finance books. Tried on 8 Oct 2026 and withdrawn the next
+    #               day; kept so the two can be compared.
+    # Costs are always Finance's pesos, at the rate of the day of each cost
+    # invoice, so with "internal" the margin of a dollar file reads a little
+    # lower than in Finance's report.
+    sales_fx: str = "internal"
     sales_share: float = 2 / 3             # Y = U/3*2
     admin_share: float = 1 / 3             # Z = U/3*1
     sales_people: tuple = (("KAR 1 Pablo", 0.5), ("KAR 2 Edwin", 0.5))

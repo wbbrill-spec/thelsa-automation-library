@@ -69,7 +69,15 @@ class Settings:
     w_margin: float = 0.30                 # D15, as the weight
     w_discipline: float = 0.10             # D16
     target_margin: float = 0.30            # D15, as the margin a file should make
-    usd_mxn: float = 16.5                  # internal rate Rogelio gave TMS
+    usd_mxn: float = 16.5                  # internal rate Rogelio gave TMS (see sales_fx)
+    # How a sale invoiced in dollars becomes pesos:
+    #   "spot"      the rate of the day of the invoice, i.e. the peso amount
+    #               Finance books. Sales and costs are then on the same footing
+    #               and the margin is the one in Finance's report (Bill, 8 Oct 2026:
+    #               "16.5 will throw off the profitability calculations").
+    #   "internal"  the fixed rate usd_mxn (Lupita's answer of 7 Oct 2026).
+    # usd_mxn is still used for bookings entered in dollars, which have no invoice.
+    sales_fx: str = "spot"
     sales_share: float = 2 / 3             # Y = U/3*2
     admin_share: float = 1 / 3             # Z = U/3*1
     sales_people: tuple = (("KAR 1 Pablo", 0.5), ("KAR 2 Edwin", 0.5))
@@ -100,6 +108,8 @@ class Settings:
         numbers += list(self.budgets.values())
         if not _finite(*numbers):
             raise SettingsError("every rate, weight, share and budget must be a number")
+        if self.sales_fx not in ("spot", "internal"):
+            raise SettingsError('sales_fx must be "spot" or "internal"')
         if self.rate > 1 or self.target_margin > 1:
             raise SettingsError("the commission rate and the target margin are percentages, at most 100 %")
         if not near(self.w_invoicing + self.w_margin + self.w_discipline, 1.0):
@@ -259,9 +269,10 @@ def calc_month(month: str, lines, bookings: float, s: Settings,
 
 
 def to_mxn(amount: float, currency: str, s: Settings, usd_equivalent: float | None = None) -> float:
-    """Billed amount in pesos for the commission. Pesos stay as they are; US
-    dollars use the internal rate, not the day's rate; any other currency uses
-    Finance's US-dollar equivalent at the internal rate."""
+    """An amount with no invoice behind it (a booking, a quoted price) in pesos.
+    Pesos stay as they are; US dollars use the internal rate; any other
+    currency uses a US-dollar equivalent at the internal rate. Invoiced sales
+    do not come through here: see finance.billed_for_commission."""
     c = currency_code(currency)
     if c == "MXN":
         return float(amount)

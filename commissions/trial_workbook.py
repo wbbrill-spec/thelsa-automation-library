@@ -78,7 +78,10 @@ def build(src, out, lines=None, bookings=None):
             ("Weight: gross margin", S.w_margin, PCT, "Cell D15, used as the weight."),
             ("Weight: discipline and behavior", S.w_discipline, PCT, "Cell D16."),
             ("Target gross margin", S.target_margin, PCT, "Cell D15, used as the target a file should reach. Kept separate from the weight."),
-            ("Exchange rate USD to MXN", S.usd_mxn, "0.00", "Internal rate Rogelio gave TMS (Bill, 7 Oct 2026). Applied to invoices in US dollars."),
+            ("Exchange rate USD to MXN", S.usd_mxn, "0.00",
+             "Internal rate Rogelio gave TMS. Applied to invoices in US dollars." if S.sales_fx == "internal" else
+             "Internal rate Rogelio gave TMS. NOT applied to invoices: sales in dollars count at Finance's peso amount, "
+             "the rate of the invoice day (Bill, 8 Oct 2026). Kept for bookings entered in dollars."),
             ("Share to Sales", S.sales_share, "0.0000%", "Workbook: U/3*2."),
             ("Share to Adm, MC and Buyer", S.admin_share, "0.0000%", "Workbook: U/3*1.")]
     st["A4"], st["B4"], st["C4"] = "Rule", "Value", "Source"
@@ -152,8 +155,11 @@ def build(src, out, lines=None, bookings=None):
     for j, h in enumerate(cols, start=1):
         c = ln.cell(row=HR, column=j, value=h); c.font = f_head; c.fill = fill_head; c.alignment = wrap; c.border = box
     ln.row_dimensions[HR].height = 44
-    ln[f"D{HR}"].comment = Comment("US-dollar invoices at the internal rate on the Settings sheet (16.5); peso invoices as "
-                                   "invoiced. Net of credit notes dated in the same month.", "Trial")
+    ln[f"D{HR}"].comment = Comment(
+        ("US-dollar invoices at the internal rate on the Settings sheet (16.5); peso invoices as invoiced. "
+         if S.sales_fx == "internal" else
+         "The peso amount Finance booked for each invoice: US-dollar invoices at the rate of the invoice day. ")
+        + "Net of credit notes dated in the same month.", "Trial")
     ln[f"E{HR}"].comment = Comment("All supplier and TRS-to-TMS cost posted for the job up to 30 Sep 2026, laid on the "
                                    "job's invoice months in proportion to what was billed in each. A month where credit "
                                    "notes exceed invoices carries no cost, so no month ever carries more cost than the "
@@ -182,7 +188,9 @@ def build(src, out, lines=None, bookings=None):
             if x.job in cn_wrong:
                 notes.append("A credit note on this job has the wrong amount (see Checks): billed is understated")
             if x.job in fx_wrong:
-                notes.append("Exchange rate mistyped in Finance's report (see Checks); the commission uses 16.5 and is not affected")
+                notes.append("Exchange rate mistyped in Finance's report (see Checks); the commission uses 16.5 and is not affected"
+                             if S.sales_fx == "internal" else
+                             "Exchange rate mistyped on an invoice (see Checks): billed is understated")
             if x.job in two_types:
                 notes.append("Finance typed this job two ways (see Checks)")
             if x.billed < 0:
@@ -304,7 +312,9 @@ def build(src, out, lines=None, bookings=None):
         "A job's cost is laid on its invoice months in proportion to what was billed. When more cost arrives later, earlier months of that job change too.",
         "A credit note takes back all three parts of the commission. A job cancelled in full pays nothing overall.",
         "The Checks sheet lists every point in Finance's report that changes a number here. Start with the first lines: a credit note with a wrong amount and a mistyped exchange rate.",
-        "US-dollar invoices are converted at 16.5; costs are in pesos as Finance booked them, at the rate of each day.",
+        ("US-dollar invoices are converted at 16.5; costs are in pesos as Finance booked them, at the rate of each day."
+         if S.sales_fx == "internal" else
+         "Sales and costs in dollars are in pesos as Finance booked them, each at the rate of its own invoice day."),
         "January to March were paid on the old calculation and April is to be confirmed; they are shown for completeness only.",
         "Formulas follow Rogelio's workbook COMMISSION CALCULATION 2026 cell for cell, and reproduce its sample (file 111000 = 3,590.40).",
     ]

@@ -30,8 +30,10 @@ Two promises this module keeps:
     Cost that ends up not counted (nothing billed, a fully cancelled job) and
     every guess about a currency is listed by `problems`.
 
-For the commission, billed amounts in US dollars are converted at the internal
-rate in Settings (16.5), not at the day's rate Finance books.
+For the commission, a sale invoiced in dollars counts at the peso amount Finance
+booked, the rate of the day of the invoice (Settings.sales_fx = "spot", Bill's
+decision of 8 Oct 2026), so sales and costs are on the same footing. The other
+setting, "internal", converts dollars at the fixed rate in Settings (16.5).
 """
 from __future__ import annotations
 
@@ -348,13 +350,17 @@ def _dollars_usable(line: FinLine) -> bool:
 
 
 def billed_for_commission(line: FinLine, s: E.Settings) -> float:
-    """A sale in pesos as the commission sees it: US dollars at the internal
-    rate, pesos untouched. Other currencies go through Finance's US-dollar
-    equivalent. Where the currency or the dollar amount is not known, or the
-    dollar amount is zero or has the wrong sign, Finance's own peso figure is
-    used and `problems` says so."""
+    """A sale in pesos as the commission sees it.
+
+    sales_fx "spot": Finance's peso amount, whatever the currency.
+    sales_fx "internal": US dollars at the internal rate, pesos untouched,
+    other currencies through Finance's US-dollar equivalent; where the currency
+    or the dollar amount is not known, or the dollar amount is zero or has the
+    wrong sign, Finance's own peso figure is used and `problems` says so."""
     if not line.is_sale:
         return 0.0
+    if s.sales_fx == "spot":
+        return line.net_sales_mxn
     if line.currency in ("USD", "EUR") and _dollars_usable(line):
         return line.usd_equiv * s.usd_mxn
     return line.net_sales_mxn
@@ -370,6 +376,7 @@ def jobs(lines, s: E.Settings | None = None) -> dict:
             "supplier_cost_mxn": 0.0, "interco_cost_mxn": 0.0, "cost_mxn": 0.0,
             "first_invoice": None, "last_invoice": None, "last_cost": None,
             "invoices": 0, "credit_notes": 0, "embassy_billed": False, "undated_billed_mxn": 0.0,
+            "own_dollars": 0.0, "own_pesos": 0.0,          # dated net, each invoice in its own currency
             "by_month": defaultdict(float), "by_month_fin": defaultdict(float)})
         if ln.is_sale:
             amt = billed_for_commission(ln, s)
@@ -378,6 +385,10 @@ def jobs(lines, s: E.Settings | None = None) -> dict:
             j["credit_notes" if ln.net_sales_mxn < 0 else "invoices"] += 1
             j["embassy_billed"] = j["embassy_billed"] or ln.embassy_billed
             if ln.date:
+                if ln.currency in ("USD", "EUR") and _dollars_usable(ln):
+                    j["own_dollars"] += ln.usd_equiv
+                else:
+                    j["own_pesos"] += ln.net_sales_mxn
                 j["by_month"][ln.month] += amt
                 j["by_month_fin"][ln.month] += ln.net_sales_mxn
                 j["first_invoice"] = min(j["first_invoice"] or ln.date, ln.date)
@@ -413,7 +424,12 @@ def _spread(j: dict) -> tuple:
     net = sum(months.values())
     pos = sum(b for b in months.values() if b > 0)
     cost = j["cost_mxn"]
-    if abs(net) < NET_ZERO:
+    # Cancelled in full: nothing left in the currency each invoice was issued
+    # in. In pesos a dollar invoice and its credit note seldom cancel exactly,
+    # because each is booked at its own day's rate; that exchange difference
+    # stays on the lines, but it must not make a cancelled job carry its cost.
+    cancelled = abs(j["own_dollars"]) < 0.01 and abs(j["own_pesos"]) < NET_ZERO
+    if abs(net) < NET_ZERO or cancelled:
         billed_at_all = j["invoices"] or j["credit_notes"]
         return ({m: (b, 0.0) for m, b in months.items()}, 0.0,
                 "billing nets to zero in the report" if billed_at_all else "nothing billed in the report")
@@ -437,7 +453,7 @@ def commission_lines(lines, s: E.Settings | None = None, type_: str = IN_SCOPE) 
             continue
         spread, _used, _why = _spread(j)
         net = sum(b for b, _ in spread.values())
-        waiting = abs(j["cost_mxn"]) < EPS and net >= NET_ZERO   # billed, and no cost in the books yet
+        waiting = abs(j["cost_mxn"]) < EPS and net >= NET_ZERO and not _why   # billed, and no cost in the books yet
         for month, (billed, cost) in spread.items():
             out[month].append(E.Line(job=job, billed=billed, cost=cost, paid=None, cost_posted=not waiting,
                                      note="billed to the Embassy" if j["embassy_billed"] else ""))
@@ -449,6 +465,7 @@ def problems(lines, s: E.Settings | None = None) -> list:
     """Everything in the report to look at before its numbers are relied on.
     Job numbers, document references and amounts only."""
     s = s or E.Settings()
+    spot = s.sales_fx == "spot"          # the currency of a sale then changes nothing
     out = []
 
     def add(kind, job, detail, **more):
@@ -466,7 +483,7 @@ def problems(lines, s: E.Settings | None = None) -> list:
         if ln.is_sale and (ln.supplier_cost_mxn or ln.interco_cost_mxn):
             add("sale_and_cost_on_one_row", ln.job, f"row {ln.row}: both counted",
                 amount_mxn=round(ln.cost_mxn, 2))
-        if ln.is_sale and ln.currency_source != "stated":
+        if ln.is_sale and ln.currency_source != "stated" and not spot:
             how = {"same invoice": f"read as {ln.currency} from another line of the same invoice",
                    "amounts": f"read as {ln.currency} from the amounts",
                    "unknown label": "the currency written is not one this reader knows; Finance's peso amount used",
@@ -478,15 +495,20 @@ def problems(lines, s: E.Settings | None = None) -> list:
                 what = ("no dollar amount" if ln.usd_equiv is None else
                         "a dollar amount of zero" if abs(ln.usd_equiv) < EPS else
                         "a dollar amount with the opposite sign to the pesos")
-                add("no_dollar_amount", ln.job, f"row {ln.row}: {ln.currency} invoice with {what}; "
-                    "Finance's peso amount used", amount_mxn=round(ln.net_sales_mxn, 2))
+                if not spot:
+                    add("no_dollar_amount", ln.job, f"row {ln.row}: {ln.currency} invoice with {what}; "
+                        "Finance's peso amount used", amount_mxn=round(ln.net_sales_mxn, 2))
+                elif ln.usd_equiv is not None:            # the pesos are used; one of the two is still wrong
+                    add("dollar_amount_mismatch", ln.job, f"row {ln.row}: {ln.currency} invoice with {what}; "
+                        "the commission uses the pesos", amount_mxn=round(ln.net_sales_mxn, 2))
             else:
                 implied = ln.net_sales_mxn / ln.usd_equiv
                 off_rate = bool(ln.fx) and abs(implied - ln.fx) / ln.fx > 0.02
                 if off_rate or not RATE_BAND[0] <= implied <= RATE_BAND[1]:
                     add("dollar_amount_mismatch", ln.job, f"row {ln.row}: pesos divided by dollars gives "
                         f"{implied:,.4f}" + (f" against a rate of {ln.fx:,.4f} on the line" if ln.fx else "")
-                        + "; one of the two amounts is wrong and the commission uses the dollars",
+                        + "; one of the two amounts is wrong and the commission uses the "
+                        + ("pesos" if spot else "dollars"),
                         amount_mxn=round(ln.net_sales_mxn, 2))
         if not ln.is_sale and abs(ln.cost_mxn) < EPS and not (ln.supplier_cost_mxn or ln.interco_cost_mxn):
             add("empty_line", ln.job, f"row {ln.row}: no peso amount on the line"
@@ -527,7 +549,9 @@ def problems(lines, s: E.Settings | None = None) -> list:
         med = statistics.median(r.fx for r in rows)
         for r in rows:
             if abs(r.fx - med) / med > 0.10:
-                add("fx_outlier", r.job, f"row {r.row}: rate {r.fx} against {med:.4f} for the month",
+                add("fx_outlier", r.job, f"row {r.row}: rate {r.fx} against {med:.4f} for the month"
+                    + ("; Finance's peso amount, and so the billed amount here, is too low by the amount shown"
+                       if spot and r.fx < med else ""),
                     understated_mxn=round((med - r.fx) * (r.usd_equiv or 0), 2))
     # A credit note can be for part of its invoice, never for more. Amounts are
     # compared in the invoice's own currency. A note that names the wrong
@@ -577,7 +601,7 @@ def problems(lines, s: E.Settings | None = None) -> list:
             continue
         _spread_, used, why = _spread(j)
         net = sum(b for b, _ in _spread_.values())
-        if net >= NET_ZERO and abs(j["cost_mxn"]) < EPS:
+        if net >= NET_ZERO and abs(j["cost_mxn"]) < EPS and not why:
             add("no_cost_posted", j["job"], "billed, no cost in the report yet", amount_mxn=round(net, 2))
         if j["cost_mxn"] <= -EPS:
             add("negative_cost", j["job"], "the job's cost in the report is negative (supplier credits "

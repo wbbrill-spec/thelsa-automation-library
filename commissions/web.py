@@ -271,7 +271,7 @@ input[type=file]{font:inherit}button,.btn{background:var(--navy);color:#fff;bord
 
 <div class="card"><h2>{{ new_from }} onwards: new calculation</h2>
 <div class="big">
-<div><b>{{ rep.total_new.billed|cm_money }}</b><span>Billed for commission (MXN)</span></div>
+<div><b>{{ rep.total_new.billed|cm_money }}</b><span>Billed (MXN)</span></div>
 <div><b>{{ rep.total_new.margin_pct|cm_pct }}</b><span>Gross margin on cost posted so far</span></div>
 <div><b>{{ rep.total_new.total|cm_money(2) }}</b><span>Commission calculated</span></div>
 <div><b>{{ rep.total_new.payable|cm_money(2) }}</b><span>Payable now (collected)</span></div>
@@ -279,7 +279,7 @@ input[type=file]{font:inherit}button,.btn{background:var(--navy);color:#fff;bord
 </div></div>
 
 <div class="card"><h2>By invoice month</h2><div class="scroll"><table class="sum">
-<tr><th>Month</th><th class="l">Rules</th><th>Lines</th><th>Billed for commission</th><th>Actual cost</th><th>Gross margin</th><th>% margin</th>
+<tr><th>Month</th><th class="l">Rules</th><th>Lines</th><th>Billed</th><th>Actual cost</th><th>Gross margin</th><th>% margin</th>
 <th>Bookings</th><th>Sales reach</th><th>Invoicing part</th><th>Margin part</th><th>Discipline part</th><th>Total calculated</th><th>Payable</th><th>Waiting for cost</th></tr>
 {% for r in rep.months %}<tr class="{{ '' if r.new else 'old' }}">
 <td>{{ month_label(r.month) }}</td><td class="l">{{ r.rule }}</td><td>{{ r.lines }}</td><td>{{ r.billed|cm_money }}</td><td>{{ r.cost|cm_money }}</td>
@@ -294,7 +294,7 @@ input[type=file]{font:inherit}button,.btn{background:var(--navy);color:#fff;bord
 <td>{{ t.total|cm_money(2) }}</td><td>{{ t.payable|cm_money(2) }}</td><td>{{ t.waiting_lines }} ({{ t.waiting_billed|cm_money }})</td></tr>{% endfor %}
 </table></div>
 {% if rep.months_without_budget %}<p class="small">No budget is set for {{ rep.months_without_budget|join(', ') }}; those months are not calculated.</p>{% endif %}
-<p class="small">US-dollar invoices at {{ '%.2f'|format(s.usd_mxn) }}. Costs as Finance booked them, at the rate of the day of each cost invoice.</p></div>
+<p class="small">{% if s.sales_fx == 'internal' %}US-dollar invoices at {{ '%.2f'|format(s.usd_mxn) }}. Costs as Finance booked them, at the rate of the day of each cost invoice.{% else %}Sales and costs in dollars are in pesos as Finance booked them, each at the rate of its own invoice day.{% endif %}</p></div>
 
 <div class="card"><h2>Distribution, {{ new_from }} onwards</h2><div class="scroll"><table>
 <tr><th>Role and name</th><th class="l">Group</th><th>Share of the group</th><th>If every invoice were collected</th><th>Payable now</th></tr>
@@ -334,7 +334,7 @@ Leave a month blank if it is not known yet.{% if bmeta %} Last saved {{ bmeta.at
 {% if rep %}<div class="card" id="lines"><h2>Commission lines ({{ rep.lines|length }})</h2>
 <p class="small">One line per file per invoice month, net of that month's credit notes.</p>
 {% for r in rep.months %}<details><summary>{{ month_label(r.month) }}: {{ r.lines }} lines, {{ r.total|cm_money(2) }}</summary>
-<div class="scroll"><table><tr><th>File</th><th>Billed for commission</th><th>Actual cost</th><th>Gross margin</th><th>% margin</th>
+<div class="scroll"><table><tr><th>File</th><th>Billed</th><th>Actual cost</th><th>Gross margin</th><th>% margin</th>
 <th>Invoicing part</th><th>Margin part</th><th>Discipline part</th><th>Total</th><th class="l">Notes</th></tr>
 {% for x in rep.lines if x.month == r.month %}<tr><td>{{ x.job }}</td><td>{{ x.billed|cm_money(2) }}</td><td>{{ x.cost|cm_money(2) }}</td>
 <td>{{ x.gross_margin|cm_money(2) }}</td><td>{{ x.margin_pct|cm_pct }}</td><td>{{ x.invoicing|cm_money(2) }}</td>

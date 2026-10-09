@@ -130,3 +130,24 @@ def test_template_renders_bilingual():
     assert 'data-x="50000.0"' in html
     assert "Ana &amp; Co" in html
     assert "plan: 17.4479" in html
+
+
+def test_template_supplier_costs_tab():
+    from flask import Flask, render_template_string
+    from exec_template import EXEC_TEMPLATE
+    import supplier_costs as sc
+    msg = {"subject": "RE: X / 110886", "body": "Demoras: 2,040 USD + 15% finance fee", "sender": "a@insa.com.ec",
+           "date": "2026-10-07", "mailbox": "m"}
+    state = {"have_creds": True}
+    state.update(sc.summarize(sc.merge(sc.rows_from_message(msg))))
+    ex = exec_dash.build([], {}, TODAY)
+    ex.update(remap={"running": False}, query_sheet="#", sc=state)
+    m = {"total_disc_pair": [0, 0], "disc_files": 0, "coords_affected": 0, "ub_have_creds": False,
+         "by_coordinator_disc": [], "disc_worklist": []}
+    with Flask(__name__).app_context():
+        html = render_template_string(EXEC_TEMPLATE, m=m, ex=ex)
+    assert "Costos de proveedores" in html and "110886" in html and "2,346.00" in html
+    ex["sc"] = {"have_creds": False, "rows": [], **sc.summarize({})}
+    with Flask(__name__).app_context():
+        html = render_template_string(EXEC_TEMPLATE, m=m, ex=ex)
+    assert "Waiting on mailbox access" in html

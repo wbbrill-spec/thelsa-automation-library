@@ -1029,6 +1029,12 @@ def audit():
             pass
     ex["remap"] = mw_live.remap_status()
     ex["query_sheet"] = os.environ.get("AUDIT_QUERY_SHEET_URL", QUERY_SHEET_URL)
+    try:
+        import supplier_costs
+        supplier_costs.ensure_scanner()
+        ex["sc"] = supplier_costs.get_state()
+    except Exception:
+        ex["sc"] = None
     # Under-billing (quote vs invoice) amounts are in the display currency (USD).
     for r in m.get("disc_worklist") or []:
         r["pair"] = [0.0, r.get("value") or 0]
@@ -1138,6 +1144,31 @@ def audit_raw():
         return jsonify(mw_live.raw_sample())
     except Exception as e:
         return jsonify({"error": str(e)})
+
+
+@audit_bp.route("/audit/supplier-costs")
+@_login_required
+def audit_supplier_costs():
+    """Supplier costs found in coordinator mail (CFDI + quoted extra costs), as JSON.
+    ?scan=1 runs a scan now (needs the Graph app secret)."""
+    from flask import jsonify, request
+    import supplier_costs
+    if request.args.get("scan") == "1":
+        supplier_costs.scan_live()
+    s = supplier_costs.get_state()
+    s.pop("queue", None)
+    return jsonify(s)
+
+
+@audit_bp.route("/audit/supplier-costs/status", methods=["POST"])
+@_login_required
+def audit_supplier_costs_status():
+    """Mark a queued cost posted / ignored / duplicate: form or JSON {id, status}."""
+    from flask import jsonify, request
+    import supplier_costs
+    d = request.get_json(silent=True) or request.form
+    ok = supplier_costs.set_status(str(d.get("id") or ""), str(d.get("status") or ""))
+    return jsonify({"ok": ok}), (200 if ok else 400)
 
 
 @audit_bp.route("/audit/dump")

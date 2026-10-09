@@ -90,6 +90,7 @@ EXEC_TEMPLATE = r"""<!DOCTYPE html>
   <nav class="tabs">
     <a class="tab-btn" data-tab="overview" href="#overview">{{ t('Overview', 'Resumen') }}</a>
     <a class="tab-btn" data-tab="underbilling" href="#underbilling">{{ t('Under-billing', 'Facturación incompleta') }}</a>
+    {% if ex.sc %}<a class="tab-btn" data-tab="costs" href="#costs">{{ t('Supplier costs', 'Costos de proveedores') }}{% if ex.sc.n_open %} ({{ ex.sc.n_open }}){% endif %}</a>{% endif %}
   </nav>
 
   <section class="tab" data-tab="overview">
@@ -186,6 +187,31 @@ EXEC_TEMPLATE = r"""<!DOCTYPE html>
     {% for r in m.disc_worklist %}<tr><td class="num">{{ r.job }}</td><td class="wrap">{{ r.client }}</td><td>{{ r.coordinator }}</td><td class="r num warn">{{ M(r.pair) }}</td></tr>{% endfor %}</table></div>
     {% endif %}
   </section>
+
+  {% if ex.sc %}{% set S = ex.sc %}
+  <section class="tab" data-tab="costs">
+    <h2>{{ t('Supplier costs found in email — to post in MoveWare', 'Costos de proveedores encontrados en correo — por registrar en MoveWare') }}</h2>
+    <p class="meta">{{ t('Read from the TMS coordinators’ mail: supplier invoices (CFDI XML) and extra costs quoted by agents, carriers and suppliers (demurrage, storage, inspections, re-booking…). Each line is matched to its MoveWare file.', 'Leído del correo de los coordinadores TMS: facturas de proveedores (XML CFDI) y costos extra cotizados por agentes, navieras y proveedores (demoras, almacenajes, inspecciones, roll de buque…). Cada línea se liga a su expediente en MoveWare.') }}
+      <b>{{ t('MoveWare does not yet accept cost through its API, so these are posted by hand for now; they will post automatically once MoveWare opens that endpoint.', 'MoveWare aún no acepta costos por su API, así que por ahora se registran a mano; se registrarán solos cuando MoveWare habilite esa función.') }}</b></p>
+    {% if not S.have_creds and not S.rows %}
+    <div class="note warn">{{ t('Waiting on mailbox access — the reader is built and tested and starts on its own once the Microsoft Graph app secret is set on the server (same credential as the under-billing detector).', 'Esperando acceso a los buzones — el lector está construido y probado y arranca solo cuando se configure en el servidor el secreto de la app de Microsoft Graph (la misma credencial del detector de facturación incompleta).') }}</div>
+    {% else %}
+    <div class="grid">
+      <div class="tile"><div class="label">{{ t('To post', 'Por registrar') }}</div><div class="value warn">{{ N(S.n_to_post) }}</div>
+        <div class="sub">{% for c, v in S.open_by_ccy.items() %}{{ c }} {{ '{:,.0f}'.format(v) }}{% if not loop.last %} · {% endif %}{% endfor %}</div></div>
+      <div class="tile"><div class="label">{{ t('To confirm', 'Por confirmar') }}</div><div class="value">{{ N(S.n_to_confirm) }}</div><div class="sub">{{ t('cost mentioned by a coordinator — confirm with the supplier', 'costo mencionado por un coordinador — confirmar con el proveedor') }}</div></div>
+      <div class="tile"><div class="label">{{ t('File not identified', 'Expediente no identificado') }}</div><div class="value">{{ N(S.n_no_file) }}</div></div>
+      <div class="tile"><div class="label">{{ t('Files affected', 'Expedientes') }}</div><div class="value">{{ N(S.n_files) }}</div></div>
+    </div>
+    {% if S.open %}
+    <div class="tbl"><table><tr><th>{{ t('File', 'Expediente') }}</th><th>{{ t('Date', 'Fecha') }}</th><th>{{ t('Source', 'Origen') }}</th><th>{{ t('Supplier', 'Proveedor') }}</th><th>{{ t('Concept', 'Concepto') }}</th><th class="r">{{ t('Amount', 'Monto') }}</th><th>{{ t('Status', 'Estatus') }}</th></tr>
+    {% for r in S.open[:150] %}<tr><td class="num">{{ r.file or '—' }}</td><td>{{ r.date }}</td><td>{{ r.source }}{% if r.ref %} · {{ r.ref }}{% endif %}</td><td class="wrap">{{ r.supplier or '—' }}</td>
+      <td class="wrap">{{ r.concept }}{% if r.fee_pct %} <span class="ccy">(+{{ r.fee_pct|round(0)|int }}% {{ r.fee_label or '' }})</span>{% endif %}</td>
+      <td class="r num">{{ r.currency or '' }} {{ '{:,.2f}'.format(r.amount or 0) }}</td><td><span class="pill">{{ r.status }}</span></td></tr>{% endfor %}</table></div>
+    {% else %}<p class="meta good">{{ t('Nothing waiting to be posted.', 'Nada pendiente por registrar.') }}</p>{% endif %}
+    {% endif %}
+  </section>
+  {% endif %}
 
   <footer>{{ t('Thelsa Automation Library · the audit runs on imperfect data and flags it.', 'Biblioteca de automatizaciones Thelsa · la auditoría trabaja con datos imperfectos y los señala.') }}</footer>
 </main>

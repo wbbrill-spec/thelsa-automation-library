@@ -360,7 +360,9 @@ def fetch_messages(days: int = _DAYS, per_mailbox: int = 100) -> list[dict]:
     since = (dt.datetime.utcnow() - dt.timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
     out = []
     diag = {"mailboxes": len(ms_graph.TMS_COORDINATORS), "ok": 0, "denied": 0, "other": 0,
-            "messages_read": 0, "with_xml": 0, "first_error": None}
+            "messages_read": 0, "with_xml": 0, "first_error": None,
+            "app_client_id": ms_graph.MS_CLIENT_ID, "tenant": ms_graph.MS_TENANT_ID,
+            "credential": "MS_*" if os.environ.get("MS_CLIENT_SECRET") else "GRAPH_*"}
     _STATE["diag"] = diag
     for mbx in ms_graph.TMS_COORDINATORS:
         params = {"$filter": f"receivedDateTime ge {since}",

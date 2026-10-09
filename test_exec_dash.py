@@ -82,6 +82,13 @@ def test_ready_to_invoice_rules():
     assert {r["job"] for r in ex["periods"]["l12m"]["ready"]} == {"10", "16"}
 
 
+def test_huge_embassy_quote_goes_to_checks_not_transit():
+    files = [_f("30", sell=5_519_320, pack="2026-06-24", coordinator="Edgarespino")]
+    y = exec_dash.build(files, {}, TODAY)["periods"]["ytd"]
+    assert y["emb_n"] == 0 and y["emb_val"] == [0.0, 0.0]
+    assert [r["job"] for r in y["checks"]] == ["30"] and y["checks"][0]["embassy"]
+
+
 def test_diplom_type_from_finance_marks_embassy():
     files = [_f("20", sell=1000, pack="2026-09-01")]
     fin = {"files": {"20": {"type": "DIPLOM"}}, "ledger": {}}

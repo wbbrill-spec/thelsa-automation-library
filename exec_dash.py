@@ -187,13 +187,13 @@ def build(files, finance: dict, today: dt.date | None = None) -> dict:
                    "status": st, "embassy": emb, "value": _r(q),
                    "ccy": fx.normalize(f.get("currency"), None) or "",
                    "value_mxn": round(to_mxn(q, s_rate))}
+            if to_mxn(q, s_rate) > qmax:
+                checks.append(row)        # a mis-keyed quote never reaches any total
+                continue
             if emb and not delivered:
                 if packed:
                     emb_transit.append(row)
                     _add(emb_val, q)
-                continue
-            if to_mxn(q, s_rate) > qmax:
-                checks.append(row)
                 continue
             ready.append(row)
             _add(ready_val, q)

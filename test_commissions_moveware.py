@@ -19,41 +19,41 @@ def fl(job, typ, sales=1000.0, date=dt.date(2026, 6, 1), cost=0.0):
                      cancels="", has_comment=False, embassy_billed=False)
 
 
-def mw(job, ct="", agent=False, corp=False, status="W", booked=dt.date(2026, 6, 10), sell=1000.0, ccy="MXN"):
+def mw(job, ct="", agent=False, corp=False, status="W", booked=dt.date(2026, 6, 10), sell=1000.0, ccy="MXN", bt=""):
     return {"job": job, "number": job, "status": status, "booked": booked, "sell": sell, "currency": ccy,
-            "customer_type": ct, "has_booking_agent": agent, "has_corporate_account": corp}
+            "customer_type": ct, "has_booking_agent": agent, "has_corporate_account": corp, "bill_to_type": bt}
 
 
 FIN = [fl("110771", "AGENTE"), fl("110771A", "AGENTE"), fl("110771B", "CORP-PART"),
        fl("110800", "CORP-PART"), fl("110801", "CORP-PART"), fl("110930", "DIPLOM"),
        fl("110894", "AGENTE"), fl("110894", "CORP-PART"), fl("110999", "CORP-PART")]
-MW = [mw("110771", agent=True), mw("110771A", agent=True), mw("110771B"),
-      mw("110800", ct="Company", corp=True), mw("110801", agent=True), mw("110930", ct="Diplomatic"),
-      mw("110894", agent=True)]
+MW = [mw("110771", agent=True, bt="Agent"), mw("110771A", agent=True, bt="Agent"), mw("110771B", bt="Private"),
+      mw("110800", ct="Company", corp=True, bt="Company"), mw("110801", agent=True, bt="Agent"),
+      mw("110930", ct="Diplomatic", bt="Diplomatic"), mw("110894", agent=True, bt="Agent")]
 
 
 def test_crosstab_measures_instead_of_assuming():
     t = M.type_crosstab(FIN, MW)
     assert t["finance_jobs"] == 8 and t["matched"] == 6
-    assert t["pairs"][("AGENTE", ("(blank)", "yes", "no"))] == 2
-    assert t["pairs"][("CORP-PART", ("Company", "no", "yes"))] == 1
-    assert t["pairs"][("DIPLOM", ("Diplomatic", "no", "no"))] == 1
+    assert t["pairs"][("AGENTE", ("Agent", "(blank)", "yes", "no"))] == 2
+    assert t["pairs"][("CORP-PART", ("Company", "Company", "no", "yes"))] == 1
+    assert t["pairs"][("DIPLOM", ("Diplomatic", "Diplomatic", "no", "no"))] == 1
     assert t["not_in_moveware_reader"] == ["110999"]
     assert t["typed_two_ways_by_finance"] == ["110894"]
     # a booking agent mostly means AGENTE here, with one exception to look at
-    sig = t["by_signature"][("(blank)", "yes", "no")]
+    sig = t["by_signature"][("Agent", "(blank)", "yes", "no")]
     assert sig == {"points_to": "AGENTE", "jobs": 3, "agree": 2, "exceptions": 1}
 
 
 def test_lots_are_matched_as_their_own_jobs():
     t = M.type_crosstab(FIN, MW)
-    assert ("CORP-PART", ("(blank)", "no", "no")) in t["pairs"]        # 110771B, not its file
+    assert ("CORP-PART", ("Private", "(blank)", "no", "no")) in t["pairs"]        # 110771B, not its file
 
 
 def test_unknown_roles_are_shown_as_unknown():
     f = mw("110802")
-    f["has_booking_agent"] = f["has_corporate_account"] = None
-    assert M.signature(f) == ("(blank)", "?", "?")
+    f["has_booking_agent"] = f["has_corporate_account"] = f["bill_to_type"] = None
+    assert M.signature(f) == ("?", "(blank)", "?", "?")
 
 
 def test_bookings_by_month_counts_won_jobs_in_scope_at_the_internal_rate():
@@ -134,19 +134,28 @@ def test_reader_records_date_won_and_moveware_marks_without_names(monkeypatch):
               "customerType": {"code": "", "text": "Company"},
               "activityDates": {"created": {"date": "2026-05-01"}, "booked": {"date": "2026-06-10"}},
               "roles": {"bookingAgent": {"entity": {"id": 77, "name": "Secret Agent GmbH"}},
+                        "billTo": {"entity": {"id": 101377, "name": "Secret Payer SA", "type": "Agent"}},
                         "corporateAccount": {"entity": {}}}}
     monkeypatch.setattr(mw_live, "_get", lambda path: detail if path == "/jobs/110782" else {})
     m = mw_live._map_job({"id": "110782", "number": "110771A", "status": "W"})
     assert m["booked"] == dt.date(2026, 6, 10)
     assert m["customer_type"] == "Company"
     assert m["has_booking_agent"] is True and m["has_corporate_account"] is False
-    assert M.signature(m) == ("Company", "yes", "no")
-    marks = {k: m[k] for k in ("customer_type", "has_booking_agent", "has_corporate_account", "booked")}
-    assert "Secret Agent" not in repr(marks)
+    assert m["bill_to_type"] == "Agent"
+    assert M.signature(m) == ("Agent", "Company", "yes", "no")
+    marks = {k: m[k] for k in ("customer_type", "has_booking_agent", "has_corporate_account", "booked", "bill_to_type")}
+    assert "Secret" not in repr(marks)
+
+
+def test_bill_to_type_is_a_short_code_or_nothing():
+    for raw, want in (("Private", "Private"), ({"code": "A", "text": "Agent"}, "Agent"), ("", ""), (None, ""),
+                      ("Juan Perez y Asociados SA de CV", ""), ("Type 7", ""), (12, "")):
+        assert mw_live._role_entity_type({"billTo": {"entity": {"type": raw}}}, "billTo") == want
+    assert mw_live._role_entity_type({}, "billTo") == ""
 
 
 def test_empty_roles_block_means_not_known(monkeypatch):
     detail = {"id": 111000, "number": "111000", "status": "W", "roles": {}}
     monkeypatch.setattr(mw_live, "_get", lambda path: detail if path == "/jobs/111000" else {})
     m = mw_live._map_job({"id": "111000", "number": "111000", "status": "W"})
-    assert m["has_booking_agent"] is None and m["has_corporate_account"] is None
+    assert m["has_booking_agent"] is None and m["has_corporate_account"] is None and m["bill_to_type"] is None

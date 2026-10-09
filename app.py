@@ -556,6 +556,13 @@ app.register_blueprint(crossborder_bp)
 # refreshed 5x/day (06/09/12/15/18 Mexico City). Replaces the Phase-1 on-demand page.
 from assistant.web import bp as assistant_bp
 app.register_blueprint(assistant_bp)
+# TMS Commission Report — restricted to the people named in COMMISSION_USERS
+# (default: Lupita, Mario, Rogelio, Bill). Not linked from the home page.
+try:
+    from commissions.web import commissions_bp
+    app.register_blueprint(commissions_bp)
+except Exception as _comm_exc:  # never block the library from booting
+    logger.warning("Commission report not mounted: %s", _comm_exc)
 try:
     from assistant.scan import start_scheduler as _asst_start_scheduler
     _asst_start_scheduler()

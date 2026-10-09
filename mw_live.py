@@ -543,6 +543,15 @@ def _role_present(roles_obj, name: str) -> bool:
     return any(ent.get(k) not in (None, "", 0) for k in ("id", "code", "name", "lastName"))
 
 
+def _role_entity_type(roles_obj, name: str) -> str:
+    """The kind of party in a role, as Moveware classes it ("Agent", "Private",
+    "Company"…). A short code only; the party's name is never read here."""
+    r = roles_obj.get(name) if isinstance(roles_obj, dict) else None
+    ent = r.get("entity") if isinstance(r, dict) and isinstance(r.get("entity"), dict) else {}
+    t = _code_text(ent.get("type") or "")
+    return t if isinstance(t, str) and len(t) <= 20 and t.replace(" ", "").replace("-", "").isalpha() else ""
+
+
 def _map_job(job: dict, prefetched: dict | None = None) -> dict | None:
     # `prefetched` is the GET /jobs/{id} detail if the caller already has it
     # (the gap-fill reads the detail to decide tenant vs foreign, then passes it
@@ -848,6 +857,11 @@ def _map_job(job: dict, prefetched: dict | None = None) -> dict | None:
         # None = not known: some details come back with an empty roles block (guide §6).
         "has_booking_agent": _role_present(roles_obj, "bookingAgent") if roles_obj else None,
         "has_corporate_account": _role_present(roles_obj, "corporateAccount") if roles_obj else None,
+        # Measured live 8 Oct 2026 on file 110771: customer type, job type and
+        # referral are the same on all three lots; the bill-to party's type is
+        # what differs (Agent on 110771 and 110771A, Private on 110771B), and it
+        # agrees with Finance's AGENTE / CORP-PART.
+        "bill_to_type": _role_entity_type(roles_obj, "billTo") if roles_obj else None,
         "anchor": anchor,   # most-recent activity date; window filter uses this
         # Line-level reconciliation: every quoted charge line vs every invoiced
         # charge line, plus the quote's estimated size vs the actual. audit_web

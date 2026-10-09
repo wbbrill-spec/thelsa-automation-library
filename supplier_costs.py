@@ -318,7 +318,7 @@ def post_to_moveware(row: dict) -> dict:
 
 # ── live scan (Graph, app-only) ──────────────────────────────────────────────────
 _LOCK = threading.Lock()
-_STATE = {"queue": {}, "scanned_at": None, "n_messages": 0, "error": None, "have_creds": False}
+_STATE = {"queue": {}, "scanned_at": None, "n_messages": 0, "error": None, "have_creds": False, "diag": None}
 _THREAD = None
 _INTERVAL = int(os.environ.get("SUPPLIER_COST_SCAN_SECONDS", 3 * 3600))
 _DAYS = int(os.environ.get("SUPPLIER_COST_DAYS", 45))
@@ -359,6 +359,9 @@ def fetch_messages(days: int = _DAYS, per_mailbox: int = 100) -> list[dict]:
         return []
     since = (dt.datetime.utcnow() - dt.timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
     out = []
+    diag = {"mailboxes": len(ms_graph.TMS_COORDINATORS), "ok": 0, "denied": 0, "other": 0,
+            "messages_read": 0, "with_xml": 0, "first_error": None}
+    _STATE["diag"] = diag
     for mbx in ms_graph.TMS_COORDINATORS:
         params = {"$filter": f"receivedDateTime ge {since}",
                   "$select": "id,subject,from,receivedDateTime,body,hasAttachments",
@@ -366,8 +369,13 @@ def fetch_messages(days: int = _DAYS, per_mailbox: int = 100) -> list[dict]:
         try:
             r = requests.get(f"{ms_graph.GRAPH}/users/{mbx}/messages", headers=h, params=params, timeout=25)
             if r.status_code != 200:
+                diag["denied" if r.status_code in (401, 403) else "other"] += 1
+                diag["first_error"] = diag["first_error"] or f"{mbx}: {r.status_code} {ms_graph._short(r)}"
                 continue
-            for m in r.json().get("value", []):
+            diag["ok"] += 1
+            vals = r.json().get("value", [])
+            diag["messages_read"] += len(vals)
+            for m in vals:
                 body = ms_graph._plain(m)
                 subj = m.get("subject") or ""
                 atts = []
@@ -383,12 +391,15 @@ def fetch_messages(days: int = _DAYS, per_mailbox: int = 100) -> list[dict]:
                                     atts.append({"name": a.get("name"), "bytes": ab.content})
                     except Exception:
                         pass
+                diag["with_xml"] += bool(atts)
                 if not atts and not any(k in (subj + " " + body).lower() for k in _ALL_KW):
                     continue
                 out.append({"subject": subj, "body": body, "date": m.get("receivedDateTime"),
                             "sender": ((m.get("from") or {}).get("emailAddress") or {}).get("address", ""),
                             "mailbox": mbx, "attachments": atts})
-        except Exception:
+        except Exception as e:
+            diag["other"] += 1
+            diag["first_error"] = diag["first_error"] or f"{mbx}: {e}"
             continue
     return out
 
@@ -413,7 +424,11 @@ def scan_live():
         rows = [r for m in msgs for r in rows_from_message(m, known=known)]
         with _LOCK:
             _STATE["queue"] = merge(rows, _STATE["queue"])
-            _STATE.update(scanned_at=time.time(), n_messages=len(msgs), error=None)
+            d = _STATE.get("diag") or {}
+            err = None
+            if d and d.get("ok", 0) == 0 and (d.get("denied") or d.get("other")):
+                err = "mailbox reads failed — " + (d.get("first_error") or "")
+            _STATE.update(scanned_at=time.time(), n_messages=len(msgs), error=err)
             _save()
     except Exception as e:
         _STATE["error"] = str(e)

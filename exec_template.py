@@ -196,6 +196,8 @@ EXEC_TEMPLATE = r"""<!DOCTYPE html>
     {% if not S.have_creds and not S.rows %}
     <div class="note warn">{{ t('Waiting on mailbox access — the reader is built and tested and starts on its own once the Microsoft Graph app secret is set on the server (same credential as the under-billing detector).', 'Esperando acceso a los buzones — el lector está construido y probado y arranca solo cuando se configure en el servidor el secreto de la app de Microsoft Graph (la misma credencial del detector de facturación incompleta).') }}</div>
     {% else %}
+    {% if S.error %}<div class="note warn">{{ S.error }}</div>{% endif %}
+    {% if S.diag %}<p class="meta">{{ t('Last scan', 'Última revisión') }}: {{ S.diag.ok }}/{{ S.diag.mailboxes }} {{ t('mailboxes read', 'buzones leídos') }} · {{ S.diag.messages_read }} {{ t('messages', 'mensajes') }} · {{ S.diag.with_xml }} {{ t('with an invoice XML', 'con XML de factura') }} · {{ S.n_messages }} {{ t('with a cost', 'con un costo') }}</p>{% endif %}
     <div class="grid">
       <div class="tile"><div class="label">{{ t('To post', 'Por registrar') }}</div><div class="value warn">{{ N(S.n_to_post) }}</div>
         <div class="sub">{% for c, v in S.open_by_ccy.items() %}{{ c }} {{ '{:,.0f}'.format(v) }}{% if not loop.last %} · {% endif %}{% endfor %}</div></div>

@@ -70,7 +70,12 @@ COLUMNS = ("Empresa", "Tipo", "Expediente", "Expediente 2", "Fecha", "Serie", "F
 
 
 class FinanceReportError(ValueError):
-    """The workbook cannot be read safely. Nothing is calculated from it."""
+    """The workbook cannot be read safely. Nothing is calculated from it.
+    `es` is the same message in Spanish, for the page."""
+
+    def __init__(self, message: str, es: str | None = None):
+        super().__init__(message)
+        self.es = es or message
 
 
 @dataclass(frozen=True)
@@ -140,15 +145,16 @@ def _num(v, row: int, col: str, money: bool = True):
     times too little, is worse than no report. So "1.234,56", "1234,56", "nan"
     and, in a money column, "100.000" (a hundred, or a hundred thousand?) are
     all refused."""
-    def stop(why):
-        raise FinanceReportError(f"row {row}, column {col!r}: {why}") from None
+    def stop(why, por_que):
+        raise FinanceReportError(f"row {row}, column {col!r}: {why}",
+                                 f"fila {row}, columna {col!r}: {por_que}") from None
     if v is None:
         return None
     if isinstance(v, bool):
-        stop("the cell holds true/false, not an amount")
+        stop("the cell holds true/false, not an amount", "la celda tiene verdadero/falso, no un importe")
     if isinstance(v, (int, float)):
         if not math.isfinite(v):
-            stop("the cell does not hold a finite number")
+            stop("the cell does not hold a finite number", "la celda no tiene un número válido")
         return float(v)
     t = str(v).strip()
     if t in ("", "-"):
@@ -156,9 +162,10 @@ def _num(v, row: int, col: str, money: bool = True):
     neg = (t.startswith("(") and t.endswith(")")) or t.endswith("-") or t.startswith("-")
     core = t.strip("()-").replace("$", "").replace(" ", "")
     if not _AMOUNT.match(core):
-        stop("the cell holds text, not an amount")
+        stop("the cell holds text, not an amount", "la celda tiene texto, no un importe")
     if money and "," not in core and re.search(r"\.\d{3}$", core):
-        stop("the amount is written with three decimals and could be read two ways")
+        stop("the amount is written with three decimals and could be read two ways",
+             "el importe está escrito con tres decimales y se puede leer de dos maneras")
     x = float(core.replace(",", ""))
     return -x if neg else x
 
@@ -211,7 +218,8 @@ def load_base(path, sheet: str = "Base") -> list:
     import openpyxl
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     if sheet not in wb.sheetnames:
-        raise FinanceReportError(f"no sheet named {sheet!r} in the workbook ({len(wb.sheetnames)} sheets)")
+        raise FinanceReportError(f"no sheet named {sheet!r} in the workbook ({len(wb.sheetnames)} sheets)",
+                                 f"el libro no tiene una hoja llamada {sheet!r} ({len(wb.sheetnames)} hojas)")
     ws = wb[sheet]
     header, raw = None, []
     run = [0.0, 0.0, 0.0]                              # sales, supplier cost, TRS cost read so far
@@ -221,7 +229,8 @@ def load_base(path, sheet: str = "Base") -> list:
             if "Expediente" in cells and "Venta Neta" in cells:
                 missing = [c for c in COLUMNS if c not in cells]
                 if missing:
-                    raise FinanceReportError(f"columns missing from {sheet!r}: {missing}")
+                    raise FinanceReportError(f"columns missing from {sheet!r}: {missing}",
+                                             f"faltan columnas en {sheet!r}: {missing}")
                 header = {c: cells.index(c) for c in COLUMNS}
             elif i > 20:
                 break
@@ -243,7 +252,9 @@ def load_base(path, sheet: str = "Base") -> list:
             if all(abs(a - b) <= 1.0 for a, b in zip((sales, sup, ic), run)):
                 continue
             raise FinanceReportError(f"row {i} has amounts but no type and no job number, "
-                                     "and they are not the total of the lines above")
+                                     "and they are not the total of the lines above",
+                                     f"la fila {i} tiene importes pero no tiene tipo ni número de expediente, "
+                                     "y no son el total de las líneas de arriba")
         run[0] += sales
         run[1] += sup
         run[2] += ic
@@ -275,9 +286,11 @@ def load_base(path, sheet: str = "Base") -> list:
             cancels_unread=bool(cref) and not ref))
     wb.close()
     if header is None:
-        raise FinanceReportError(f"no header row found in {sheet!r}")
+        raise FinanceReportError(f"no header row found in {sheet!r}",
+                                 f"no se encontró la fila de encabezados en {sheet!r}")
     if not raw:
-        raise FinanceReportError(f"{sheet!r} has a header but no lines")
+        raise FinanceReportError(f"{sheet!r} has a header but no lines",
+                                 f"{sheet!r} tiene encabezados pero ninguna línea")
     # A sale with no currency: take it from another line of the same invoice
     # (same series, number and date; one invoice can be split over two jobs, as
     # CORP 129 was over 110611 and 110612), else from the amounts themselves.
@@ -463,64 +476,87 @@ def commission_lines(lines, s: E.Settings | None = None, type_: str = IN_SCOPE) 
 # ── what a person should look at ─────────────────────────────────────────────
 def problems(lines, s: E.Settings | None = None) -> list:
     """Everything in the report to look at before its numbers are relied on.
-    Job numbers, document references and amounts only."""
+    Job numbers, document references and amounts only. Each point carries its
+    text in English (`detail`) and in Spanish (`detail_es`)."""
     s = s or E.Settings()
     spot = s.sales_fx == "spot"          # the currency of a sale then changes nothing
     out = []
 
-    def add(kind, job, detail, **more):
-        out.append({"kind": kind, "job": job, "detail": detail, **more})
+    def add(kind, job, en, es, **more):
+        out.append({"kind": kind, "job": job, "detail": en, "detail_es": es, **more})
 
     for ln in lines:
+        r, R = f"row {ln.row}: ", f"fila {ln.row}: "
         if not ln.job_ok:
-            add("bad_job_number", ln.job,
-                f"row {ln.row}: the job number is not six digits plus an optional lot letter")
+            add("bad_job_number", ln.job, r + "the job number is not six digits plus an optional lot letter",
+                R + "el número de expediente no tiene seis dígitos más una letra de lote opcional")
         if ln.type not in TYPES:
-            add("unknown_type", ln.job, f"row {ln.row}: type is not one of {', '.join(TYPES)}")
+            add("unknown_type", ln.job, r + f"type is not one of {', '.join(TYPES)}",
+                R + f"el tipo no es uno de {', '.join(TYPES)}")
         if ln.date is None:
-            add("no_date", ln.job, f"row {ln.row}: no date" + (", so the sale is in no month" if ln.is_sale else ""),
+            add("no_date", ln.job, r + "no date" + (", so the sale is in no month" if ln.is_sale else ""),
+                R + "sin fecha" + (", así que la venta no cae en ningún mes" if ln.is_sale else ""),
                 **({"amount_mxn": round(ln.net_sales_mxn, 2)} if ln.is_sale else {}))
         if ln.is_sale and (ln.supplier_cost_mxn or ln.interco_cost_mxn):
-            add("sale_and_cost_on_one_row", ln.job, f"row {ln.row}: both counted",
+            add("sale_and_cost_on_one_row", ln.job, r + "both counted", R + "se cuentan los dos",
                 amount_mxn=round(ln.cost_mxn, 2))
         if ln.is_sale and ln.currency_source != "stated" and not spot:
-            how = {"same invoice": f"read as {ln.currency} from another line of the same invoice",
-                   "amounts": f"read as {ln.currency} from the amounts",
-                   "unknown label": "the currency written is not one this reader knows; Finance's peso amount used",
-                   "not stated": "could not be worked out; Finance's peso amount used"}[ln.currency_source]
-            add("currency_missing", ln.job, f"row {ln.row}: currency not stated, {how}",
+            how, como = {
+                "same invoice": (f"read as {ln.currency} from another line of the same invoice",
+                                 f"se tomó {ln.currency} de otra línea de la misma factura"),
+                "amounts": (f"read as {ln.currency} from the amounts", f"se dedujo {ln.currency} de los importes"),
+                "unknown label": ("the currency written is not one this reader knows; Finance's peso amount used",
+                                  "la moneda escrita no es una que se reconozca; se usó el importe en pesos de Finanzas"),
+                "not stated": ("could not be worked out; Finance's peso amount used",
+                               "no se pudo deducir; se usó el importe en pesos de Finanzas")}[ln.currency_source]
+            add("currency_missing", ln.job, r + f"currency not stated, {how}", R + f"moneda no indicada, {como}",
                 amount_mxn=round(ln.net_sales_mxn, 2))
         if ln.is_sale and ln.currency in ("USD", "EUR"):
             if not _dollars_usable(ln):
-                what = ("no dollar amount" if ln.usd_equiv is None else
-                        "a dollar amount of zero" if abs(ln.usd_equiv) < EPS else
-                        "a dollar amount with the opposite sign to the pesos")
+                what, que = (("no dollar amount", "sin importe en dólares") if ln.usd_equiv is None else
+                             ("a dollar amount of zero", "importe en dólares de cero") if abs(ln.usd_equiv) < EPS else
+                             ("a dollar amount with the opposite sign to the pesos",
+                              "importe en dólares con el signo contrario al de los pesos"))
                 if not spot:
-                    add("no_dollar_amount", ln.job, f"row {ln.row}: {ln.currency} invoice with {what}; "
-                        "Finance's peso amount used", amount_mxn=round(ln.net_sales_mxn, 2))
+                    add("no_dollar_amount", ln.job, r + f"{ln.currency} invoice with {what}; Finance's peso amount used",
+                        R + f"factura en {ln.currency} con {que}; se usó el importe en pesos de Finanzas",
+                        amount_mxn=round(ln.net_sales_mxn, 2))
                 elif ln.usd_equiv is not None:            # the pesos are used; one of the two is still wrong
-                    add("dollar_amount_mismatch", ln.job, f"row {ln.row}: {ln.currency} invoice with {what}; "
-                        "the commission uses the pesos", amount_mxn=round(ln.net_sales_mxn, 2))
+                    add("dollar_amount_mismatch", ln.job,
+                        r + f"{ln.currency} invoice with {what}; the commission uses the pesos",
+                        R + f"factura en {ln.currency} con {que}; la comisión usa los pesos",
+                        amount_mxn=round(ln.net_sales_mxn, 2))
             else:
                 implied = ln.net_sales_mxn / ln.usd_equiv
                 off_rate = bool(ln.fx) and abs(implied - ln.fx) / ln.fx > 0.02
                 if off_rate or not RATE_BAND[0] <= implied <= RATE_BAND[1]:
-                    add("dollar_amount_mismatch", ln.job, f"row {ln.row}: pesos divided by dollars gives "
-                        f"{implied:,.4f}" + (f" against a rate of {ln.fx:,.4f} on the line" if ln.fx else "")
+                    add("dollar_amount_mismatch", ln.job,
+                        r + f"pesos divided by dollars gives {implied:,.4f}"
+                        + (f" against a rate of {ln.fx:,.4f} on the line" if ln.fx else "")
                         + "; one of the two amounts is wrong and the commission uses the "
                         + ("pesos" if spot else "dollars"),
+                        R + f"pesos entre dólares da {implied:,.4f}"
+                        + (f" contra un tipo de cambio de {ln.fx:,.4f} en la línea" if ln.fx else "")
+                        + "; uno de los dos importes está mal y la comisión usa los "
+                        + ("pesos" if spot else "dólares"),
                         amount_mxn=round(ln.net_sales_mxn, 2))
         if not ln.is_sale and abs(ln.cost_mxn) < EPS and not (ln.supplier_cost_mxn or ln.interco_cost_mxn):
-            add("empty_line", ln.job, f"row {ln.row}: no peso amount on the line"
+            add("empty_line", ln.job,
+                r + "no peso amount on the line"
                 + (f", but a dollar amount of {ln.usd_equiv:,.2f}" if ln.usd_equiv else "")
-                + " (a formula that was never calculated reads like this too)")
+                + " (a formula that was never calculated reads like this too)",
+                R + "la línea no tiene importe en pesos"
+                + (f", pero sí un importe en dólares de {ln.usd_equiv:,.2f}" if ln.usd_equiv else "")
+                + " (una fórmula que nunca se calculó se lee igual)")
         if ln.is_sale and ln.net_sales_mxn < 0 and ln.cancels_unread:
-            add("credit_reference_unreadable", ln.job, f"row {ln.row}: the document this credit note cancels "
-                "is not written as a series and a number, so it could not be compared",
-                amount_mxn=round(ln.net_sales_mxn, 2))
+            add("credit_reference_unreadable", ln.job,
+                r + "the document this credit note cancels is not written as a series and a number, "
+                "so it could not be compared",
+                R + "el documento que cancela esta nota de crédito no está escrito como serie y folio, "
+                "así que no se pudo comparar", amount_mxn=round(ln.net_sales_mxn, 2))
         if ln.is_sale and ln.embassy_billed and ln.type == IN_SCOPE:
-            add("embassy_billed_in_scope", ln.job, f"row {ln.row}: billed to the Embassy but typed {IN_SCOPE}",
-                amount_mxn=round(ln.net_sales_mxn, 2))
+            add("embassy_billed_in_scope", ln.job, r + f"billed to the Embassy but typed {IN_SCOPE}",
+                R + f"facturado a la Embajada pero con tipo {IN_SCOPE}", amount_mxn=round(ln.net_sales_mxn, 2))
     # a date far from the rest of the report (2062 for 2026)
     years = [ln.date.year for ln in lines if ln.date]
     if years:
@@ -528,6 +564,7 @@ def problems(lines, s: E.Settings | None = None) -> list:
         for ln in lines:
             if ln.date and abs(ln.date.year - usual) > 1:
                 add("date_out_of_range", ln.job, f"row {ln.row}: dated {ln.date.isoformat()} in a report for {usual}",
+                    f"fila {ln.row}: con fecha {ln.date.isoformat()} en un reporte de {usual}",
                     **({"amount_mxn": round(ln.net_sales_mxn, 2)} if ln.is_sale else {}))
     # the same document on the same job twice, to the cent
     seen = defaultdict(list)
@@ -537,8 +574,10 @@ def problems(lines, s: E.Settings | None = None) -> list:
                   round(ln.net_sales_mxn, 2), round(ln.supplier_cost_mxn, 2), round(ln.interco_cost_mxn, 2))].append(ln)
     for same in seen.values():
         if len(same) > 1:
-            add("duplicate_line", same[0].job, "rows " + ", ".join(str(x.row) for x in same)
-                + " are the same document for the same amount; both are counted",
+            which = ", ".join(str(x.row) for x in same)
+            add("duplicate_line", same[0].job,
+                f"rows {which} are the same document for the same amount; both are counted",
+                f"las filas {which} son el mismo documento por el mismo importe; se cuentan las dos",
                 amount_mxn=round(same[0].net_sales_mxn or same[0].cost_mxn, 2))
     # exchange rates far from the rest of their month
     by_month = defaultdict(list)
@@ -546,13 +585,18 @@ def problems(lines, s: E.Settings | None = None) -> list:
         if ln.is_sale and ln.currency == "USD" and ln.fx and ln.currency_source == "stated":
             by_month[ln.month].append(ln)
     for rows in by_month.values():
-        med = statistics.median(r.fx for r in rows)
-        for r in rows:
-            if abs(r.fx - med) / med > 0.10:
-                add("fx_outlier", r.job, f"row {r.row}: rate {r.fx} against {med:.4f} for the month"
+        med = statistics.median(x.fx for x in rows)
+        for x in rows:
+            if abs(x.fx - med) / med > 0.10:
+                low = spot and x.fx < med
+                add("fx_outlier", x.job,
+                    f"row {x.row}: rate {x.fx} against {med:.4f} for the month"
                     + ("; Finance's peso amount, and so the billed amount here, is too low by the amount shown"
-                       if spot and r.fx < med else ""),
-                    understated_mxn=round((med - r.fx) * (r.usd_equiv or 0), 2))
+                       if low else ""),
+                    f"fila {x.row}: tipo de cambio {x.fx} contra {med:.4f} del mes"
+                    + ("; el importe en pesos de Finanzas, y por lo tanto lo facturado aquí, está bajo por el "
+                       "importe que se muestra" if low else ""),
+                    understated_mxn=round((med - x.fx) * (x.usd_equiv or 0), 2))
     # A credit note can be for part of its invoice, never for more. Amounts are
     # compared in the invoice's own currency. A note that names the wrong
     # invoice but matches another invoice of the job is a slip in the reference,
@@ -571,9 +615,12 @@ def problems(lines, s: E.Settings | None = None) -> list:
         if (ln.job_ok and ln.usd_equiv is not None and ln.usd_equiv == round(ln.usd_equiv)
                 and abs(abs(ln.usd_equiv) - float(digits)) < 0.005):
             named = [t for t in invoices[ln.job] if ln.cancels and f"{t.series} {t.folio}" == ln.cancels]
-            should = f"; {ln.cancels}, which it cancels, is for {sum(own(t) for t in named):,.2f}" if named else ""
+            total = sum(own(t) for t in named)
             add("credit_note_amount", ln.job,
-                f"row {ln.row}: the credit note's dollar amount is the job number itself{should}",
+                f"row {ln.row}: the credit note's dollar amount is the job number itself"
+                + (f"; {ln.cancels}, which it cancels, is for {total:,.2f}" if named else ""),
+                f"fila {ln.row}: el importe en dólares de la nota de crédito es el número de expediente"
+                + (f"; {ln.cancels}, la factura que cancela, es por {total:,.2f}" if named else ""),
                 amount_mxn=round(ln.net_sales_mxn, 2))
             continue
         if not ln.cancels:
@@ -586,27 +633,38 @@ def problems(lines, s: E.Settings | None = None) -> list:
             continue
         if any(abs(own(t) - amount) <= max(1.0, 0.005 * amount) for t in invoices[ln.job] if t.currency == ln.currency):
             continue
-        add("credit_note_amount", ln.job, f"row {ln.row}: credit note for {amount:,.2f} {ln.currency or 'pesos'} "
-            f"cancels {ln.cancels}, which is for {limit:,.2f}", amount_mxn=round(ln.net_sales_mxn, 2))
+        add("credit_note_amount", ln.job,
+            f"row {ln.row}: credit note for {amount:,.2f} {ln.currency or 'pesos'} cancels {ln.cancels}, "
+            f"which is for {limit:,.2f}",
+            f"fila {ln.row}: nota de crédito por {amount:,.2f} {ln.currency or 'pesos'} cancela {ln.cancels}, "
+            f"que es por {limit:,.2f}", amount_mxn=round(ln.net_sales_mxn, 2))
     # one job, more than one type
     types = defaultdict(set)
     for ln in lines:
         types[ln.job].add(ln.type)
     for job, ts in sorted(types.items()):
         if len(ts) > 1:
-            add("type_conflict", job, "typed " + " and ".join(sorted(ts)))
+            add("type_conflict", job, "typed " + " and ".join(sorted(ts)), "con tipo " + " y ".join(sorted(ts)))
     # in-scope jobs: billed with no cost, and cost that is not counted
+    why_es = {"nothing billed in the report": "no hay nada facturado en el reporte",
+              "billing nets to zero in the report": "lo facturado se cancela por completo en el reporte",
+              "credit notes only in the report": "solo hay notas de crédito en el reporte"}
     for j in jobs(lines, s).values():
         if j["type"] != IN_SCOPE:
             continue
         _spread_, used, why = _spread(j)
         net = sum(b for b, _ in _spread_.values())
         if net >= NET_ZERO and abs(j["cost_mxn"]) < EPS and not why:
-            add("no_cost_posted", j["job"], "billed, no cost in the report yet", amount_mxn=round(net, 2))
+            add("no_cost_posted", j["job"], "billed, no cost in the report yet",
+                "facturado, todavía sin costo en el reporte", amount_mxn=round(net, 2))
         if j["cost_mxn"] <= -EPS:
-            add("negative_cost", j["job"], "the job's cost in the report is negative (supplier credits "
-                "larger than its costs); it is counted as it stands", amount_mxn=round(j["cost_mxn"], 2))
+            add("negative_cost", j["job"],
+                "the job's cost in the report is negative (supplier credits larger than its costs); "
+                "it is counted as it stands",
+                "el costo del expediente en el reporte es negativo (notas de crédito de proveedores mayores "
+                "que sus costos); se cuenta tal como está", amount_mxn=round(j["cost_mxn"], 2))
         if abs(j["cost_mxn"]) >= EPS and not used:
             add("cost_without_sales" if why.startswith("nothing") else "cost_not_counted", j["job"],
-                f"cost in the report is not counted: {why}", amount_mxn=round(j["cost_mxn"], 2))
+                f"cost in the report is not counted: {why}",
+                f"el costo del reporte no se cuenta: {why_es.get(why, why)}", amount_mxn=round(j["cost_mxn"], 2))
     return out

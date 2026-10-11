@@ -4,7 +4,7 @@ web.py — the /commissions pages.
     /commissions            the report: months, distribution, points to look at, lines
     /commissions/upload     Finance uploads the monthly margin report (POST)
     /commissions/bookings   bookings per month, typed in (POST)
-    /commissions/workbook   the same report as an Excel workbook
+    /commissions/workbook   the same report as an Excel workbook, one sheet per month in Finance's own layout
 
 Who may open it: only the addresses in COMMISSION_USERS (comma separated, set in
 Render). Without that setting it is Lupita, Mario, Rogelio and Bill. Anyone else
@@ -217,9 +217,10 @@ def commissions_workbook(email):
         en, es = error or ("Upload Finance's margin report first.", "Primero suba el reporte de margen de Finanzas.")
         _say(en, es, bad=True)
         return redirect(url_for("commissions.commissions_home"))
-    from . import trial_workbook
+    from . import template_sheet
+    s = settings()
     buf = io.BytesIO()
-    trial_workbook.build(None, buf, lines=lines, bookings=store.get("bookings", {})[0])
+    template_sheet.build_book(R.build(lines, s, store.get("bookings", {})[0]), s, buf)
     buf.seek(0)
     last = max((ln.date for ln in lines if ln.date), default=dt.date.today())
     resp = send_file(buf, as_attachment=True, download_name=f"TMS commission report to {last.isoformat()}.xlsx",
@@ -380,8 +381,8 @@ input[type=file]{font:inherit}button.go,.btn{background:var(--navy);color:#fff;b
 <input type="hidden" name="csrf" value="{{ csrf }}"><input type="file" name="report" accept=".xlsx" required>
 <button type="submit" class="go">{{ t('Upload report', 'Subir reporte') }}</button>
 {% if rep %}<a class="btn ghost" href="/commissions/workbook">{{ t('Download as Excel', 'Descargar en Excel') }}</a>{% endif %}</form>
-<p class="small">{{ t('Upload the workbook "Margen x Expediente" with its sheet "Base", the whole year to date each time. It replaces the report in use. The workbook is read and not kept; only file numbers, document numbers, dates and amounts are stored, never customer names. If a number cannot be read, nothing is loaded and the page says which row. The Excel download is in English and in pesos.',
-'Suba el libro "Margen x Expediente" con su hoja "Base", siempre con todo el año a la fecha. Sustituye al reporte en uso. El libro se lee y no se guarda; solo se almacenan números de expediente, de documento, fechas e importes, nunca nombres de clientes. Si un número no se puede leer, no se carga nada y la página indica la fila. La descarga en Excel está en inglés y en pesos.') }}</p></div>
+<p class="small">{{ t('Upload the workbook "Margen x Expediente" with its sheet "Base", the whole year to date each time. It replaces the report in use. The workbook is read and not kept; only file numbers, document numbers, dates and amounts are stored, never customer names. If a number cannot be read, nothing is loaded and the page says which row. The Excel download has one sheet per month in the layout of the Finance commission workbook, in English and in pesos.',
+'Suba el libro "Margen x Expediente" con su hoja "Base", siempre con todo el año a la fecha. Sustituye al reporte en uso. El libro se lee y no se guarda; solo se almacenan números de expediente, de documento, fechas e importes, nunca nombres de clientes. Si un número no se puede leer, no se carga nada y la página indica la fila. La descarga en Excel tiene una hoja por mes con el formato del libro de comisiones de Finanzas, en inglés y en pesos.') }}</p></div>
 
 <div class="card" id="bookings"><h2>{{ t('Bookings per month', 'Ventas contratadas por mes') }} (MXN)</h2>
 <p class="small">{{ t('Sale price of the Corporate and Private files booked in each month, in pesos. Sales reach = bookings ÷ budget × ' ~ (s.w_invoicing*100)|round|int ~ ' %. Leave a month blank if it is not known yet.',

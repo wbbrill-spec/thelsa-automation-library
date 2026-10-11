@@ -99,3 +99,39 @@ def test_target_margin_gets_its_own_cell_when_it_differs_from_the_weight():
     T.write(ws, T.SAMPLE_ROWS, E.Settings(target_margin=0.35), T.SAMPLE_BUDGET)
     assert ws["F15"].value == 0.35 and ws["R4"].value == '=IF(O4="","",O4/$F$15)'
     assert ws["S4"].value == '=IF(OR(R4="",K4=0),0,((K4*$Q$2)*$D$15)*R4)'      # the weight stays D15
+
+
+def _report():
+    from commissions import report as R
+    ln = lambda job, month, billed, cost, posted=True: {"month": month, "job": job, "billed": billed, "cost": cost,
+                                                         "cost_posted": posted}
+    mo = lambda month, rule, known, bookings=None: {"month": month, "rule": rule, "budget": S.budgets[month],
+                                                     "bookings": bookings, "bookings_known": known}
+    return {"months": [mo("2026-03", "Old calculation", False), mo("2026-04", "To confirm", False),
+                       mo("2026-05", "New calculation", True, 3_000_000.0)],
+            "lines": [ln("110001", "2026-03", 1000.0, 400.0), ln("110002", "2026-04", 2000.0, 0.0, posted=False),
+                      ln("110003", "2026-05", 3000.0, 900.0), ln("110004", "2026-05", -500.0, 0.0)]}
+
+
+def test_whole_report_is_one_sheet_per_month_in_month_order():
+    wb = T.build_book(_report(), S)
+    assert wb.sheetnames == ["Mar 2026", "Apr 2026", "May 2026"] and wb.active.title == "May 2026"
+    may = wb["May 2026"]
+    assert [may[f"B{r}"].value for r in (4, 5)] == ["110003", "110004"] and may["A4"].value == "May"
+    assert may["D6"].value == 3_000_000.0 and may["H6"].value == S.budgets["2026-05"]
+    assert wb["Apr 2026"]["L4"].value == T.PENDING and wb["Apr 2026"]["D5"].value == S.budgets["2026-04"]
+
+
+def test_each_sheet_says_what_is_missing_and_which_rule_the_month_follows():
+    wb = T.build_book(_report(), S)
+    notes = lambda ws: " ".join(str(c.value) for row in ws.iter_rows(min_col=2, max_col=2) for c in row if c.value)
+    assert "paid on the old calculation" in notes(wb["Mar 2026"])
+    assert "still to be confirmed" in notes(wb["Apr 2026"]) and "no cost in the books yet" in notes(wb["Apr 2026"])
+    may = notes(wb["May 2026"])
+    assert "old calculation" not in may and "entered on the commissions page" in may and "16.50" in may
+    assert "set equal to the budget" in notes(wb["Mar 2026"]) and "set equal to the budget" not in may
+
+
+def test_a_report_with_no_month_still_opens():
+    wb = T.build_book({"months": [], "lines": []}, S)
+    assert wb.sheetnames == ["No months"]

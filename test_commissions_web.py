@@ -7,6 +7,7 @@ import openpyxl
 import pytest
 from flask import Flask
 
+from commissions import template_sheet as T
 from commissions import engine as E
 from commissions import finance as F
 from commissions import report as R
@@ -206,22 +207,34 @@ def test_bookings_need_the_form_token_and_blank_clears_a_month(client):
 
 # ── Excel download ───────────────────────────────────────────────────────────
 def test_workbook_download_matches_the_page(client, tmp_path):
+    """The download is the report in Finance's own layout: one sheet per month."""
     login(client)
     upload(client, xlsx(tmp_path))
     client.post("/commissions/bookings", data={"csrf": "tok", "b_2026-05": "3,000,000.00"})
     r = client.get("/commissions/workbook")
     assert r.status_code == 200 and r.headers["Content-Disposition"].endswith('to 2026-08-05.xlsx"')
+    assert r.headers["Cache-Control"] == "no-store"
     wb = openpyxl.load_workbook(io.BytesIO(r.data))
-    assert wb.sheetnames == ["Summary", "Settings", "Lines", "Checks"]
-    st = wb["Settings"]
-    may = next(i for i in range(1, 60) if st.cell(row=i, column=1).value == "2026-05")
-    assert st.cell(row=may, column=6).value == 3000000.0           # typed-in bookings
-    assert st.cell(row=may + 1, column=6).value == f"=E{may + 1}"  # June: still the placeholder
+    rep = R.build(F.load_base(io.BytesIO(xlsx(tmp_path))), W.settings(), {"2026-05": 3000000.0})
+    assert wb.sheetnames == [T.sheet_name(m["month"]) for m in rep["months"]] and "May 2026" in wb.sheetnames
     text = " ".join(str(c.value) for ws in wb for r_ in ws.iter_rows() for c in r_ if c.value is not None)
     for name in NAMES:
         assert name not in text
-    rep = R.build(F.load_base(io.BytesIO(xlsx(tmp_path))), W.settings(), {"2026-05": 3000000.0})
-    jobs_in_book = [r_[1].value for r_ in wb["Lines"].iter_rows(min_row=5) if r_[1].value]
+    jobs_in_book = []
+    for m in rep["months"]:
+        ws = wb[T.sheet_name(m["month"])]
+        assert (ws["A2"].value, ws["K2"].value, ws["W2"].value) == ("BOOKED QUOTE", "REAL", "COMMISSION DISTRIBUTION")
+        mine = [x for x in rep["lines"] if x["month"] == m["month"]]
+        tot = 4 + len(mine)
+        assert ws[f"A{tot}"].value == "Total Bookings" and ws[f"H{tot}"].value == m["budget"]
+        # bookings typed on the page are used; a month without them keeps the budget as a placeholder
+        assert ws[f"D{tot}"].value == (3000000.0 if m["month"] == "2026-05" else m["budget"])
+        for i, x in enumerate(mine):
+            row = 4 + i
+            jobs_in_book.append(ws[f"B{row}"].value)
+            assert ws[f"K{row}"].value == pytest.approx(x["billed"])
+            assert ws[f"L{row}"].value == (pytest.approx(x["cost"]) if x["cost_posted"] else T.PENDING)
+            assert ws[f"P{row}"].value is None and ws[f"U{row}"].value == f"=Q{row}+S{row}+T{row}"
     assert jobs_in_book == [x["job"] for x in rep["lines"]]
 
 

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from openpyxl import Workbook
 from openpyxl.comments import Comment
 from openpyxl.formatting.rule import CellIsRule
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -251,3 +252,51 @@ def rows_for_month(report: dict, month: str) -> list:
         out[0] = Row(first.file, names[int(month[5:7]) - 1], first.status, first.sale_price, first.quote_cost,
                      first.billed, first.cost, first.provision, first.payment, first.cost_pending)
     return out
+
+
+_MONTHS = ("January February March April May June July August September October November December").split()
+
+
+def sheet_name(month: str) -> str:
+    """'2026-05' -> 'May 2026'."""
+    return f"{_MONTHS[int(month[5:7]) - 1][:3]} {month[:4]}"
+
+
+def month_notes(m: dict, rows, s: E.Settings) -> list:
+    """What the reader has to know about one month's sheet, in plain words."""
+    notes = ["REAL block: Finance's margin report (billed and actual cost per file)."
+             + (f" Dollar invoices are taken at {s.usd_mxn:,.2f} pesos per dollar." if s.sales_fx == "internal"
+                else " Dollar invoices are taken at the rate of the invoice day.")]
+    if m["rule"] == "Old calculation":
+        notes.append("This month was paid on the old calculation. The sheet shows what the new calculation gives, "
+                     "for comparison only.")
+    elif m["rule"] == "To confirm":
+        notes.append("Old or new calculation for this month is still to be confirmed.")
+    notes.append("BOOKED QUOTE block is empty: quoted sale prices and costing are not in Finance's report.")
+    notes.append("Bookings (yellow cell) are the figure entered on the commissions page." if m["bookings_known"] else
+                 "Bookings (yellow cell) are set equal to the budget until the real figure is entered on the "
+                 "commissions page.")
+    notes.append("Payment status is empty: collection is not known yet, so nothing is distributed. "
+                 "Type Paid or Pending in column P.")
+    if any(x.cost_pending for x in rows):
+        notes.append("A line showing pending in Actual Cost has no cost in the books yet; its gross margin part "
+                     "is zero until the cost is posted.")
+    return notes
+
+
+def build_book(report: dict, s: E.Settings, out=None) -> Workbook:
+    """The whole report of `report.build(...)` as a workbook: one sheet per
+    invoice month, each in Finance's layout. Saved to `out` when given."""
+    wb = Workbook()
+    wb.remove(wb.active)
+    for m in report["months"]:
+        rows = rows_for_month(report, m["month"])
+        ws = wb.create_sheet(sheet_name(m["month"]))
+        write(ws, rows, s, m["budget"], bookings=m["bookings"] if m["bookings_known"] else m["budget"],
+              notes=month_notes(m, rows, s))
+    if not wb.sheetnames:
+        wb.create_sheet("No months").cell(row=1, column=1, value="No month in the report has a budget.")
+    wb.active = len(wb.sheetnames) - 1          # opens on the latest month
+    if out is not None:
+        wb.save(out)
+    return wb

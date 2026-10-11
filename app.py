@@ -557,7 +557,8 @@ app.register_blueprint(crossborder_bp)
 from assistant.web import bp as assistant_bp
 app.register_blueprint(assistant_bp)
 # TMS Commission Report — restricted to the people named in COMMISSION_USERS
-# (default: Lupita, Mario, Rogelio, Bill). Not linked from the home page.
+# (default: Lupita, Mario, Rogelio, Bill). The home page shows a tile for it marked
+# "Restricted Access"; anyone not on the list who clicks it gets "not found".
 try:
     from commissions.web import commissions_bp
     app.register_blueprint(commissions_bp)

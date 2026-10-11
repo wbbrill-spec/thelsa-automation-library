@@ -8,8 +8,8 @@ web.py — the /commissions pages.
 
 Who may open it: only the addresses in COMMISSION_USERS (comma separated, set in
 Render). Without that setting it is Lupita, Mario, Rogelio and Bill. Anyone else
-who is signed in to the library gets "not found", not "forbidden": the page is
-not advertised.
+who is signed in to the library gets "not found", not "forbidden". The home
+page lists it under Management Reports as "Restricted Access".
 
 The uploaded workbook is read in memory and thrown away. What is kept is the
 list of lines the reader makes from it, which holds no customer names.

@@ -9,7 +9,8 @@ web.py — the /commissions pages.
 Who may open it: only the addresses in COMMISSION_USERS (comma separated, set in
 Render). Without that setting it is Lupita, Mario, Rogelio and Bill. Anyone else
 who is signed in to the library gets "not found", not "forbidden". The home
-page lists it under Management Reports as "Restricted Access".
+page shows its tile (Management Reports) only to those same addresses:
+home_tile() cuts the tile out of the page for everyone else.
 
 The uploaded workbook is read in memory and thrown away. What is kept is the
 list of lines the reader makes from it, which holds no customer names.
@@ -50,6 +51,17 @@ def allowed_users() -> set:
     raw = os.environ.get("COMMISSION_USERS", "")
     listed = {e.strip().lower() for e in raw.replace(";", ",").split(",") if e.strip()}
     return listed or set(DEFAULT_USERS)
+
+
+_TILE = re.compile(r"<!-- COMMISSION_TILE_START.*?<!-- COMMISSION_TILE_END -->\n?", re.S)
+
+
+def home_tile(html: str, email: str) -> str:
+    """The library home page with the commission tile left in only for someone
+    who may open the report. For anyone else the tile is cut out."""
+    if (email or "").strip().lower() in allowed_users():
+        return html
+    return _TILE.sub("", html)
 
 
 def _restricted(f):

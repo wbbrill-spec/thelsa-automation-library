@@ -481,8 +481,22 @@ def index():
     html = (BASE / "index.html").read_text()
     name = session.get("user_name", "")
     email = session.get("user_email", "")
+    html = _commission_tile(html, email)
     html = html.replace("{{USER_NAME}}", name).replace("{{USER_EMAIL}}", email)
     return html
+
+
+def _commission_tile(html, email):
+    """Keep the Commission Report tile only for the people who may open it.
+    If the commission package is not available, nobody sees the tile."""
+    try:
+        from commissions.web import home_tile
+        return home_tile(html, email)
+    except Exception:
+        head, found, rest = html.partition("<!-- COMMISSION_TILE_START")
+        if not found:
+            return html
+        return head + rest.partition("<!-- COMMISSION_TILE_END -->")[2]
 
 
 @app.route("/launch/<key>")
@@ -557,8 +571,8 @@ app.register_blueprint(crossborder_bp)
 from assistant.web import bp as assistant_bp
 app.register_blueprint(assistant_bp)
 # TMS Commission Report — restricted to the people named in COMMISSION_USERS
-# (default: Lupita, Mario, Rogelio, Bill). The home page shows a tile for it marked
-# "Restricted Access"; anyone not on the list who clicks it gets "not found".
+# (default: Lupita, Mario, Rogelio, Bill). The home page shows its tile only to
+# those people (see _commission_tile); anyone else who opens the address gets "not found".
 try:
     from commissions.web import commissions_bp
     app.register_blueprint(commissions_bp)

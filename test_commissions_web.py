@@ -344,3 +344,33 @@ def test_messages_come_in_both_languages(client, tmp_path):
     client.post("/commissions/bookings", data={"csrf": "tok", "b_2026-05": "abc"})
     page = client.get("/commissions").data.decode()
     assert "May 2026" in page and "No se guardaron las ventas contratadas" in page and "mayo 2026" in page
+
+
+
+# ── the tile on the library home page ─────────────────────────────────────────
+def _home():
+    import pathlib
+    return (pathlib.Path(__file__).parent / "index.html").read_text()
+
+
+def test_home_tile_is_shown_only_to_the_people_who_may_open_the_report(monkeypatch):
+    monkeypatch.delenv("COMMISSION_USERS", raising=False)
+    home = _home()
+    assert 'href="/commissions"' in home
+    for email in W.DEFAULT_USERS:
+        assert 'href="/commissions"' in W.home_tile(home, email)
+        assert 'href="/commissions"' in W.home_tile(home, "  " + email.upper() + " ")
+    for email in ("someone@thelsa.com", "", None):
+        page = W.home_tile(home, email)
+        assert "/commissions" not in page and "Commission" not in page
+        assert "COMMISSION_TILE" not in page
+        # the rest of the page is untouched
+        assert "TMS Executive Dashboard" in page and "TIM Executive Dashboard" in page
+        assert page.count("<div") == page.count("</div>")
+
+
+def test_home_tile_follows_the_render_setting(monkeypatch):
+    monkeypatch.setenv("COMMISSION_USERS", "new.person@thelsa.com")
+    home = _home()
+    assert 'href="/commissions"' in W.home_tile(home, "new.person@thelsa.com")
+    assert "/commissions" not in W.home_tile(home, "bbrill@thelsa.com")

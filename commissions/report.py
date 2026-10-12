@@ -12,6 +12,8 @@ bookings equal to its budget (sales reach 0.60) and marked as a placeholder.
 """
 from __future__ import annotations
 
+import dataclasses
+import re
 import statistics
 from collections import defaultdict
 
@@ -131,6 +133,21 @@ def month_rates(lines, s: E.Settings) -> tuple:
             statistics.median(every) if every else s.usd_mxn, bool(every))
 
 
+PAYMENT_WORDS = ("Paid", "Pending")
+_PAY_KEY = re.compile(r"^(\d{4}-(?:0[1-9]|1[0-2]))\|(\d{5,7}[A-Z]{0,2})$")
+
+
+def clean_payments(payments) -> dict:
+    """{(month, job): True for Paid, False for Pending} from what the page
+    stored as {"2026-06|110510": "Paid"}. Anything else is left out."""
+    out = {}
+    for k, v in (payments or {}).items():
+        m = _PAY_KEY.match(str(k))
+        if m and v in PAYMENT_WORDS:
+            out[(m.group(1), m.group(2))] = v == "Paid"
+    return out
+
+
 def _quote_months(by_month, quotes) -> tuple:
     """(first, per_month). `first` = the month each job is first invoiced: its
     booked quote is shown and counted there, once. per_month = how many of those
@@ -191,14 +208,19 @@ def book_quotes(lines, removals, control, costings, s: E.Settings) -> tuple:
     return Q.book(removals, costings, s, pesos=pesos), Q.problems(removals, control, costings, pesos=pesos)
 
 
-def build(lines, s: E.Settings, bookings=None, quotes=None, quote_problems=()) -> dict:
+def build(lines, s: E.Settings, bookings=None, quotes=None, quote_problems=(), payments=None) -> dict:
     """`quotes` = quotes.book(...): the booked quote of each job, or None when
     the Moveware reports have not been loaded. A month's bookings are, in this
     order: the figure typed on the page; the booked quotes (when every file of
-    the month has one); the budget, as a placeholder."""
+    the month has one); the budget, as a placeholder.
+
+    `payments` = the payment status marked on the page per line (file and
+    invoice month). Commission is payable only on lines marked Paid."""
     s.check()
     bookings = clean_bookings(bookings)
-    by_month = F.commission_lines(lines, s)
+    pay = clean_payments(payments)
+    by_month = {m: [dataclasses.replace(x, paid=pay.get((m, x.job))) for x in ls]
+                for m, ls in F.commission_lines(lines, s).items()}
     problems = F.problems(lines, s)
     first, qmonths, won = {}, {}, {}
     if quotes is not None:
@@ -245,6 +267,8 @@ def build(lines, s: E.Settings, bookings=None, quotes=None, quote_problems=()) -
             "invoicing": sum(x.invoicing for x in res.lines), "margin": sum(x.margin for x in res.lines),
             "discipline": sum(x.discipline for x in res.lines), "total": res.total,
             "payable": res.payable_total, "held": res.held_total,
+            "paid_lines": sum(1 for x in res.lines if x.line.paid is True),
+            "pending_lines": sum(1 for x in res.lines if x.line.paid is False),
             "waiting_lines": len(waiting), "waiting_billed": sum(x.line.billed for x in waiting)})
         mrow = months[-1]
         mrow["usd"] = {k: mrow[k] / rate for k in MONEY}
@@ -257,6 +281,8 @@ def build(lines, s: E.Settings, bookings=None, quotes=None, quote_problems=()) -
                 "status": "Ganado" if (q and q["status"] == "W") else "",
                 "sale_price": q["sale"] if here else None, "quote_cost": q["cost"] if here else None,
                 "quote_month": first.get(x.line.job) if q else None,
+                "payment": {True: "Paid", False: "Pending"}.get(x.line.paid, ""),
+                "payable": x.total if x.line.paid is True else 0.0,
                 "month": m, "job": x.line.job, "billed": x.line.billed, "cost": x.line.cost,
                 "gross_margin": x.gross_margin, "margin_pct": x.margin_pct, "cost_posted": x.line.cost_posted,
                 "invoicing": x.invoicing, "margin": x.margin, "discipline": x.discipline, "total": x.total,
@@ -300,6 +326,9 @@ def build(lines, s: E.Settings, bookings=None, quotes=None, quote_problems=()) -
                       "from_report": rates_found},
             "placeholder_months": [r["month"] for r in months if not r["bookings_known"]],
             "quotes_loaded": quotes is not None, "bookings_basis": s.bookings_basis,
+            "paid_lines": sum(r["paid_lines"] for r in months), "pending_lines": sum(r["pending_lines"] for r in months),
+            "payments_unused": sorted(f"{m}|{j}" for (m, j) in pay
+                                      if not any(x.job == j for x in by_month.get(m, ()))),
             "source": {"lines": len(lines), "from": min(dates).isoformat() if dates else None,
                        "to": max(dates).isoformat() if dates else None,
                        "jobs_in_scope": sum(1 for (_, t) in F.jobs(lines, s) if t == F.IN_SCOPE)}}

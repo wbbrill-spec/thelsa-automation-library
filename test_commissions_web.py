@@ -465,3 +465,75 @@ def test_the_page_works_with_a_stored_moveware_report_that_cannot_be_read_back(c
     r = client.get("/commissions")
     assert r.status_code == 200 and b"could not be read back" in r.data and b"Removals Summary: not loaded yet." in r.data
     assert client.get("/commissions/workbook").status_code == 200
+
+
+# ── payment status ───────────────────────────────────────────────────────────
+def _lines_of(client):
+    return W._report(F.from_records(store.get("finance_report")[0]["records"]), W.settings())
+
+
+def test_only_lines_marked_paid_are_payable(client, tmp_path):
+    login(client)
+    upload(client, xlsx(tmp_path))
+    rep = _lines_of(client)
+    assert rep["total_all"]["payable"] == 0 and rep["paid_lines"] == 0
+    assert "No line is marked as paid yet" in client.get("/commissions").data.decode()
+    a, b, c = rep["lines"][0], rep["lines"][1], rep["lines"][-1]
+    r = client.post("/commissions/payments", data={"csrf": "tok", f"p_{a['month']}_{a['job']}": "Paid",
+                                                   f"p_{b['month']}_{b['job']}": "Pending", f"p_{c['month']}_{c['job']}": "Paid"})
+    assert r.status_code == 302 and store.get("payments")[1]["by"] == LUPITA
+    rep = _lines_of(client)
+    by = {(x["month"], x["job"]): x for x in rep["lines"]}
+    assert [by[(x["month"], x["job"])]["payment"] for x in (a, b, c)] == ["Paid", "Pending", "Paid"]
+    assert rep["paid_lines"] == 2 and rep["pending_lines"] == 1
+    assert rep["total_all"]["payable"] == pytest.approx(a["total"] + c["total"])
+    assert rep["total_all"]["payable"] + rep["total_all"]["held"] == pytest.approx(rep["total_all"]["total"])
+    assert sum(p["payable"] for p in rep["people"]) == pytest.approx(rep["total_new"]["payable"])
+    page = client.get("/commissions").data.decode()
+    assert "Payment status saved: 3 line(s) changed, 2 marked Paid in all." in page
+    assert f'name="p_{a["month"]}_{a["job"]}"' in page and "2 " in page and "marked as paid. Only those are payable." in page
+    # the Excel sheet carries the status, so Finance's own formulas distribute the same lines
+    wb = openpyxl.load_workbook(io.BytesIO(client.get("/commissions/workbook").data))
+    ws = wb[T.sheet_name(a["month"])]
+    row_ = next(r_ for r_ in range(4, 40) if ws[f"B{r_}"].value == a["job"])
+    assert ws[f"P{row_}"].value == "Paid" and ws[f"Y{row_}"].value.startswith(f'=IF(P{row_}="Paid"')
+    # setting a line back to "not known" removes the mark; lines not in the form keep theirs
+    client.post("/commissions/payments", data={"csrf": "tok", f"p_{a['month']}_{a['job']}": ""})
+    assert set(store.get("payments")[0]) == {f"{b['month']}|{b['job']}", f"{c['month']}|{c['job']}"}
+
+
+def test_a_pasted_list_of_files_marks_one_month(client, tmp_path):
+    login(client)
+    upload(client, xlsx(tmp_path))
+    rep = _lines_of(client)
+    month = rep["lines"][0]["month"]
+    jobs = [x["job"] for x in rep["lines"] if x["month"] == month]
+    text = f"{jobs[0]}\n file {jobs[1].lower()}, 999999 and Jane Roe 12"
+    r = client.post("/commissions/payments", data={"csrf": "tok", "bulk_jobs": text, "bulk_month": month, "bulk_status": "Paid"})
+    assert r.status_code == 302
+    assert store.get("payments")[0] == {f"{month}|{jobs[0]}": "Paid", f"{month}|{jobs[1]}": "Paid"}
+    page = client.get("/commissions").data.decode()
+    assert "2 line(s) of May 2026 marked Paid. Not in May 2026, left out: 999999." in page and "Jane Roe" not in page
+    for bad in ({"bulk_month": "2026-13"}, {"bulk_status": "Maybe"}, {"bulk_month": ""}):
+        data = {"csrf": "tok", "bulk_jobs": jobs[2] if len(jobs) > 2 else jobs[0], "bulk_month": month, "bulk_status": "Pending", **bad}
+        client.post("/commissions/payments", data=data)
+        assert "Nothing was changed" in client.get("/commissions").data.decode()
+    assert len(store.get("payments")[0]) == 2
+
+
+def test_payment_status_needs_the_token_a_report_and_plain_values(client, tmp_path):
+    login(client)
+    assert client.post("/commissions/payments", data={"p_2026-05_110001": "Paid"}).status_code == 400
+    assert client.post("/commissions/payments", data={"csrf": "tok", "p_2026-05_110001": "Paid"}).status_code == 302
+    assert store.get("payments")[0] is None                                   # no report loaded: nothing to mark
+    upload(client, xlsx(tmp_path))
+    client.post("/commissions/payments", data={"csrf": "tok", "p_2026-05_110001": "Yes", "p_2031-01_999999": "Paid",
+                                               "p_2026-05_110002": "Paid"})
+    assert store.get("payments")[0] == {"2026-05|110002": "Paid"}             # unknown words and unknown lines are ignored
+    # marks left over from an older report are ignored by the calculation and named on the page
+    store.put("payments", {"2026-05|110002": "Paid", "2025-01|123456": "Paid", "junk": "Paid", "2026-05|110001": "Sure"}, by=LUPITA)
+    rep = _lines_of(client)
+    assert rep["paid_lines"] == 1 and rep["payments_unused"] == ["2025-01|123456"]
+    assert b"2025-01|123456" in client.get("/commissions").data
+    assert R.clean_payments({"2026-05|110002": "Paid", "2026-05|110001": "Pending", "x": "Paid", "2026-5|1": "Paid"}) == {
+        ("2026-05", "110002"): True, ("2026-05", "110001"): False}

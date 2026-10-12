@@ -4,6 +4,7 @@ web.py — the /commissions pages.
     /commissions            the report: months, distribution, points to look at, lines
     /commissions/upload     Finance uploads the monthly margin report (POST)
     /commissions/bookings   bookings per month, typed in (POST)
+    /commissions/payments   payment status per line, Paid or Pending (POST)
     /commissions/upload-removals, /commissions/upload-costing
                             the two Moveware reports that hold each file's booked quote (POST)
     /commissions/workbook   the same report as an Excel workbook, one sheet per month in Finance's own layout
@@ -133,12 +134,13 @@ def _report(lines, s: E.Settings, mw=None) -> dict:
     the bookings typed in, and the booked quotes when the Removals Summary is loaded."""
     mw = mw or _moveware()
     bookings = store.get("bookings", {})[0]
+    payments = store.get("payments", {})[0]
     if not mw["removals"]:
-        return R.build(lines, s, bookings)
+        return R.build(lines, s, bookings, payments=payments)
     rem, control, _ = mw["removals"]
     cst = mw["costing"][0] if mw["costing"] else []
     quotes, qproblems = R.book_quotes(lines, rem, control, cst, s)
-    return R.build(lines, s, bookings, quotes=quotes, quote_problems=qproblems)
+    return R.build(lines, s, bookings, quotes=quotes, quote_problems=qproblems, payments=payments)
 
 
 MONTH_NAMES_ES = "enero febrero marzo abril mayo junio julio agosto septiembre octubre noviembre diciembre".split()
@@ -159,11 +161,12 @@ def commissions_home(email):
     lines, meta, error = _current()
     s = settings()
     bookings, bmeta = store.get("bookings", {})
+    pmeta = store.get("payments", {})[1]
     mw = _moveware()
     rep = _report(lines, s, mw) if lines else None
     months = sorted(s.budgets)
     resp = make_response(render_template_string(
-        PAGE, rep=rep, meta=meta, error=error or mw["error"], mw=mw, msg=session.pop("commission_msg", None), csrf=_csrf(),
+        PAGE, rep=rep, meta=meta, error=error or mw["error"], mw=mw, pmeta=pmeta, msg=session.pop("commission_msg", None), csrf=_csrf(),
         s=s, bookings=R.clean_bookings(bookings), bmeta=bmeta, months=months, month_label=_month_label,
         month_label_es=_month_label_es, durable=store.durable(), new_from=_month_label(R.NEW_FROM),
         new_from_es=_month_label_es(R.NEW_FROM), email=email))
@@ -294,6 +297,63 @@ def commissions_bookings(email):
     return redirect(url_for("commissions.commissions_home") + "#bookings")
 
 
+_JOB_TOKEN = re.compile(r"\b\d{5,7}[A-Z]{0,2}\b")
+
+
+@commissions_bp.route("/commissions/payments", methods=["POST"])
+@_restricted
+def commissions_payments(email):
+    """Payment status per line (a file in an invoice month): Paid, Pending or
+    not known. Either the selectors of the lines table, or a pasted list of
+    file numbers for one month."""
+    _check_csrf()
+    home = redirect(url_for("commissions.commissions_home") + "#lines")
+    lines, _meta, error = _current()
+    if not lines:
+        en, es = error or ("Upload Finance's margin report first.", "Primero suba el reporte de margen de Finanzas.")
+        _say(en, es, bad=True)
+        return home
+    rep = _report(lines, settings())
+    known = {(x["month"], x["job"]) for x in rep["lines"]}
+    stored, _ = store.get("payments", {})
+    stored = {k: v for k, v in (stored or {}).items() if v in R.PAYMENT_WORDS}
+    before = dict(stored)
+    pasted = (request.form.get("bulk_jobs") or "").strip()
+    if pasted:
+        month, status = request.form.get("bulk_month") or "", request.form.get("bulk_status") or ""
+        if not _MONTH.match(month) or status not in R.PAYMENT_WORDS:
+            _say("Choose the month and the status for the pasted list. Nothing was changed.",
+                 "Elija el mes y el estatus para la lista pegada. No se cambió nada.", bad=True)
+            return home
+        jobs = sorted(set(_JOB_TOKEN.findall(pasted.upper())))
+        found = [j for j in jobs if (month, j) in known]
+        other = [j for j in jobs if (month, j) not in known]
+        for j in found:
+            stored[f"{month}|{j}"] = status
+        store.put("payments", stored, by=email)
+        tail_en = f" Not in {_month_label(month)}, left out: {', '.join(other)}." if other else ""
+        tail_es = f" No están en {_month_label_es(month)}, se omitieron: {', '.join(other)}." if other else ""
+        _say(f"{len(found)} line(s) of {_month_label(month)} marked {status}.{tail_en}",
+             f"{len(found)} línea(s) de {_month_label_es(month)} marcadas como "
+             f"{'pagadas' if status == 'Paid' else 'pendientes'}.{tail_es}", bad=not found)
+        return home
+    for (month, job) in known:                      # only the lines of the report in use can be set from the table
+        field = f"p_{month}_{job}"
+        if field not in request.form:
+            continue
+        v = request.form.get(field) or ""
+        if v in R.PAYMENT_WORDS:
+            stored[f"{month}|{job}"] = v
+        elif v == "":
+            stored.pop(f"{month}|{job}", None)
+    changed = sum(1 for k in set(stored) | set(before) if stored.get(k) != before.get(k))
+    store.put("payments", stored, by=email)
+    paid = sum(1 for v in stored.values() if v == "Paid")
+    _say(f"Payment status saved: {changed} line(s) changed, {paid} marked Paid in all.",
+         f"Estatus de pago guardado: {changed} línea(s) cambiadas, {paid} marcadas como pagadas en total.")
+    return home
+
+
 @commissions_bp.route("/commissions/workbook")
 @_restricted
 def commissions_workbook(email):
@@ -406,7 +466,7 @@ input[type=file]{font:inherit}button.go,.btn{background:var(--navy);color:#fff;b
 <ul>
 {% if rep.placeholder_months %}<li>{{ t('Bookings are not known for ' ~ rep.placeholder_months|length ~ ' month(s). Those months use the budget as a placeholder, which gives a sales reach of 0.60 (yellow cells).',
 'No se conocen las ventas contratadas de ' ~ rep.placeholder_months|length ~ ' mes(es). Esos meses usan el presupuesto como valor provisional, lo que da un alcance de ventas de 0.60 (celdas amarillas).') }}</li>{% endif %}
-<li>{{ t('No invoice is marked as collected yet, so nothing is payable.', 'Ninguna factura está marcada como cobrada todavía, así que no hay nada por pagar.') }}</li>
+{% if not rep.paid_lines %}<li>{{ t('No line is marked as paid yet, so nothing is payable.', 'Ninguna línea está marcada como pagada todavía, así que no hay nada por pagar.') }}</li>{% else %}<li>{{ rep.paid_lines }} {{ t('line(s) are marked as paid. Only those are payable.', 'línea(s) están marcadas como pagadas. Solo esas son pagaderas.') }}</li>{% endif %}
 <li>{{ t('Costs arrive about two months after the invoice. Recent months show too much margin until their costs are posted.',
 'Los costos llegan unos dos meses después de la factura. Los meses recientes muestran margen de más hasta que se registran sus costos.') }}</li>
 <li>{{ t('January to May follow the old calculation. They are shown here on the new calculation for comparison only.',
@@ -498,16 +558,26 @@ input[type=file]{font:inherit}button.go,.btn{background:var(--navy);color:#fff;b
 </table></div><p><button type="submit" class="go">{{ t('Save bookings', 'Guardar ventas contratadas') }}</button></p></form></div>
 
 {% if rep %}<div class="card" id="lines"><h2>{{ t('Commission lines', 'Líneas de comisión') }} ({{ rep.lines|length }}) (<span class="cur">MXN</span>)</h2>
-<p class="small">{{ t('One line per file per invoice month, net of that month\'s credit notes.', 'Una línea por expediente por mes de factura, neta de las notas de crédito de ese mes.') }}</p>
-{% for r in rep.months %}<details><summary>{{ mon(r.month) }}: {{ r.lines }} {{ t('lines', 'líneas') }}, {{ M(r.total, r.usd.total, 2) }}</summary>
+<p class="small">{{ t('One line per file per invoice month, net of that month\'s credit notes. Commission is payable only on lines marked Paid: choose the status of each line and save, or paste a list of file numbers below.', 'Una línea por expediente por mes de factura, neta de las notas de crédito de ese mes. La comisión solo es pagadera en las líneas marcadas como pagadas: elija el estatus de cada línea y guarde, o pegue abajo una lista de expedientes.') }}{% if pmeta %} {{ t('Payment status last saved', 'Estatus de pago guardado por última vez el') }} {{ pmeta.at|cm_when }} {{ t('by', 'por') }} {{ pmeta.by }}.{% endif %}</p>
+<form method="post" action="/commissions/payments" class="row" style="align-items:flex-start;margin-bottom:10px"><input type="hidden" name="csrf" value="{{ csrf }}">
+<textarea name="bulk_jobs" rows="2" cols="42" aria-label="{{ 'File numbers' }}" placeholder="110510 110584 110611 …"></textarea>
+<select name="bulk_month" aria-label="Month">{% for r in rep.months %}<option value="{{ r.month }}"{{ ' selected' if loop.last else '' }}>{{ month_label(r.month) }}</option>{% endfor %}</select>
+<select name="bulk_status" aria-label="Status"><option value="Paid">Paid / Pagada</option><option value="Pending">Pending / Pendiente</option></select>
+<button type="submit" class="go">{{ t('Mark the pasted files', 'Marcar los expedientes pegados') }}</button></form>
+{% if rep.payments_unused %}<p class="small">{{ rep.payments_unused|length }} {{ t('payment mark(s) belong to lines that are not in the report in use and are ignored:', 'marca(s) de pago son de líneas que no están en el reporte en uso y se ignoran:') }} {{ rep.payments_unused|join(', ') }}.</p>{% endif %}
+<form method="post" action="/commissions/payments"><input type="hidden" name="csrf" value="{{ csrf }}">
+<p><button type="submit" class="go">{{ t('Save payment status', 'Guardar estatus de pago') }}</button></p>
+{% for r in rep.months %}<details{{ ' open' if r.paid_lines or r.pending_lines else '' }}><summary>{{ mon(r.month) }}: {{ r.lines }} {{ t('lines', 'líneas') }}, {{ M(r.total, r.usd.total, 2) }}{% if r.paid_lines %} · {{ r.paid_lines }} {{ t('paid', 'pagadas') }}, {{ M(r.payable, r.usd.payable, 2) }}{% endif %}</summary>
 <div class="scroll"><table><tr><th>{{ t('File', 'Expediente') }}</th><th>{{ t('Billed', 'Facturado') }}</th><th>{{ t('Actual cost', 'Costo real') }}</th><th>{{ t('Gross margin', 'Margen bruto') }}</th><th>{{ t('% margin', '% margen') }}</th>
-<th>{{ t('Invoicing part', 'Parte facturación') }}</th><th>{{ t('Margin part', 'Parte margen') }}</th><th>{{ t('Discipline part', 'Parte disciplina') }}</th><th>Total</th><th class="l">{{ t('Notes', 'Notas') }}</th></tr>
+<th>{{ t('Invoicing part', 'Parte facturación') }}</th><th>{{ t('Margin part', 'Parte margen') }}</th><th>{{ t('Discipline part', 'Parte disciplina') }}</th><th>Total</th><th class="l">{{ t('Payment', 'Pago') }}</th><th class="l">{{ t('Notes', 'Notas') }}</th></tr>
 {% for x in rep.lines if x.month == r.month %}<tr><td>{{ x.job }}</td><td>{{ M(x.billed, x.usd.billed, 2) }}</td><td>{{ M(x.cost, x.usd.cost, 2) }}</td>
 <td>{{ M(x.gross_margin, x.usd.gross_margin, 2) }}</td><td>{{ x.margin_pct|cm_pct }}</td><td>{{ M(x.invoicing, x.usd.invoicing, 2) }}</td>
 <td>{% if x.cost_posted %}{{ M(x.margin, x.usd.margin, 2) }}{% else %}<span class="tag w">{{ t('waits for cost', 'espera costo') }}</span>{% endif %}</td>
 <td>{{ M(x.discipline, x.usd.discipline, 2) }}</td><td>{{ M(x.total, x.usd.total, 2) }}</td>
+<td class="l"><select name="p_{{ x.month }}_{{ x.job }}" aria-label="{{ x.job }}"><option value=""{{ ' selected' if not x.payment else '' }}>–</option><option value="Paid"{{ ' selected' if x.payment == 'Paid' else '' }}>Paid / Pagada</option><option value="Pending"{{ ' selected' if x.payment == 'Pending' else '' }}>Pending / Pendiente</option></select></td>
 <td class="wrapc">{% if x.credit %}<span class="tag">{{ t('credit notes exceed invoices', 'las notas de crédito superan a las facturas') }}</span> {% endif %}{% for f in x.flags %}<span class="tag w">{{ t(f.en, f.es) }}</span> {% endfor %}</td></tr>{% endfor %}
-</table></div></details>{% endfor %}</div>{% endif %}
+</table></div></details>{% endfor %}
+<p><button type="submit" class="go">{{ t('Save payment status', 'Guardar estatus de pago') }}</button></p></form></div>{% endif %}
 </div>
 <script>
 (function(){

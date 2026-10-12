@@ -247,7 +247,7 @@ def rows_for_month(report: dict, month: str) -> list:
     is first invoiced. Payment status is not known yet."""
     names = ("January February March April May June July August September October November December").split()
     out = [Row(file=x["job"], status=x.get("status") or "", sale_price=x.get("sale_price"),
-               quote_cost=x.get("quote_cost"), billed=x["billed"],
+               quote_cost=x.get("quote_cost"), billed=x["billed"], payment=x.get("payment") or "",
                cost=None if not x["cost_posted"] else x["cost"], cost_pending=not x["cost_posted"])
            for x in report["lines"] if x["month"] == month]
     if out:                            # the month is written once, on the first line, as in the template
@@ -292,8 +292,12 @@ def month_notes(m: dict, rows, s: E.Settings) -> list:
                   "Bookings (yellow cell) are the sale prices of the Corporate and Private files won in this month.",
         "placeholder": "Bookings (yellow cell) are set equal to the budget until every file of the month has a "
                        "booked quote or the figure is entered on the commissions page."}[source])
-    notes.append("Payment status is empty: collection is not known yet, so nothing is distributed. "
-                 "Type Paid or Pending in column P.")
+    if any(x.payment for x in rows):
+        notes.append("Payment status is as marked on the commissions page. Only lines marked Paid are distributed; "
+                     "a line with no status is not known yet.")
+    else:
+        notes.append("Payment status is empty: no line of this month is marked on the commissions page yet, so "
+                     "nothing is distributed. Type Paid or Pending in column P to try it.")
     if any(x.cost_pending for x in rows):
         notes.append("A line showing pending in Actual Cost has no cost in the books yet; its gross margin part "
                      "is zero until the cost is posted.")

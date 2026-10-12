@@ -244,7 +244,9 @@ def test_report_totals_are_the_sum_of_their_months_and_people_get_all_of_it(tmp_
     rep = R.build(lines, W.settings(), {"2026-05": 1_000_000, "2026-07": float("nan"), "2026-06": -5, "x": "1"})
     assert rep["placeholder_months"] == ["2026-06", "2026-07"]       # nan and negative bookings are not bookings
     assert rep["total_all"]["total"] == pytest.approx(sum(m["total"] for m in rep["months"]))
-    assert rep["total_new"]["total"] == pytest.approx(sum(r["total"] for r in rep["lines"]))
+    new_lines = [r for r in rep["lines"] if r["month"] >= R.NEW_FROM]
+    assert 0 < len(new_lines) < len(rep["lines"])                    # the fixture has May (old) and later (new)
+    assert rep["total_new"]["total"] == pytest.approx(sum(r["total"] for r in new_lines))
     assert sum(p["if_collected"] for p in rep["people"]) == pytest.approx(rep["total_new"]["total"])
     assert rep["control"] == pytest.approx(0, abs=1e-6)
     assert rep["total_new"]["payable"] == 0
@@ -387,3 +389,11 @@ def test_home_tile_follows_the_render_setting(monkeypatch):
     home = _home()
     assert 'href="/commissions"' in W.home_tile(home, "new.person@thelsa.com")
     assert "/commissions" not in W.home_tile(home, "bbrill@thelsa.com")
+
+
+def test_the_new_calculation_starts_in_june_2026():
+    """Lupita, 12 Oct 2026: April and May are old calculation."""
+    assert R.NEW_FROM == "2026-06"
+    assert [R.rule_for(m) for m in ("2026-01", "2026-04", "2026-05", "2026-06", "2026-12")] == [
+        "Old calculation", "Old calculation", "Old calculation", "New calculation", "New calculation"]
+    assert set(R.rule_for(f"2026-{m:02d}") for m in range(1, 13)) <= set(R.RULES_ES)

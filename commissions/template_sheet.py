@@ -270,8 +270,6 @@ def month_notes(m: dict, rows, s: E.Settings) -> list:
     if m["rule"] == "Old calculation":
         notes.append("This month was paid on the old calculation. The sheet shows what the new calculation gives, "
                      "for comparison only.")
-    elif m["rule"] == "To confirm":
-        notes.append("Old or new calculation for this month is still to be confirmed.")
     notes.append("BOOKED QUOTE block is empty: quoted sale prices and costing are not in Finance's report.")
     notes.append("Bookings (yellow cell) are the figure entered on the commissions page." if m["bookings_known"] else
                  "Bookings (yellow cell) are set equal to the budget until the real figure is entered on the "

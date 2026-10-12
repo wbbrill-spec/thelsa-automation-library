@@ -796,3 +796,31 @@ def test_with_spot_a_cancelled_dollar_job_does_not_carry_its_cost(load):
                  row("110112", -88000, usd=-5000, ccy=USD, fx=17.6, date=D(2026, 6, 2), series="NCCORP", folio=2),
                  cost("110112", 50000)])
     assert sum(ln.cost for m in F.commission_lines(part, SPOT).values() for ln in m) == pytest.approx(50000)
+
+
+# ── an invoice Finance labels as dollars that was issued in another currency ─
+def test_a_confirmed_other_currency_invoice_is_taken_at_finances_pesos(load):
+    """110633, folio 122 of 27 Feb 2026 was invoiced in Canadian dollars
+    (CAD 19,300.82). Finance's report shows it as USD at 17.17."""
+    rows = [row("110633", sales=243636.18, usd=14189.64, ccy=USD, fx=17.17, date=D(2026, 2, 27), series="CORP-PART", folio=122),
+            row("110633", sales=17500.0, usd=1000.0, ccy=USD, fx=17.5, date=D(2026, 3, 5), series="CORP-PART", folio=130),
+            row("110634", sales=243636.18, usd=14189.64, ccy=USD, fx=17.17, date=D(2026, 2, 27), series="CORP-PART", folio=122)]
+    lines = load(rows)
+    cad, usd_same_job, usd_other_job = lines
+    assert (cad.currency, cad.currency_source) == ("", "other currency")
+    assert F.billed_for_commission(cad, S) == pytest.approx(243636.18)              # Finance's pesos, not 14,189.64 x 16.50
+    assert F.billed_for_commission(usd_same_job, S) == pytest.approx(1000.0 * 16.5)  # other invoices of the job: unchanged
+    assert F.billed_for_commission(usd_other_job, S) == pytest.approx(14189.64 * 16.5)
+    assert F.billed_for_commission(cad, SPOT) == pytest.approx(243636.18)
+    back = F.from_records(F.to_records(lines))                                       # survives being stored and read back
+    assert back[0].currency_source == "other currency" and F.billed_for_commission(back[0], S) == pytest.approx(243636.18)
+    found = [p for p in F.problems(lines, S) if p["kind"] == "other_currency"]
+    assert len(found) == 1 and found[0]["job"] == "110633" and "CAD" in found[0]["detail"] and "CAD" in found[0]["detail_es"]
+    assert not [p for p in F.problems(lines, S) if p["job"] == "110633" and p["kind"] in ("currency_missing", "dollar_amount_mismatch", "fx_outlier")]
+    assert not [p for p in F.problems(lines, SPOT) if p["kind"] == "other_currency"]
+
+
+def test_every_kind_of_point_has_a_label_in_both_languages():
+    from commissions import report as R
+    assert "other_currency" in R.LABELS and "other_currency" in R.LABELS_ES
+    assert set(R.LABELS) == set(R.LABELS_ES)

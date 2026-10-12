@@ -89,7 +89,7 @@ class FinLine:
     series: str
     folio: str
     currency: str               # USD | MXN | EUR | '' (not known)
-    currency_source: str        # stated | same invoice | amounts | unknown label | not stated
+    currency_source: str        # stated | same invoice | amounts | unknown label | not stated | other currency
     fx: float | None
     usd_equiv: float | None
     net_sales_mxn: float        # Finance's pesos (0 when the line is not a sale)
@@ -176,6 +176,14 @@ def _folio(v) -> str:
     if not t:
         return ""
     return (t.lstrip("0") or "0") if t.isdigit() else "?"
+
+
+# Invoices the report labels as US dollars that were issued in another currency,
+# as confirmed by Thelsa. The commission takes Finance's own peso amount for
+# them, so the internal dollar rate is never applied to money that was not
+# dollars. Key: (job, folio, date).
+#   110633, folio 122, 27 Feb 2026: CAD 19,300.82 (Lupita, 12 Oct 2026)
+OTHER_CURRENCY = {("110633", "122", dt.date(2026, 2, 27)): "CAD"}
 
 
 def _currency(label: str) -> tuple:
@@ -267,6 +275,9 @@ def load_base(path, sheet: str = "Base") -> list:
         d = g("Fecha")
         date = d.date() if isinstance(d, dt.datetime) else (d if isinstance(d, dt.date) else None)
         ccy, source = _currency(_text(g("Moneda")))
+        folio = _folio(g("Folio"))
+        if (job, folio, date) in OTHER_CURRENCY:
+            ccy, source = "", "other currency"
         ent = _text(g("Empresa")).upper()
         ent = _ENTITY.get(ent, ent)
         cref = _plain(_text(g("Factura que Cancela"))).upper()
@@ -276,7 +287,7 @@ def load_base(path, sheet: str = "Base") -> list:
             row=i, type=typ if typ in TYPES else "?", job=job, file=file_, date=date,
             entity=ent if ent in _ENTITIES else "OTHER",
             series=series if _SERIES.match(series) else ("?" if series else ""),
-            folio=_folio(g("Folio")),
+            folio=folio,
             currency=ccy, currency_source=source,
             fx=_num(g("Tipo de Cambio"), i, "Tipo de Cambio", money=False),
             usd_equiv=usd, net_sales_mxn=sales, supplier_cost_mxn=sup, interco_cost_mxn=ic,
@@ -340,7 +351,8 @@ def from_records(records) -> list:
                   and (ln.series in ("", "?") or _SERIES.match(ln.series))
                   and (ln.folio in ("", "?") or ln.folio.isdigit())
                   and ln.currency in ("USD", "MXN", "EUR", "")
-                  and ln.currency_source in ("stated", "same invoice", "amounts", "unknown label", "not stated")
+                  and ln.currency_source in ("stated", "same invoice", "amounts", "unknown label", "not stated",
+                                           "other currency")
                   and (ln.cancels == "" or _REF.match(ln.cancels))
                   and all(isinstance(getattr(ln, k), bool) for k in ("has_comment", "embassy_billed", "cancels_unread"))
                   and all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
@@ -500,7 +512,13 @@ def problems(lines, s: E.Settings | None = None) -> list:
         if ln.is_sale and (ln.supplier_cost_mxn or ln.interco_cost_mxn):
             add("sale_and_cost_on_one_row", ln.job, r + "both counted", R + "se cuentan los dos",
                 amount_mxn=round(ln.cost_mxn, 2))
-        if ln.is_sale and ln.currency_source != "stated" and not spot:
+        if ln.is_sale and ln.currency_source == "other currency" and not spot:
+            code = OTHER_CURRENCY.get((ln.job, ln.folio, ln.date), "another currency")
+            add("other_currency", ln.job,
+                r + f"invoice issued in {code}, not in US dollars (confirmed by Thelsa); Finance's peso amount used",
+                R + f"factura emitida en {code}, no en dólares de EE. UU. (confirmado por Thelsa); se usó el importe "
+                    "en pesos de Finanzas", amount_mxn=round(ln.net_sales_mxn, 2))
+        elif ln.is_sale and ln.currency_source != "stated" and not spot:
             how, como = {
                 "same invoice": (f"read as {ln.currency} from another line of the same invoice",
                                  f"se tomó {ln.currency} de otra línea de la misma factura"),

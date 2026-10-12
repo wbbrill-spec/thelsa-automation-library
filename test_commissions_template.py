@@ -107,7 +107,7 @@ def _report():
                                                          "cost_posted": posted}
     mo = lambda month, rule, known, bookings=None: {"month": month, "rule": rule, "budget": S.budgets[month],
                                                      "bookings": bookings, "bookings_known": known}
-    return {"months": [mo("2026-03", "Old calculation", False), mo("2026-04", "To confirm", False),
+    return {"months": [mo("2026-03", "Old calculation", False), mo("2026-04", "Old calculation", False),
                        mo("2026-05", "New calculation", True, 3_000_000.0)],
             "lines": [ln("110001", "2026-03", 1000.0, 400.0), ln("110002", "2026-04", 2000.0, 0.0, posted=False),
                       ln("110003", "2026-05", 3000.0, 900.0), ln("110004", "2026-05", -500.0, 0.0)]}
@@ -126,7 +126,7 @@ def test_each_sheet_says_what_is_missing_and_which_rule_the_month_follows():
     wb = T.build_book(_report(), S)
     notes = lambda ws: " ".join(str(c.value) for row in ws.iter_rows(min_col=2, max_col=2) for c in row if c.value)
     assert "paid on the old calculation" in notes(wb["Mar 2026"])
-    assert "still to be confirmed" in notes(wb["Apr 2026"]) and "no cost in the books yet" in notes(wb["Apr 2026"])
+    assert "paid on the old calculation" in notes(wb["Apr 2026"]) and "no cost in the books yet" in notes(wb["Apr 2026"])
     may = notes(wb["May 2026"])
     assert "old calculation" not in may and "entered on the commissions page" in may and "16.50" in may
     assert "set equal to the budget" in notes(wb["Mar 2026"]) and "set equal to the budget" not in may

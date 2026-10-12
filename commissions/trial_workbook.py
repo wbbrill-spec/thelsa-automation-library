@@ -39,8 +39,8 @@ def build(src, out, lines=None, bookings=None):
     probs = F.problems(lines, S)
     MONTHS = [f"2026-{m:02d}" for m in range(1, 13)]
     MNAME = dict(zip(MONTHS, "January February March April May June July August September October November December".split()))
-    RULES = {**{m: "Old calculation (already paid)" for m in MONTHS[:3]}, MONTHS[3]: "To confirm with Lupita",
-             **{m: "New calculation" for m in MONTHS[4:9]}, **{m: "No data yet" for m in MONTHS[9:]}}
+    RULES = {**{m: "Old calculation" for m in MONTHS[:5]},
+             **{m: "New calculation" for m in MONTHS[5:9]}, **{m: "No data yet" for m in MONTHS[9:]}}
     BUD = {  # corporate, private — Lupita, 7 Oct 2026
         "2026-01": (461225.74, 560914.82), "2026-02": (791582.67, 894320.44), "2026-03": (1093662.68, 1042447.00),
         "2026-04": (1135452.02, 1029296.29), "2026-05": (928135.00, 1209654.17), "2026-06": (1903929.52, 1650125.28),

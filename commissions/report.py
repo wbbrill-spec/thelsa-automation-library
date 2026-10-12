@@ -18,15 +18,17 @@ from collections import defaultdict
 from . import engine as E
 from . import finance as F
 
-# The new calculation applies from May 2026 (Lupita, 7 Oct 2026). January to
-# March were paid on the old calculation; April is still to be confirmed.
-NEW_FROM = "2026-05"
+# The new calculation applies from June 2026. January to May follow the old
+# calculation (Lupita, 12 Oct 2026: "April and May are OLD calculation"; her
+# note of 7 Oct had said May).
+NEW_FROM = "2026-06"
 
 # Points to look at, most important first, in the words the reader sees.
 LABELS = {
     "credit_note_amount": "Credit note amount looks wrong",
     "dollar_amount_mismatch": "Dollar and peso amounts do not agree",
     "no_dollar_amount": "Dollar invoice with no usable dollar amount",
+    "other_currency": "Invoice in another currency, Finance's pesos used",
     "duplicate_line": "Same document entered twice",
     "fx_outlier": "Exchange rate looks mistyped",
     "embassy_billed_in_scope": "Billed to the Embassy, typed CORP-PART",
@@ -48,6 +50,7 @@ LABELS_ES = {
     "credit_note_amount": "El importe de la nota de crédito parece incorrecto",
     "dollar_amount_mismatch": "Los importes en dólares y en pesos no coinciden",
     "no_dollar_amount": "Factura en dólares sin importe en dólares utilizable",
+    "other_currency": "Factura en otra moneda, se usan los pesos de Finanzas",
     "duplicate_line": "El mismo documento capturado dos veces",
     "fx_outlier": "El tipo de cambio parece mal capturado",
     "embassy_billed_in_scope": "Facturado a la Embajada, con tipo CORP-PART",
@@ -77,9 +80,7 @@ ROUTINE = ("no_cost_posted", "cost_without_sales", "currency_missing")
 
 
 def rule_for(month: str) -> str:
-    if month >= NEW_FROM:
-        return "New calculation"
-    return "To confirm" if month == "2026-04" else "Old calculation"
+    return "New calculation" if month >= NEW_FROM else "Old calculation"
 
 
 def clean_bookings(bookings) -> dict:

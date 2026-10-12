@@ -324,8 +324,8 @@ input[type=file]{font:inherit}button.go,.btn{background:var(--navy);color:#fff;b
 <li>{{ t('No invoice is marked as collected yet, so nothing is payable.', 'Ninguna factura está marcada como cobrada todavía, así que no hay nada por pagar.') }}</li>
 <li>{{ t('Costs arrive about two months after the invoice. Recent months show too much margin until their costs are posted.',
 'Los costos llegan unos dos meses después de la factura. Los meses recientes muestran margen de más hasta que se registran sus costos.') }}</li>
-<li>{{ t('The margin part follows the sample workbook (file 111000 pays 765.00). To be confirmed.',
-'La parte de margen sigue el libro de ejemplo (el expediente 111000 paga 765.00). Por confirmar.') }}</li>
+<li>{{ t('January to May follow the old calculation. They are shown here on the new calculation for comparison only.',
+'De enero a mayo aplica el cálculo anterior. Aquí se muestran con el cálculo nuevo solo para comparar.') }}</li>
 </ul></div>
 
 <div class="card"><h2>{{ t(new_from ~ ' onwards: new calculation', 'A partir de ' ~ new_from_es ~ ': cálculo nuevo') }}</h2>

@@ -43,6 +43,12 @@ try:
 except Exception:
     _HAVE_MW = False
 
+try:
+    import mw_ingest
+    _HAVE_INGEST = True
+except Exception:
+    _HAVE_INGEST = False
+
 
 def _login_required(f):
     @functools.wraps(f)
@@ -59,13 +65,13 @@ SAMPLE_METRICS = {
     "generatedNote": "SAMPLE data — live Moveware pull inactive (no creds or no data returned).",
     "window": "sample",
     "passBar": 80,
-    "tiles": {"totalFiles": 0, "activeFiles": 0, "sampleFiles": 0, "missingInsurance": 0},
+    "tiles": {"removals": 0, "active": 0, "missingSurvey": 0, "unassigned": 0},
     "byCoordinator": [],
     "byCriterion": [
         {"name": "Survey on file", "v": 0},
-        {"name": "Delivery logged", "v": 0},
-        {"name": "Insurance recorded", "v": 0},
-        {"name": "Priced quote", "v": 0},
+        {"name": "Delivery date logged", "v": 0},
+        {"name": "Collect date logged", "v": 0},
+        {"name": "Coordinator assigned", "v": 0},
     ],
     "breaches": [],
 }
@@ -295,12 +301,41 @@ def faim():
 @faim_bp.route("/faim/api/metrics")
 @_login_required
 def faim_metrics():
-    live = None
     try:
-        live = _faim_live_metrics()
+        build = mw_ingest.load_build() if _HAVE_INGEST else None
     except Exception:
-        live = None
-    data = dict(live) if live else dict(SAMPLE_METRICS)
+        build = None
+    if build and build.get("metrics", {}).get("tiles"):
+        m = build["metrics"]
+        diag = build.get("diagnostics", {})
+        complete = bool(diag.get("complete"))
+        note = (
+            "LIVE Moveware \u2014 Thelsa (port 64000) \u00b7 "
+            f"{diag.get('removals_in_window', 0)} removals in the window "
+            f"({diag.get('files_in_window', 0)} files) \u00b7 built "
+            f"{build.get('generatedAt', '')[:16].replace('T', ' ')}Z. "
+            + str(diag.get("coverage_note", ""))
+        )
+        data = {
+            "generatedNote": note,
+            "window": "live build" + ("" if complete else " \u00b7 partial"),
+            "passBar": 80,
+            "tiles": m["tiles"],
+            "byCoordinator": m.get("byCoordinator", []),
+            "byCriterion": m.get("byCriterion", []),
+            "breaches": m.get("breaches", []),
+        }
+    else:
+        try:
+            if _HAVE_INGEST and _HAVE_MW and mw_live.have_creds():
+                mw_ingest.trigger_build()
+        except Exception:
+            pass
+        data = dict(SAMPLE_METRICS)
+        data["generatedNote"] = (
+            "Building the live view from Moveware now \u2014 the first build reads "
+            "the book in the background (a few minutes). Use Refresh shortly."
+        )
     data["viewer"] = session.get("user_email", "")
     return jsonify(data)
 
@@ -308,22 +343,28 @@ def faim_metrics():
 @faim_bp.route("/faim/raw")
 @_login_required
 def faim_raw():
-    """Debug: exact total (x-total-count), a raw V2 list item, and sub-resources."""
-    if not _HAVE_MW:
-        return jsonify({"error": "mw_live not importable"})
-    out = {}
+    """Debug: the current build's diagnostics + builder status."""
+    out = {"have_ingest": _HAVE_INGEST}
     try:
-        out["total_files"] = _mw_total("/jobs?limit=1&page=1&count=true")
-        recent, total = _fetch_recent_jobs()
-        out["sample_size"] = len(recent)
-        out["first_recent_job"] = recent[0] if recent else None
+        out["status"] = mw_ingest.build_status() if _HAVE_INGEST else None
+        b = mw_ingest.load_build() if _HAVE_INGEST else None
+        out["generatedAt"] = b.get("generatedAt") if b else None
+        out["diagnostics"] = b.get("diagnostics") if b else None
     except Exception as e:
-        out["jobs_error"] = str(e)
-    try:
-        out["mw_sample"] = mw_live.raw_sample()
-    except Exception as e:
-        out["mw_sample_error"] = str(e)
+        out["error"] = str(e)
     return jsonify(out)
+
+
+@faim_bp.route("/faim/rebuild", methods=["GET", "POST"])
+@_login_required
+def faim_rebuild():
+    """Kick off a background build of the live book."""
+    if not _HAVE_INGEST:
+        return jsonify({"error": "mw_ingest not importable"})
+    try:
+        return jsonify(mw_ingest.trigger_build())
+    except Exception as e:
+        return jsonify({"error": str(e)})
 
 
 DASHBOARD_HTML = r"""<!DOCTYPE html>
@@ -391,6 +432,7 @@ td.num{font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
 </div>
 <div class="topright">
 <span id="viewer"></span>
+<button class="btn" onclick="rebuild()">↻ Refresh data</button>
 <button class="btn" onclick="toggleTheme()">◐ Theme</button>
 <a class="btn" href="/">← Library</a>
 <a class="btn" href="/logout">Sign out</a>
@@ -431,6 +473,7 @@ td.num{font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
 </div>
 <script>
 function toggleTheme(){const r=document.documentElement;r.setAttribute('data-theme',r.getAttribute('data-theme')==='dark'?'light':'dark');}
+async function rebuild(){const b=document.getElementById('sampleBanner');b.style.display='block';b.textContent='● Starting a fresh build from Moveware…';try{const r=await fetch('/faim/rebuild',{method:'POST'});const j=await r.json();b.textContent='● '+(j.started?'Build started — reading the live book in the background; use Refresh / reload in a few minutes.':(j.reason?('Build '+j.reason):'Build status received.'));}catch(e){b.textContent='● Could not start the build.';}}
 const THR=80;
 function bars(el,data){
 if(!data||!data.length){el.innerHTML='<p style="font-size:12px;color:var(--muted);margin:0">No files checked this load.</p>';return;}
@@ -449,10 +492,10 @@ document.getElementById('viewer').textContent=d.viewer||'';
 if(d.generatedNote){const b=document.getElementById('sampleBanner');b.style.display='block';b.textContent='● '+d.generatedNote;}
 const t=d.tiles||{};
 document.getElementById('tiles').innerHTML=`
-<div class="tile"><p class="label">Live files in Moveware</p><p class="val">${t.totalFiles}</p><p class="sub2">company 64000 · x-total-count</p></div>
-<div class="tile"><p class="label">Active (not cancelled)</p><p class="val">${t.activeFiles}</p><p class="sub2">eligible for audit</p></div>
-<div class="tile"><p class="label">Recent files checked</p><p class="val">${t.sampleFiles}</p><p class="sub2">newest in the book</p></div>
-<div class="tile"><p class="label">Missing survey</p><p class="val">${t.missingInsurance}</p><p class="sub2">of the recent sample</p></div>`;
+<div class="tile"><p class="label">Removals in window</p><p class="val">${t.removals}</p><p class="sub2">last 12 months, by collect date</p></div>
+<div class="tile"><p class="label">Active (not lost/cancelled)</p><p class="val">${t.active}</p><p class="sub2">eligible for FAIM audit</p></div>
+<div class="tile"><p class="label">Missing survey</p><p class="val">${t.missingSurvey}</p><p class="sub2">of active files</p></div>
+<div class="tile"><p class="label">Unassigned coordinator</p><p class="val">${t.unassigned}</p><p class="sub2">of active files</p></div>`;
 bars(document.getElementById('byCoord'),d.byCoordinator||[]);
 bars(document.getElementById('byCrit'),d.byCriterion||[]);
 const tb=document.getElementById('breaches');

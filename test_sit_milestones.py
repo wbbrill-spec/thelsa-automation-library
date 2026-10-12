@@ -65,3 +65,11 @@ def test_compare_against_moveware():
     assert out["rows"][0]["gaps"] == ["pack missing in MoveWare"]
     out = sm.compare(jobs, [{"job": "110900A", "pack": D(2026, 9, 30), "delivery": None}], TODAY)
     assert out["differs"] == 1
+
+
+def test_unpack_service_is_delivery_not_pack():
+    snaps = [(D(2026, 8, 13), [trip("110739", "PUERTO VERACRUZ", "BODEGA THELSA GDL", None, D(2026, 8, 8), "INT D"),
+                               trip("110739", "BODEGA THELSA GDL", "ZAPOPAN, JAL", D(2026, 8, 10), D(2026, 8, 12)),
+                               trip("110739", "ZAPOPAN, JAL", "ZAPOPAN, JAL", D(2026, 8, 13), None, "DESEMPAQUE")])]
+    j = sm.collect(snaps, TODAY)["110739"]
+    assert j["pack"] is None and j["delivery"]["date"] == "2026-08-13"

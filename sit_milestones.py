@@ -90,14 +90,22 @@ def collect(snapshots, today: dt.date | None = None) -> dict:
     for j in jobs.values():
         pack = deliv = None
         for leg in j["legs"].values():
-            if leg.get("load") and not is_hub(leg["origin"]):
-                cand = (leg["load"], leg)
-                if pack is None or cand[0] < pack[0]:
-                    pack = cand
-            if leg.get("unload") and not is_hub(leg["destination"]):
-                cand = (leg["unload"], leg)
-                if deliv is None or cand[0] > deliv[0]:
-                    deliv = cand
+            kind = re.sub(r"[^a-z]", "", (leg.get("tipo") or "").lower())
+            p_day = d_day = None
+            if kind.startswith(("desemp", "desep")):          # unpacking at the customer = delivery
+                d_day = leg.get("load") or leg.get("unload")
+            elif kind in ("huacal", "suelto", "muebles", "empaque", "embalaje"):
+                if not is_hub(leg["origin"]):                  # packing services at the customer
+                    p_day = leg.get("load")
+            else:                                             # truck movements
+                if not is_hub(leg["origin"]):
+                    p_day = leg.get("load")
+                if not is_hub(leg["destination"]):
+                    d_day = leg.get("unload")
+            if p_day and (pack is None or p_day < pack[0]):
+                pack = (p_day, leg)
+            if d_day and (deliv is None or d_day > deliv[0]):
+                deliv = (d_day, leg)
         j["pack"] = _milestone(pack, today)
         j["delivery"] = _milestone(deliv, today)
         j["legs"] = [{**v, "load": _iso(v.get("load")), "unload": _iso(v.get("unload")),

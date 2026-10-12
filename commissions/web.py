@@ -5,6 +5,7 @@ web.py — the /commissions pages.
     /commissions/upload     Finance uploads the monthly margin report (POST)
     /commissions/bookings   bookings per month, typed in (POST)
     /commissions/payments   payment status per line, Paid or Pending (POST)
+    /commissions/upload-payments   Finance's report of customer payments, one per company (POST)
     /commissions/upload-removals, /commissions/upload-costing
                             the two Moveware reports that hold each file's booked quote (POST)
     /commissions/workbook   the same report as an Excel workbook, one sheet per month in Finance's own layout
@@ -37,6 +38,7 @@ from flask import (Blueprint, abort, make_response, redirect, render_template_st
 
 from . import engine as E
 from . import finance as F
+from . import payments as P
 from . import quotes as Q
 from . import report as R
 from . import store
@@ -129,18 +131,38 @@ def _moveware():
     return out
 
 
+def _collections() -> dict:
+    """The payments reports stored, one per company:
+    {"sources": [(payments, info, {"at", "by"})], "error": (en, es) | None}."""
+    doc, _ = store.get("payment_reports")
+    out = {"sources": [], "error": None}
+    for name, src in sorted(((doc or {}).get("sources") or {}).items()):
+        try:
+            ps, info = P.from_records(src.get("records") or {})
+            at = src.get("at")
+            out["sources"].append((ps, info, {"at": dt.datetime.fromisoformat(at) if at else None, "by": src.get("by", "")}))
+        except (P.PaymentReportError, ValueError, AttributeError):
+            out["error"] = ("A stored payments report could not be read back. Please upload it again.",
+                            "No se pudo leer un reporte de pagos guardado. Súbalo de nuevo.")
+    return out
+
+
 def _report(lines, s: E.Settings, mw=None) -> dict:
     """The report as the page and the Excel download show it: Finance's lines,
     the bookings typed in, and the booked quotes when the Removals Summary is loaded."""
     mw = mw or _moveware()
     bookings = store.get("bookings", {})[0]
-    payments = store.get("payments", {})[0]
+    col = _collections()["sources"]
+    more = dict(payments=store.get("payments", {})[0])
+    if col:
+        more.update(collected=[p for ps, _i, _m in col for p in ps],
+                    collected_reach=R.payment_reach([(ps, info) for ps, info, _m in col]))
     if not mw["removals"]:
-        return R.build(lines, s, bookings, payments=payments)
+        return R.build(lines, s, bookings, **more)
     rem, control, _ = mw["removals"]
     cst = mw["costing"][0] if mw["costing"] else []
     quotes, qproblems = R.book_quotes(lines, rem, control, cst, s)
-    return R.build(lines, s, bookings, quotes=quotes, quote_problems=qproblems, payments=payments)
+    return R.build(lines, s, bookings, quotes=quotes, quote_problems=qproblems, **more)
 
 
 MONTH_NAMES_ES = "enero febrero marzo abril mayo junio julio agosto septiembre octubre noviembre diciembre".split()
@@ -163,10 +185,11 @@ def commissions_home(email):
     bookings, bmeta = store.get("bookings", {})
     pmeta = store.get("payments", {})[1]
     mw = _moveware()
+    col = _collections()
     rep = _report(lines, s, mw) if lines else None
     months = sorted(s.budgets)
     resp = make_response(render_template_string(
-        PAGE, rep=rep, meta=meta, error=error or mw["error"], mw=mw, pmeta=pmeta, msg=session.pop("commission_msg", None), csrf=_csrf(),
+        PAGE, rep=rep, meta=meta, error=error or mw["error"] or col["error"], mw=mw, col=col["sources"], pmeta=pmeta, msg=session.pop("commission_msg", None), csrf=_csrf(),
         s=s, bookings=R.clean_bookings(bookings), bmeta=bmeta, months=months, month_label=_month_label,
         month_label_es=_month_label_es, durable=store.durable(), new_from=_month_label(R.NEW_FROM),
         new_from_es=_month_label_es(R.NEW_FROM), email=email))
@@ -235,6 +258,42 @@ def commissions_upload_removals(email):
 def commissions_upload_costing(email):
     return _upload_moveware(email, "costing_sheet", Q.load_costing, Q.costing_to_records,
                             "Move Costing Sheet", "Move Costing Sheet")
+
+
+@commissions_bp.route("/commissions/upload-payments", methods=["POST"])
+@_restricted
+def commissions_upload_payments(email):
+    """Finance's report of customer payments for one company. It replaces the
+    report stored for that same company; other companies' reports stay."""
+    _check_csrf()
+    home = redirect(url_for("commissions.commissions_home") + "#collected")
+    data = _uploaded()
+    if data is None:
+        return home
+    try:
+        ps, info = P.load(io.BytesIO(data))
+    except P.PaymentReportError as e:            # these messages carry no text from the workbook
+        _say(f"The payments report was not loaded: {e}. Nothing was changed.",
+             f"El reporte de pagos no se cargó: {e.es}. No se cambió nada.", bad=True)
+        return home
+    except Exception:
+        _say("The file could not be read. Nothing was changed.", "El archivo no se pudo leer. No se cambió nada.",
+             bad=True)
+        return home
+    doc, _ = store.get("payment_reports")
+    doc = doc if isinstance(doc, dict) and isinstance(doc.get("sources"), dict) else {"sources": {}}
+    digest = hashlib.sha256(data).hexdigest()
+    name = info["company"] or "?"
+    doc["sources"][name] = {"records": P.to_records(ps, info), "sha256": digest, "by": email,
+                            "at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")}
+    store.put("payment_reports", doc, by=email)
+    _log_upload(email, f"payment_report {name}", len(ps), digest)
+    who = {"?": ("a company this report does not know", "una empresa que este reporte no conoce")}.get(name, (name, name))
+    _say(f"Payments report loaded for {who[0]}: {len(ps):,} payments from {info['from'] or '?'} to {info['to'] or '?'}. "
+         "Customer names and bank references in it were not kept.",
+         f"Reporte de pagos cargado para {who[1]}: {len(ps):,} pagos del {info['from'] or '?'} al {info['to'] or '?'}. "
+         "No se guardaron los nombres de clientes ni las referencias bancarias.")
+    return home
 
 
 @commissions_bp.route("/commissions/upload", methods=["POST"])
@@ -466,7 +525,7 @@ input[type=file]{font:inherit}button.go,.btn{background:var(--navy);color:#fff;b
 <ul>
 {% if rep.placeholder_months %}<li>{{ t('Bookings are not known for ' ~ rep.placeholder_months|length ~ ' month(s). Those months use the budget as a placeholder, which gives a sales reach of 0.60 (yellow cells).',
 'No se conocen las ventas contratadas de ' ~ rep.placeholder_months|length ~ ' mes(es). Esos meses usan el presupuesto como valor provisional, lo que da un alcance de ventas de 0.60 (celdas amarillas).') }}</li>{% endif %}
-{% if not rep.paid_lines %}<li>{{ t('No line is marked as paid yet, so nothing is payable.', 'Ninguna línea está marcada como pagada todavía, así que no hay nada por pagar.') }}</li>{% else %}<li>{{ rep.paid_lines }} {{ t('line(s) are marked as paid. Only those are payable.', 'línea(s) están marcadas como pagadas. Solo esas son pagaderas.') }}</li>{% endif %}
+{% if not rep.paid_lines %}<li>{{ t('No line is marked as paid yet, so nothing is payable.', 'Ninguna línea está marcada como pagada todavía, así que no hay nada por pagar.') }}</li>{% else %}<li>{{ rep.paid_lines }} {{ t('line(s) are paid. Only those are payable.', 'línea(s) están pagadas. Solo esas son pagaderas.') }}{% if rep.collection and rep.collection.invoices > rep.collection.covered %} {{ rep.collection.invoices - rep.collection.covered }} {{ t('invoices are of series no payments report loaded covers.', 'facturas son de series que ningún reporte de pagos cargado cubre.') }}{% endif %}</li>{% endif %}
 <li>{{ t('Costs arrive about two months after the invoice. Recent months show too much margin until their costs are posted.',
 'Los costos llegan unos dos meses después de la factura. Los meses recientes muestran margen de más hasta que se registran sus costos.') }}</li>
 <li>{{ t('January to May follow the old calculation. They are shown here on the new calculation for comparison only.',
@@ -529,6 +588,16 @@ input[type=file]{font:inherit}button.go,.btn{background:var(--navy);color:#fff;b
 <p class="small">{{ t('Upload the workbook "Margen x Expediente" with its sheet "Base", the whole year to date each time. It replaces the report in use. The workbook is read and not kept; only file numbers, document numbers, dates and amounts are stored, never customer names. If a number cannot be read, nothing is loaded and the page says which row. The Excel download has one sheet per month in the layout of the Finance commission workbook, in English and in pesos.',
 'Suba el libro "Margen x Expediente" con su hoja "Base", siempre con todo el año a la fecha. Sustituye al reporte en uso. El libro se lee y no se guarda; solo se almacenan números de expediente, de documento, fechas e importes, nunca nombres de clientes. Si un número no se puede leer, no se carga nada y la página indica la fila. La descarga en Excel tiene una hoja por mes con el formato del libro de comisiones de Finanzas, en inglés y en pesos.') }}</p></div>
 
+<div class="card" id="collected"><h2>{{ t('Collected invoices', 'Facturas cobradas') }}</h2>
+<p class="small">{{ t('Finance\'s report of customer payments (CONTPAQ: "Análisis de IVA de pagos de clientes"), one workbook per company, from 1 January to today. Each upload replaces the report of that same company. A line becomes Paid when every invoice behind it is collected in full, and Pending when the report covers its invoices and one is not; a mark made in the lines table below always wins. The workbook is read and not kept; customer names and bank references in it are never stored.',
+'Reporte de pagos de clientes de Finanzas (CONTPAQ: "Análisis de IVA de pagos de clientes"), un libro por empresa, del 1 de enero a hoy. Cada carga sustituye al reporte de esa misma empresa. Una línea pasa a Pagada cuando todas sus facturas están cobradas por completo, y a Pendiente cuando el reporte cubre sus facturas y alguna no lo está; una marca hecha en la tabla de líneas de abajo siempre prevalece. El libro se lee y no se guarda; nunca se almacenan los nombres de clientes ni las referencias bancarias.') }}</p>
+{% for ps, info, m in col %}<p>{{ info.company or '?' }}: {{ ps|length }} {{ t('payments from', 'pagos del') }} {{ info['from'] or '?' }} {{ t('to', 'al') }} {{ info['to'] or '?' }} · {{ t('uploaded', 'subido el') }} {{ m.at|cm_when if m.at else '?' }} {{ t('by', 'por') }} {{ m.by }}.</p>{% else %}<p>{{ t('No payments report loaded yet.', 'Aún no se ha cargado ningún reporte de pagos.') }}</p>{% endfor %}
+<form method="post" action="/commissions/upload-payments" enctype="multipart/form-data" class="row">
+<input type="hidden" name="csrf" value="{{ csrf }}"><input type="file" name="report" accept=".xlsx" required aria-label="Payments report">
+<button type="submit" class="go">{{ t('Upload payments report', 'Subir reporte de pagos') }}</button></form>
+{% if rep and rep.collection %}{% set c = rep.collection %}<p style="margin-top:12px">{{ c.invoices }} {{ t('invoices are behind the commission lines.', 'facturas respaldan las líneas de comisión.') }} {{ c.covered }} {{ t('are covered by the reports loaded (series', 'están cubiertas por los reportes cargados (series') }} {{ c.series|join(', ') }}): {{ c.full }} {{ t('collected in full,', 'cobradas por completo,') }} {{ c.part }} {{ t('in part,', 'en parte,') }} {{ c.open }} {{ t('not collected.', 'sin cobrar.') }} {{ c.invoices - c.covered }} {{ t('are of series no report loaded covers, so their lines have no status yet.', 'son de series que ningún reporte cargado cubre, así que sus líneas aún no tienen estatus.') }}</p>
+{% if c.not_in_report %}<p class="small">{{ c.not_in_report|length }} {{ t('paid invoices are not behind any Corporate or Private line of Finance\'s report and are ignored:', 'facturas pagadas no respaldan ninguna línea corporativa o particular del reporte de Finanzas y se ignoran:') }} {{ c.not_in_report|join(', ') }}.</p>{% endif %}{% endif %}</div>
+
 <div class="card" id="moveware"><h2>{{ t('Booked quotes from Moveware', 'Cotizaciones contratadas de Moveware') }}</h2>
 <p class="small">{{ t('Two Moveware reports give each file its booked quote: the Removals Summary (sale price excluding IVA, date won, customer type) and the Move Costing Sheet (quoted cost). Run both from 1 January to today and upload them here; each upload replaces the one before. The workbooks are read and not kept; customer names, addresses and e-mail addresses in them are never stored.',
 'Dos reportes de Moveware dan la cotización contratada de cada expediente: el Removals Summary (precio de venta sin IVA, fecha de ganado, tipo de cliente) y el Move Costing Sheet (costo cotizado). Genere ambos del 1 de enero a hoy y súbalos aquí; cada carga sustituye a la anterior. Los libros se leen y no se guardan; nunca se almacenan los nombres, direcciones ni correos de clientes.') }}</p>
@@ -558,7 +627,7 @@ input[type=file]{font:inherit}button.go,.btn{background:var(--navy);color:#fff;b
 </table></div><p><button type="submit" class="go">{{ t('Save bookings', 'Guardar ventas contratadas') }}</button></p></form></div>
 
 {% if rep %}<div class="card" id="lines"><h2>{{ t('Commission lines', 'Líneas de comisión') }} ({{ rep.lines|length }}) (<span class="cur">MXN</span>)</h2>
-<p class="small">{{ t('One line per file per invoice month, net of that month\'s credit notes. Commission is payable only on lines marked Paid: choose the status of each line and save, or paste a list of file numbers below.', 'Una línea por expediente por mes de factura, neta de las notas de crédito de ese mes. La comisión solo es pagadera en las líneas marcadas como pagadas: elija el estatus de cada línea y guarde, o pegue abajo una lista de expedientes.') }}{% if pmeta %} {{ t('Payment status last saved', 'Estatus de pago guardado por última vez el') }} {{ pmeta.at|cm_when }} {{ t('by', 'por') }} {{ pmeta.by }}.{% endif %}</p>
+<p class="small">{{ t('One line per file per invoice month, net of that month\'s credit notes. Commission is payable only on Paid lines. The status comes from the payments reports loaded above (shown as a tag); to set or correct a line by hand, choose its status and save, or paste a list of file numbers below.', 'Una línea por expediente por mes de factura, neta de las notas de crédito de ese mes. La comisión solo es pagadera en las líneas pagadas. El estatus sale de los reportes de pagos cargados arriba (se muestra como etiqueta); para fijar o corregir una línea a mano, elija su estatus y guarde, o pegue abajo una lista de expedientes.') }}{% if pmeta %} {{ t('Payment status last saved', 'Estatus de pago guardado por última vez el') }} {{ pmeta.at|cm_when }} {{ t('by', 'por') }} {{ pmeta.by }}.{% endif %}</p>
 <form method="post" action="/commissions/payments" class="row" style="align-items:flex-start;margin-bottom:10px"><input type="hidden" name="csrf" value="{{ csrf }}">
 <textarea name="bulk_jobs" rows="2" cols="42" aria-label="{{ 'File numbers' }}" placeholder="110510 110584 110611 …"></textarea>
 <select name="bulk_month" aria-label="Month">{% for r in rep.months %}<option value="{{ r.month }}"{{ ' selected' if loop.last else '' }}>{{ month_label(r.month) }}</option>{% endfor %}</select>
@@ -574,7 +643,7 @@ input[type=file]{font:inherit}button.go,.btn{background:var(--navy);color:#fff;b
 <td>{{ M(x.gross_margin, x.usd.gross_margin, 2) }}</td><td>{{ x.margin_pct|cm_pct }}</td><td>{{ M(x.invoicing, x.usd.invoicing, 2) }}</td>
 <td>{% if x.cost_posted %}{{ M(x.margin, x.usd.margin, 2) }}{% else %}<span class="tag w">{{ t('waits for cost', 'espera costo') }}</span>{% endif %}</td>
 <td>{{ M(x.discipline, x.usd.discipline, 2) }}</td><td>{{ M(x.total, x.usd.total, 2) }}</td>
-<td class="l"><select name="p_{{ x.month }}_{{ x.job }}" aria-label="{{ x.job }}"><option value=""{{ ' selected' if not x.payment else '' }}>–</option><option value="Paid"{{ ' selected' if x.payment == 'Paid' else '' }}>Paid / Pagada</option><option value="Pending"{{ ' selected' if x.payment == 'Pending' else '' }}>Pending / Pendiente</option></select></td>
+<td class="l"><select name="p_{{ x.month }}_{{ x.job }}" aria-label="{{ x.job }}"><option value=""{{ ' selected' if not x.payment_mark else '' }}>–</option><option value="Paid"{{ ' selected' if x.payment_mark == 'Paid' else '' }}>Paid / Pagada</option><option value="Pending"{{ ' selected' if x.payment_mark == 'Pending' else '' }}>Pending / Pendiente</option></select>{% if x.payment_source == 'file' %} <span class="tag{{ '' if x.payment == 'Paid' else ' w' }}">{% if x.payment == 'Paid' %}{{ t('paid', 'pagada') }}{% if x.paid_on %} {{ x.paid_on }}{% endif %}{% else %}{{ t('not collected', 'sin cobrar') }}{% endif %}</span>{% endif %}</td>
 <td class="wrapc">{% if x.credit %}<span class="tag">{{ t('credit notes exceed invoices', 'las notas de crédito superan a las facturas') }}</span> {% endif %}{% for f in x.flags %}<span class="tag w">{{ t(f.en, f.es) }}</span> {% endfor %}</td></tr>{% endfor %}
 </table></div></details>{% endfor %}
 <p><button type="submit" class="go">{{ t('Save payment status', 'Guardar estatus de pago') }}</button></p></form></div>{% endif %}

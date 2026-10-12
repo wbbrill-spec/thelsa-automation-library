@@ -293,11 +293,12 @@ def month_notes(m: dict, rows, s: E.Settings) -> list:
         "placeholder": "Bookings (yellow cell) are set equal to the budget until every file of the month has a "
                        "booked quote or the figure is entered on the commissions page."}[source])
     if any(x.payment for x in rows):
-        notes.append("Payment status is as marked on the commissions page. Only lines marked Paid are distributed; "
-                     "a line with no status is not known yet.")
+        notes.append("Payment status comes from Finance's payments reports loaded on the commissions page, or from "
+                     "a mark made there by hand. Only Paid lines are distributed; a line with no status is not "
+                     "known yet.")
     else:
-        notes.append("Payment status is empty: no line of this month is marked on the commissions page yet, so "
-                     "nothing is distributed. Type Paid or Pending in column P to try it.")
+        notes.append("Payment status is empty: no payments report covers this month's invoices and no line is "
+                     "marked on the commissions page, so nothing is distributed.")
     if any(x.cost_pending for x in rows):
         notes.append("A line showing pending in Actual Cost has no cost in the books yet; its gross margin part "
                      "is zero until the cost is posted.")

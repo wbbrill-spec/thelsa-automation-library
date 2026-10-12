@@ -491,7 +491,7 @@ def test_only_lines_marked_paid_are_payable(client, tmp_path):
     assert sum(p["payable"] for p in rep["people"]) == pytest.approx(rep["total_new"]["payable"])
     page = client.get("/commissions").data.decode()
     assert "Payment status saved: 3 line(s) changed, 2 marked Paid in all." in page
-    assert f'name="p_{a["month"]}_{a["job"]}"' in page and "2 " in page and "marked as paid. Only those are payable." in page
+    assert f'name="p_{a["month"]}_{a["job"]}"' in page and "2 " in page and "are paid. Only those are payable." in page
     # the Excel sheet carries the status, so Finance's own formulas distribute the same lines
     wb = openpyxl.load_workbook(io.BytesIO(client.get("/commissions/workbook").data))
     ws = wb[T.sheet_name(a["month"])]
@@ -537,3 +537,60 @@ def test_payment_status_needs_the_token_a_report_and_plain_values(client, tmp_pa
     assert b"2025-01|123456" in client.get("/commissions").data
     assert R.clean_payments({"2026-05|110002": "Paid", "2026-05|110001": "Pending", "x": "Paid", "2026-5|1": "Paid"}) == {
         ("2026-05", "110002"): True, ("2026-05", "110001"): False}
+
+
+# ── Finance's payments report ────────────────────────────────────────────────
+def _payfile(tmp_path, rows, name="pay.xlsx", **kw):
+    import test_commissions_payments as TP
+    return open(TP.report(tmp_path, mxp=rows, name=name, **kw), "rb").read(), TP
+
+
+def test_payments_report_makes_collected_lines_payable(client, tmp_path):
+    import test_commissions_payments as TP
+    login(client)
+    upload(client, xlsx(tmp_path))
+    assert b"No payments report loaded yet." in client.get("/commissions").data
+    data, _ = _payfile(tmp_path, [TP.pay(46150, 10, 203000.0, series="CORP"), TP.pay(46151, 77777, 5.0, series="CORP")])
+    assert _send(client, "/commissions/upload-payments", data).status_code == 302
+    page = client.get("/commissions").data.decode()
+    assert "Payments report loaded for TRS: 2 payments from 2026-01-01 to 2026-09-30." in page
+    assert "Customer names and bank references in it were not kept." in page and "CORP 77777" in page
+    rep = _lines_of(client)
+    by = {(x["month"], x["job"]): x for x in rep["lines"]}
+    assert (by[("2026-05", "110001")]["payment"], by[("2026-05", "110001")]["payment_source"]) == ("Paid", "file")
+    assert rep["total_all"]["payable"] == pytest.approx(sum(x["total"] for x in rep["lines"] if x["payment"] == "Paid")) != 0
+    with store.engine().connect() as c:
+        everything = " ".join(str(v) for row_ in c.exec_driver_sql("select * from commission_docs") for v in row_)
+    for name in TP.NAMES + tuple(NAMES):
+        assert name not in everything and name not in page
+    # the Excel sheet marks the same line, and a mark by hand on the page still wins
+    wb = openpyxl.load_workbook(io.BytesIO(client.get("/commissions/workbook").data))
+    ws = wb["May 2026"]
+    row_ = next(r_ for r_ in range(4, 40) if ws[f"B{r_}"].value == "110001")
+    assert ws[f"P{row_}"].value == "Paid"
+    client.post("/commissions/payments", data={"csrf": "tok", "p_2026-05_110001": "Pending"})
+    assert {(x["month"], x["job"]): x["payment"] for x in _lines_of(client)["lines"]}[("2026-05", "110001")] == "Pending"
+    # a new report for the same company replaces the old one; another company's report is kept beside it
+    data2, _ = _payfile(tmp_path, [TP.pay(46150, 10, 1.0, series="CORP")], name="b.xlsx")
+    _send(client, "/commissions/upload-payments", data2)
+    data3, _ = _payfile(tmp_path, [TP.pay(46150, 11, 116000.0, series="PART")], name="c.xlsx", company="THELSA MOBILITY SOLUTIONS")
+    _send(client, "/commissions/upload-payments", data3)
+    doc = store.get("payment_reports")[0]
+    assert sorted(doc["sources"]) == ["TMS", "TRS"] and len(doc["sources"]["TRS"]["records"]["payments"]) == 1
+    assert W._collections()["error"] is None and len(W._collections()["sources"]) == 2
+
+
+def test_payments_upload_needs_the_token_and_refuses_other_files(client, tmp_path):
+    import test_commissions_payments as TP
+    login(client)
+    data, _ = _payfile(tmp_path, [TP.pay(46150, 10, 203000.0, series="CORP")])
+    assert _send(client, "/commissions/upload-payments", data, csrf="nope").status_code == 400
+    assert _send(client, "/commissions/upload-payments", xlsx(tmp_path)).status_code == 302          # Finance's margin report
+    assert "does not look like CONTPAQ" in client.get("/commissions").data.decode()
+    assert _send(client, "/commissions/upload-payments", b"junk").status_code == 302
+    assert "Nothing was changed" in client.get("/commissions").data.decode()
+    assert store.get("payment_reports")[0] is None
+    store.put("payment_reports", {"sources": {"TRS": {"records": {"payments": [{"x": 1}], "info": {}}}}}, by=LUPITA)
+    upload(client, xlsx(tmp_path))
+    r = client.get("/commissions")
+    assert r.status_code == 200 and b"stored payments report could not be read back" in r.data

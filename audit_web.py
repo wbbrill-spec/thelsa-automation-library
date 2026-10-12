@@ -1171,6 +1171,34 @@ def audit_supplier_costs_status():
     return jsonify({"ok": ok}), (200 if ok else 400)
 
 
+@audit_bp.route("/audit/sit-milestones")
+@_login_required
+def audit_sit_milestones():
+    """Pack / delivery dates for TMS files from SIT's Plan de Viajes history, next to
+    MoveWare's own. Builds in the background (one workbook per day, last 90 days);
+    ?build=1 forces a rebuild. Read-only."""
+    from flask import jsonify, request
+    import mw_live
+    import sit_milestones as sm
+    if request.args.get("build") == "1" and not sm.state().get("running"):
+        import threading
+        threading.Thread(target=sm.build, daemon=True).start()
+    else:
+        sm.ensure_built()
+    st = sm.state()
+    out = {k: st.get(k) for k in ("built_at", "error", "running")}
+    out["workbooks"] = len(st.get("workbooks") or [])
+    out["first_workbook"] = (st.get("workbooks") or [{}])[0].get("name") if st.get("workbooks") else None
+    out["last_workbook"] = (st.get("workbooks") or [{}])[-1].get("name") if st.get("workbooks") else None
+    if st.get("jobs"):
+        try:
+            files = mw_live.audited_files() or []
+        except Exception:
+            files = []
+        out.update(sm.compare(st["jobs"], files))
+    return jsonify(out)
+
+
 @audit_bp.route("/audit/dump")
 @_login_required
 def audit_dump():

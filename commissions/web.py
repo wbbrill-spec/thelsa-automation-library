@@ -4,6 +4,8 @@ web.py — the /commissions pages.
     /commissions            the report: months, distribution, points to look at, lines
     /commissions/upload     Finance uploads the monthly margin report (POST)
     /commissions/bookings   bookings per month, typed in (POST)
+    /commissions/upload-removals, /commissions/upload-costing
+                            the two Moveware reports that hold each file's booked quote (POST)
     /commissions/workbook   the same report as an Excel workbook, one sheet per month in Finance's own layout
 
 Who may open it: only the addresses in COMMISSION_USERS (comma separated, set in
@@ -12,7 +14,7 @@ who is signed in to the library gets "not found", not "forbidden". The home
 page shows its tile (Management Reports) only to those same addresses:
 home_tile() cuts the tile out of the page for everyone else.
 
-The uploaded workbook is read in memory and thrown away. What is kept is the
+Every uploaded workbook is read in memory and thrown away. What is kept is the
 list of lines the reader makes from it, which holds no customer names.
 
 Wiring (app.py):
@@ -34,6 +36,7 @@ from flask import (Blueprint, abort, make_response, redirect, render_template_st
 
 from . import engine as E
 from . import finance as F
+from . import quotes as Q
 from . import report as R
 from . import store
 
@@ -108,6 +111,36 @@ def _current():
                             "No se pudo leer el reporte guardado. Suba de nuevo el reporte de Finanzas.")
 
 
+def _moveware():
+    """What is stored from the two Moveware reports:
+    {"removals": (jobs, control, meta) | None, "costing": (jobs, period, meta) | None, "error": (en, es) | None}."""
+    out = {"removals": None, "costing": None, "error": None}
+    for key, name, back in (("removals", "removals_summary", Q.removals_from_records),
+                            ("costing", "costing_sheet", Q.costing_from_records)):
+        doc, meta = store.get(name)
+        if not doc:
+            continue
+        try:
+            a, b = back(doc.get("records") or {})
+            out[key] = (a, b, meta)
+        except Q.QuoteReportError as e:
+            out["error"] = (f"{e}. Please upload it again.", f"{e.es}. Súbalo de nuevo.")
+    return out
+
+
+def _report(lines, s: E.Settings, mw=None) -> dict:
+    """The report as the page and the Excel download show it: Finance's lines,
+    the bookings typed in, and the booked quotes when the Removals Summary is loaded."""
+    mw = mw or _moveware()
+    bookings = store.get("bookings", {})[0]
+    if not mw["removals"]:
+        return R.build(lines, s, bookings)
+    rem, control, _ = mw["removals"]
+    cst = mw["costing"][0] if mw["costing"] else []
+    quotes, qproblems = R.book_quotes(lines, rem, control, cst, s)
+    return R.build(lines, s, bookings, quotes=quotes, quote_problems=qproblems)
+
+
 MONTH_NAMES_ES = "enero febrero marzo abril mayo junio julio agosto septiembre octubre noviembre diciembre".split()
 
 
@@ -126,10 +159,11 @@ def commissions_home(email):
     lines, meta, error = _current()
     s = settings()
     bookings, bmeta = store.get("bookings", {})
-    rep = R.build(lines, s, bookings) if lines else None
+    mw = _moveware()
+    rep = _report(lines, s, mw) if lines else None
     months = sorted(s.budgets)
     resp = make_response(render_template_string(
-        PAGE, rep=rep, meta=meta, error=error, msg=session.pop("commission_msg", None), csrf=_csrf(),
+        PAGE, rep=rep, meta=meta, error=error or mw["error"], mw=mw, msg=session.pop("commission_msg", None), csrf=_csrf(),
         s=s, bookings=R.clean_bookings(bookings), bmeta=bmeta, months=months, month_label=_month_label,
         month_label_es=_month_label_es, durable=store.durable(), new_from=_month_label(R.NEW_FROM),
         new_from_es=_month_label_es(R.NEW_FROM), email=email))
@@ -137,22 +171,75 @@ def commissions_home(email):
     return resp
 
 
+def _uploaded():
+    """The bytes of the uploaded workbook, or None after telling the user why not."""
+    f = request.files.get("report")
+    if f is None or not (f.filename or "").strip():
+        _say("No file was chosen.", "No se eligió ningún archivo.", bad=True)
+        return None
+    if not f.filename.lower().endswith(".xlsx"):
+        _say("The report must be an Excel workbook (.xlsx).", "El reporte debe ser un libro de Excel (.xlsx).", bad=True)
+        return None
+    data = f.stream.read(MAX_UPLOAD + 1)
+    if len(data) > MAX_UPLOAD:
+        _say("The file is larger than 20 MB. These reports are far smaller; please check the file.",
+             "El archivo pesa más de 20 MB. Estos reportes son mucho más pequeños; revise el archivo.", bad=True)
+        return None
+    return data
+
+
+def _log_upload(email: str, what: str, count: int, digest: str) -> None:
+    log, _ = store.get("uploads", [])
+    log.append({"at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), "by": email,
+                "what": what, "lines": count, "sha256": digest[:16]})
+    store.put("uploads", log[-50:], by=email)
+
+
+def _upload_moveware(email: str, key: str, load, to_records, name_en: str, name_es: str):
+    """Read one Moveware report in memory and keep its names-free records."""
+    _check_csrf()
+    home = redirect(url_for("commissions.commissions_home") + "#moveware")
+    data = _uploaded()
+    if data is None:
+        return home
+    try:
+        jobs, extra = load(io.BytesIO(data))
+    except Q.QuoteReportError as e:              # these messages carry no text from the workbook
+        _say(f"The {name_en} was not loaded: {e}. Nothing was changed.",
+             f"El {name_es} no se cargó: {e.es}. No se cambió nada.", bad=True)
+        return home
+    except Exception:
+        _say("The file could not be read. Nothing was changed.", "El archivo no se pudo leer. No se cambió nada.",
+             bad=True)
+        return home
+    digest = hashlib.sha256(data).hexdigest()
+    store.put(key, {"records": to_records(jobs, extra), "sha256": digest}, by=email)
+    _log_upload(email, key, len(jobs), digest)
+    _say(f"{name_en} loaded: {len(jobs):,} jobs. Customer names in it were not kept.",
+         f"{name_es} cargado: {len(jobs):,} expedientes. No se guardaron los nombres de clientes.")
+    return home
+
+
+@commissions_bp.route("/commissions/upload-removals", methods=["POST"])
+@_restricted
+def commissions_upload_removals(email):
+    return _upload_moveware(email, "removals_summary", Q.load_removals, Q.removals_to_records,
+                            "Removals Summary", "Removals Summary")
+
+
+@commissions_bp.route("/commissions/upload-costing", methods=["POST"])
+@_restricted
+def commissions_upload_costing(email):
+    return _upload_moveware(email, "costing_sheet", Q.load_costing, Q.costing_to_records,
+                            "Move Costing Sheet", "Move Costing Sheet")
+
+
 @commissions_bp.route("/commissions/upload", methods=["POST"])
 @_restricted
 def commissions_upload(email):
     _check_csrf()
-    f = request.files.get("report")
-    if f is None or not (f.filename or "").strip():
-        _say("No file was chosen.", "No se eligió ningún archivo.", bad=True)
-        return redirect(url_for("commissions.commissions_home"))
-    if not f.filename.lower().endswith(".xlsx"):
-        _say("The report must be an Excel workbook (.xlsx).", "El reporte debe ser un libro de Excel (.xlsx).", bad=True)
-        return redirect(url_for("commissions.commissions_home"))
-    data = f.stream.read(MAX_UPLOAD + 1)
-    if len(data) > MAX_UPLOAD:
-        _say("The file is larger than 20 MB. Finance's margin report is far smaller; please check the file.",
-             "El archivo pesa más de 20 MB. El reporte de margen de Finanzas es mucho más pequeño; revise el archivo.",
-             bad=True)
+    data = _uploaded()
+    if data is None:
         return redirect(url_for("commissions.commissions_home"))
     try:
         lines = F.load_base(io.BytesIO(data))
@@ -164,16 +251,13 @@ def commissions_upload(email):
         _say("The file could not be opened as an Excel workbook. Nothing was changed.",
              "El archivo no se pudo abrir como libro de Excel. No se cambió nada.", bad=True)
         return redirect(url_for("commissions.commissions_home"))
-    rep = R.build(lines, settings(), store.get("bookings", {})[0])
+    rep = _report(lines, settings())
     previous, _ = store.get("finance_report")
     if previous:
         store.put("finance_report_previous", previous, by=email)
     digest = hashlib.sha256(data).hexdigest()
     store.put("finance_report", {"records": F.to_records(lines), "sha256": digest}, by=email)
-    log, _ = store.get("uploads", [])
-    log.append({"at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), "by": email,
-                "lines": len(lines), "sha256": digest[:16]})
-    store.put("uploads", log[-50:], by=email)
+    _log_upload(email, "finance_report", len(lines), digest)
     src = rep["source"]
     _say(f"Report loaded: {src['lines']:,} lines dated {src['from']} to {src['to']}, "
          f"{src['jobs_in_scope']} Corporate and Private jobs, {rep['check_count']} points to look at.",
@@ -203,9 +287,10 @@ def commissions_bookings(email):
              + ", ".join(_month_label_es(m) for m in bad) + ".", bad=True)
     else:
         store.put("bookings", out, by=email)
-        _say(f"Bookings saved for {len(out)} month(s). Months left blank use the budget as a placeholder.",
-             f"Ventas contratadas guardadas para {len(out)} mes(es). Los meses en blanco usan el presupuesto "
-             "como valor provisional.")
+        _say(f"Bookings saved for {len(out)} month(s). Months left blank use the booked quotes, or the budget "
+             "as a placeholder.",
+             f"Ventas contratadas guardadas para {len(out)} mes(es). Los meses en blanco usan las cotizaciones, o el "
+             "presupuesto como valor provisional.")
     return redirect(url_for("commissions.commissions_home") + "#bookings")
 
 
@@ -220,7 +305,7 @@ def commissions_workbook(email):
     from . import template_sheet
     s = settings()
     buf = io.BytesIO()
-    template_sheet.build_book(R.build(lines, s, store.get("bookings", {})[0]), s, buf)
+    template_sheet.build_book(_report(lines, s), s, buf)
     buf.seek(0)
     last = max((ln.date for ln in lines if ln.date), default=dt.date.today())
     resp = send_file(buf, as_attachment=True, download_name=f"TMS commission report to {last.isoformat()}.xlsx",
@@ -264,7 +349,7 @@ PAGE = r"""<!doctype html>
 :root{--ink:#1b2430;--soft:#5b6675;--line:#dfe3e8;--bg:#f5f6f8;--card:#fff;--navy:#1f3864;--warn:#8a3b12;--warnbg:#fdf0e6;
 --ok:#1d5c3a;--okbg:#e8f4ec;--bad:#8c1d18;--badbg:#fbe9e7;--hl:#fff8d6}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 -apple-system,Segoe UI,Roboto,Arial,sans-serif}
-span.es{display:none}body.es span.en{display:none}body.es span.es{display:inline}
+.src{font-size:10px;color:#667;border:1px solid #ccd;border-radius:3px;padding:0 3px;white-space:nowrap}span.es{display:none}body.es span.en{display:none}body.es span.es{display:inline}
 .usdnote{display:none}body.usd .usdnote{display:block}
 .wrap{max-width:1240px;margin:0 auto;padding:20px 16px 60px}
 h1{font-size:22px;margin:0 0 2px}h2{font-size:16px;margin:0 0 10px}.sub{color:var(--soft);margin:0 0 16px}
@@ -319,8 +404,8 @@ input[type=file]{font:inherit}button.go,.btn{background:var(--navy);color:#fff;b
 
 <div class="note warn"><b>{{ t('Trial. Not for payment.', 'Prueba. No usar para pago.') }}</b>
 <ul>
-{% if rep.placeholder_months %}<li>{{ t('Bookings are not entered for ' ~ rep.placeholder_months|length ~ ' month(s). Those months use the budget as a placeholder, which gives a sales reach of 0.60 (yellow cells).',
-'Faltan las ventas contratadas de ' ~ rep.placeholder_months|length ~ ' mes(es). Esos meses usan el presupuesto como valor provisional, lo que da un alcance de ventas de 0.60 (celdas amarillas).') }}</li>{% endif %}
+{% if rep.placeholder_months %}<li>{{ t('Bookings are not known for ' ~ rep.placeholder_months|length ~ ' month(s). Those months use the budget as a placeholder, which gives a sales reach of 0.60 (yellow cells).',
+'No se conocen las ventas contratadas de ' ~ rep.placeholder_months|length ~ ' mes(es). Esos meses usan el presupuesto como valor provisional, lo que da un alcance de ventas de 0.60 (celdas amarillas).') }}</li>{% endif %}
 <li>{{ t('No invoice is marked as collected yet, so nothing is payable.', 'Ninguna factura está marcada como cobrada todavía, así que no hay nada por pagar.') }}</li>
 <li>{{ t('Costs arrive about two months after the invoice. Recent months show too much margin until their costs are posted.',
 'Los costos llegan unos dos meses después de la factura. Los meses recientes muestran margen de más hasta que se registran sus costos.') }}</li>
@@ -343,7 +428,7 @@ input[type=file]{font:inherit}button.go,.btn{background:var(--navy);color:#fff;b
 {% for r in rep.months %}<tr class="{{ '' if r.new else 'old' }}">
 <td>{{ mon(r.month) }}</td><td class="l">{{ t(r.rule, r.rule_es) }}</td><td>{{ r.lines }}</td><td>{{ M(r.billed, r.usd.billed) }}</td><td>{{ M(r.cost, r.usd.cost) }}</td>
 <td>{{ M(r.gross_margin, r.usd.gross_margin) }}</td><td>{{ r.margin_pct|cm_pct }}</td>
-<td class="{{ '' if r.bookings_known else 'ph' }}">{% if r.bookings_known %}{{ M(r.bookings, r.usd.bookings) }}{% else %}{{ t('= budget', '= presupuesto') }}{% endif %}</td>
+<td class="{{ '' if r.bookings_known else 'ph' }}">{% if r.bookings_known %}{{ M(r.bookings, r.usd.bookings) }} <span class="src">{{ t('quotes', 'cotiz.') if r.bookings_source == 'quotes' else t('typed', 'captura') }}</span>{% else %}{{ t('= budget', '= presupuesto') }}{% endif %}</td>
 <td class="{{ '' if r.bookings_known else 'ph' }}">{{ '%.4f'|format(r.reach) }}</td>
 <td>{{ M(r.invoicing, r.usd.invoicing) }}</td><td>{{ M(r.margin, r.usd.margin) }}</td><td>{{ M(r.discipline, r.usd.discipline) }}</td><td>{{ M(r.total, r.usd.total, 2) }}</td>
 <td>{{ M(r.payable, r.usd.payable, 2) }}</td><td>{% if r.waiting_lines %}{{ r.waiting_lines }} ({{ M(r.waiting_billed, r.usd.waiting_billed) }}){% else %}–{% endif %}</td></tr>{% endfor %}
@@ -365,9 +450,9 @@ input[type=file]{font:inherit}button.go,.btn{background:var(--navy);color:#fff;b
 </table></div><p class="small">{{ t('Sales two thirds, Adm, MC and Buyer one third. Control (total paid out minus total calculated):',
 'Ventas dos tercios; Adm, MC y Compras un tercio. Control (total repartido menos total calculado):') }} {{ rep.control|cm_money(2) }}.</p></div>
 
-<div class="card" id="checks"><h2>{{ t('Points to look at in Finance\'s report', 'Puntos por revisar en el reporte de Finanzas') }} ({{ rep.check_count }})</h2>
-<p class="small">{{ t('File numbers, document numbers and amounts only. Row numbers are rows of the sheet "Base". Amounts here are always in pesos.',
-'Solo números de expediente, de documento e importes. Los números de fila son filas de la hoja "Base". Aquí los importes siempre están en pesos.') }}</p>
+<div class="card" id="checks"><h2>{{ t('Points to look at', 'Puntos por revisar') }} ({{ rep.check_count }})</h2>
+<p class="small">{{ t('From Finance\'s report and from the Moveware reports. File numbers, document numbers and amounts only. Unless a Moveware report is named, row numbers are rows of the sheet "Base". Amounts here are always in pesos.',
+'Del reporte de Finanzas y de los reportes de Moveware. Solo números de expediente, de documento e importes. Salvo que se nombre un reporte de Moveware, los números de fila son filas de la hoja "Base". Aquí los importes siempre están en pesos.') }}</p>
 {% for c in rep.checks %}<details {{ '' if c.routine else 'open' }}><summary>{{ t(c.label, c.label_es) }} ({{ c['items']|length }})</summary>
 <div class="scroll"><table class="chk"><tr><th>{{ t('File', 'Expediente') }}</th><th class="l">{{ t('Detail', 'Detalle') }}</th><th>{{ t('Amount (MXN)', 'Importe (MXN)') }}</th></tr>
 {% for i in c['items'] %}<tr><td>{{ i.job }}</td><td class="wrapc">{{ t(i.detail, i.detail_es) }}</td><td>{{ i.amount|cm_money(2) if i.amount is not none else '' }}</td></tr>{% endfor %}
@@ -384,9 +469,27 @@ input[type=file]{font:inherit}button.go,.btn{background:var(--navy);color:#fff;b
 <p class="small">{{ t('Upload the workbook "Margen x Expediente" with its sheet "Base", the whole year to date each time. It replaces the report in use. The workbook is read and not kept; only file numbers, document numbers, dates and amounts are stored, never customer names. If a number cannot be read, nothing is loaded and the page says which row. The Excel download has one sheet per month in the layout of the Finance commission workbook, in English and in pesos.',
 'Suba el libro "Margen x Expediente" con su hoja "Base", siempre con todo el año a la fecha. Sustituye al reporte en uso. El libro se lee y no se guarda; solo se almacenan números de expediente, de documento, fechas e importes, nunca nombres de clientes. Si un número no se puede leer, no se carga nada y la página indica la fila. La descarga en Excel tiene una hoja por mes con el formato del libro de comisiones de Finanzas, en inglés y en pesos.') }}</p></div>
 
+<div class="card" id="moveware"><h2>{{ t('Booked quotes from Moveware', 'Cotizaciones contratadas de Moveware') }}</h2>
+<p class="small">{{ t('Two Moveware reports give each file its booked quote: the Removals Summary (sale price excluding IVA, date won, customer type) and the Move Costing Sheet (quoted cost). Run both from 1 January to today and upload them here; each upload replaces the one before. The workbooks are read and not kept; customer names, addresses and e-mail addresses in them are never stored.',
+'Dos reportes de Moveware dan la cotización contratada de cada expediente: el Removals Summary (precio de venta sin IVA, fecha de ganado, tipo de cliente) y el Move Costing Sheet (costo cotizado). Genere ambos del 1 de enero a hoy y súbalos aquí; cada carga sustituye a la anterior. Los libros se leen y no se guardan; nunca se almacenan los nombres, direcciones ni correos de clientes.') }}</p>
+<p>{% if mw.removals %}{{ t('Removals Summary in use: uploaded', 'Removals Summary en uso: subido el') }} {{ mw.removals[2].at|cm_when }} {{ t('by', 'por') }} {{ mw.removals[2].by }} · {{ mw.removals[0]|length }} {{ t('jobs', 'expedientes') }}.{% else %}{{ t('Removals Summary: not loaded yet.', 'Removals Summary: aún no se ha cargado.') }}{% endif %}</p>
+<form method="post" action="/commissions/upload-removals" enctype="multipart/form-data" class="row">
+<input type="hidden" name="csrf" value="{{ csrf }}"><input type="file" name="report" accept=".xlsx" required aria-label="Removals Summary">
+<button type="submit" class="go">{{ t('Upload Removals Summary', 'Subir Removals Summary') }}</button></form>
+<p>{% if mw.costing %}{{ t('Move Costing Sheet in use: uploaded', 'Move Costing Sheet en uso: subido el') }} {{ mw.costing[2].at|cm_when }} {{ t('by', 'por') }} {{ mw.costing[2].by }} · {{ mw.costing[0]|length }} {{ t('jobs', 'expedientes') }}{% if mw.costing[1].won_from %} · {{ t('won', 'ganados del') }} {{ mw.costing[1].won_from }} {{ t('to', 'al') }} {{ mw.costing[1].won_to }}{% endif %}.{% else %}{{ t('Move Costing Sheet: not loaded yet.', 'Move Costing Sheet: aún no se ha cargado.') }}{% endif %}</p>
+<form method="post" action="/commissions/upload-costing" enctype="multipart/form-data" class="row">
+<input type="hidden" name="csrf" value="{{ csrf }}"><input type="file" name="report" accept=".xlsx" required aria-label="Move Costing Sheet">
+<button type="submit" class="go">{{ t('Upload Move Costing Sheet', 'Subir Move Costing Sheet') }}</button></form>
+{% if rep and rep.quotes_loaded %}<div class="scroll" style="margin-top:14px"><table><tr><th>{{ t('Invoice month', 'Mes de factura') }}</th><th>{{ t('Files first invoiced', 'Expedientes facturados por primera vez') }}</th><th>{{ t('With a booked quote', 'Con cotización') }}</th><th>{{ t('Sale prices found (MXN)', 'Precios de venta encontrados (MXN)') }}</th><th>{{ t('Budget (MXN)', 'Presupuesto (MXN)') }}</th><th class="l">{{ t('Bookings used', 'Ventas contratadas usadas') }}</th><th class="l">{{ t('Files with no quote', 'Expedientes sin cotización') }}</th></tr>
+{% for r in rep.months %}<tr><td>{{ mon(r.month) }}</td><td>{{ r.quote.files }}</td><td>{{ r.quote.found }}</td><td>{{ r.quote.bookings|cm_money(0) }}</td><td>{{ r.budget|cm_money(0) }}</td>
+<td class="l">{% if r.bookings_source == 'quotes' %}{{ t('the booked quotes', 'las cotizaciones') }}{% elif r.bookings_source == 'entered' %}{{ t('the figure typed below', 'la cifra capturada abajo') }}{% else %}{{ t('the budget, as a placeholder', 'el presupuesto, como valor provisional') }}{% endif %}</td>
+<td class="l wrapc">{{ r.quote.missing|join(', ') if r.quote.missing else '–' }}</td></tr>{% endfor %}</table></div>
+<p class="small">{{ t('A file\'s booked quote is counted once, in the month the file is first invoiced. A month uses its booked quotes as bookings when every file first invoiced in it has one; otherwise it keeps the budget as a placeholder, unless a figure is typed below. Dollar quotes at ' ~ '%.2f'|format(s.usd_mxn) ~ '.',
+'La cotización de un expediente se cuenta una vez, en el mes en que se factura por primera vez. Un mes usa sus cotizaciones como ventas contratadas cuando todos los expedientes facturados por primera vez en él tienen cotización; si no, conserva el presupuesto como valor provisional, salvo que se capture una cifra abajo. Cotizaciones en dólares a ' ~ '%.2f'|format(s.usd_mxn) ~ '.') }}</p>{% endif %}</div>
+
 <div class="card" id="bookings"><h2>{{ t('Bookings per month', 'Ventas contratadas por mes') }} (MXN)</h2>
-<p class="small">{{ t('Sale price of the Corporate and Private files booked in each month, in pesos. Sales reach = bookings ÷ budget × ' ~ (s.w_invoicing*100)|round|int ~ ' %. Leave a month blank if it is not known yet.',
-'Precio de venta de los expedientes corporativos y particulares contratados en cada mes, en pesos. Alcance de ventas = ventas contratadas ÷ presupuesto × ' ~ (s.w_invoicing*100)|round|int ~ ' %. Deje el mes en blanco si todavía no se conoce.') }}{% if bmeta %} {{ t('Last saved', 'Guardado por última vez el') }} {{ bmeta.at|cm_when }} {{ t('by', 'por') }} {{ bmeta.by }}.{% endif %}</p>
+<p class="small">{{ t('Bookings normally come from the booked quotes above. A figure typed here replaces them for that month. Sales reach = bookings ÷ budget × ' ~ (s.w_invoicing*100)|round|int ~ ' %. Leave a month blank to use the booked quotes.',
+'Las ventas contratadas normalmente salen de las cotizaciones de arriba. Una cifra capturada aquí las sustituye en ese mes. Alcance de ventas = ventas contratadas ÷ presupuesto × ' ~ (s.w_invoicing*100)|round|int ~ ' %. Deje el mes en blanco para usar las cotizaciones.') }}{% if bmeta %} {{ t('Last saved', 'Guardado por última vez el') }} {{ bmeta.at|cm_when }} {{ t('by', 'por') }} {{ bmeta.by }}.{% endif %}</p>
 <form method="post" action="/commissions/bookings"><input type="hidden" name="csrf" value="{{ csrf }}">
 <div class="scroll"><table><tr><th>{{ t('Month', 'Mes') }}</th><th>{{ t('Budget (MXN)', 'Presupuesto (MXN)') }}</th><th>{{ t('Bookings (MXN)', 'Ventas contratadas (MXN)') }}</th><th>{{ t('Budget achievement', 'Cumplimiento del presupuesto') }}</th></tr>
 {% for m in months %}<tr><td>{{ mon(m) }}</td><td>{{ s.budgets[m]|cm_money(2) }}</td>

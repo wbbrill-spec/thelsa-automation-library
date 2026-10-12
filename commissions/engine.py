@@ -82,6 +82,10 @@ class Settings:
     # invoice, so with "internal" the margin of a dollar file reads a little
     # lower than in Finance's report.
     sales_fx: str = "internal"
+    # Which booked quotes make a month's bookings, when they come from Moveware:
+    #   "invoiced"  the files first invoiced in the month (Bill, 11 Oct 2026)
+    #   "won"       the files won in the month
+    bookings_basis: str = "invoiced"
     sales_share: float = 2 / 3             # Y = U/3*2
     admin_share: float = 1 / 3             # Z = U/3*1
     sales_people: tuple = (("KAR 1 Pablo", 0.5), ("KAR 2 Edwin", 0.5))
@@ -114,6 +118,8 @@ class Settings:
             raise SettingsError("every rate, weight, share and budget must be a number")
         if self.sales_fx not in ("spot", "internal"):
             raise SettingsError('sales_fx must be "spot" or "internal"')
+        if self.bookings_basis not in ("invoiced", "won"):
+            raise SettingsError('bookings_basis must be "invoiced" or "won"')
         if self.rate > 1 or self.target_margin > 1:
             raise SettingsError("the commission rate and the target margin are percentages, at most 100 %")
         if not near(self.w_invoicing + self.w_margin + self.w_discipline, 1.0):

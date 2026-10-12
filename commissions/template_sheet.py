@@ -240,12 +240,15 @@ SAMPLE_ROWS = (
 
 
 def rows_for_month(report: dict, month: str) -> list:
-    """The lines of one invoice month of `report.build(...)` as sheet rows. Only
-    the REAL block can be filled from Finance's margin report: quoted prices,
-    status and payment status are not in it."""
+    """The lines of one invoice month of `report.build(...)` as sheet rows. The
+    REAL block comes from Finance's margin report. The BOOKED QUOTE block comes
+    from the Moveware reports when they are loaded: status on every line of a
+    file that has a quote, sale price and costing once, in the month the file
+    is first invoiced. Payment status is not known yet."""
     names = ("January February March April May June July August September October November December").split()
-    out = [Row(file=x["job"], billed=x["billed"], cost=None if not x["cost_posted"] else x["cost"],
-               cost_pending=not x["cost_posted"])
+    out = [Row(file=x["job"], status=x.get("status") or "", sale_price=x.get("sale_price"),
+               quote_cost=x.get("quote_cost"), billed=x["billed"],
+               cost=None if not x["cost_posted"] else x["cost"], cost_pending=not x["cost_posted"])
            for x in report["lines"] if x["month"] == month]
     if out:                            # the month is written once, on the first line, as in the template
         first = out[0]
@@ -270,10 +273,25 @@ def month_notes(m: dict, rows, s: E.Settings) -> list:
     if m["rule"] == "Old calculation":
         notes.append("This month was paid on the old calculation. The sheet shows what the new calculation gives, "
                      "for comparison only.")
-    notes.append("BOOKED QUOTE block is empty: quoted sale prices and costing are not in Finance's report.")
-    notes.append("Bookings (yellow cell) are the figure entered on the commissions page." if m["bookings_known"] else
-                 "Bookings (yellow cell) are set equal to the budget until the real figure is entered on the "
-                 "commissions page.")
+    q, source = m.get("quote"), m.get("bookings_source") or ("entered" if m["bookings_known"] else "placeholder")
+    if q is None:
+        notes.append("BOOKED QUOTE block is empty: the Moveware reports (Removals Summary and Move Costing Sheet) "
+                     "have not been loaded on the commissions page.")
+    else:
+        notes.append("BOOKED QUOTE block: from Moveware. Sale price excluding IVA and quoted cost (cost options "
+                     "with status W) are shown once per file, in the month the file is first invoiced; a file "
+                     f"invoiced again later shows its status only. Dollar quotes at {s.usd_mxn:,.2f}.")
+        if q["missing"]:
+            notes.append(f"No booked quote was found for {len(q['missing'])} of the {q['files']} files first "
+                         "invoiced in this month: " + ", ".join(q["missing"]) + ".")
+    notes.append({
+        "entered": "Bookings (yellow cell) are the figure entered on the commissions page; it replaces the sum of "
+                   "the sale prices.",
+        "quotes": "Bookings are the sum of the sale prices of the files first invoiced in this month."
+                  if m.get("bookings_basis", "invoiced") == "invoiced" else
+                  "Bookings (yellow cell) are the sale prices of the Corporate and Private files won in this month.",
+        "placeholder": "Bookings (yellow cell) are set equal to the budget until every file of the month has a "
+                       "booked quote or the figure is entered on the commissions page."}[source])
     notes.append("Payment status is empty: collection is not known yet, so nothing is distributed. "
                  "Type Paid or Pending in column P.")
     if any(x.cost_pending for x in rows):
@@ -290,7 +308,10 @@ def build_book(report: dict, s: E.Settings, out=None) -> Workbook:
     for m in report["months"]:
         rows = rows_for_month(report, m["month"])
         ws = wb.create_sheet(sheet_name(m["month"]))
-        write(ws, rows, s, m["budget"], bookings=m["bookings"] if m["bookings_known"] else m["budget"],
+        m = dict(m, bookings_basis=report.get("bookings_basis", "invoiced"))
+        summed = m.get("bookings_source") == "quotes" and m["bookings_basis"] == "invoiced"
+        write(ws, rows, s, m["budget"],        # with complete quotes the total is the sum of the sale prices
+              bookings=None if summed else (m["bookings"] if m["bookings_known"] else m["budget"]),
               notes=month_notes(m, rows, s))
     if not wb.sheetnames:
         wb.create_sheet("No months").cell(row=1, column=1, value="No month in the report has a budget.")

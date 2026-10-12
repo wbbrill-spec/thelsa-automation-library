@@ -17,6 +17,7 @@ from collections import defaultdict
 
 from . import engine as E
 from . import finance as F
+from . import quotes as Q
 
 # The new calculation applies from June 2026. January to May follow the old
 # calculation (Lupita, 12 Oct 2026: "April and May are OLD calculation"; her
@@ -29,6 +30,14 @@ LABELS = {
     "dollar_amount_mismatch": "Dollar and peso amounts do not agree",
     "no_dollar_amount": "Dollar invoice with no usable dollar amount",
     "other_currency": "Invoice in another currency, Finance's pesos used",
+    "moveware_type_differs": "Type in Moveware differs from Finance's",
+    "quote_totals": "Moveware Removals Summary: totals and list differ",
+    "quote_branch_currency": "Moveware branch and currency do not agree",
+    "quote_total_off": "Moveware costing: option total is not the sum of its lines",
+    "quote_no_date": "Moveware: date won not readable",
+    "quote_missing": "Invoiced file with no booked quote in Moveware",
+    "quote_no_cost": "Booked quote with no quoted cost",
+    "quote_with_tax": "Booked quote loaded with IVA in Moveware",
     "duplicate_line": "Same document entered twice",
     "fx_outlier": "Exchange rate looks mistyped",
     "embassy_billed_in_scope": "Billed to the Embassy, typed CORP-PART",
@@ -51,6 +60,14 @@ LABELS_ES = {
     "dollar_amount_mismatch": "Los importes en dólares y en pesos no coinciden",
     "no_dollar_amount": "Factura en dólares sin importe en dólares utilizable",
     "other_currency": "Factura en otra moneda, se usan los pesos de Finanzas",
+    "moveware_type_differs": "El tipo en Moveware difiere del de Finanzas",
+    "quote_totals": "Removals Summary de Moveware: totales y lista no coinciden",
+    "quote_branch_currency": "Sucursal y moneda de Moveware no coinciden",
+    "quote_total_off": "Costeo de Moveware: el total de la opción no es la suma de sus líneas",
+    "quote_no_date": "Moveware: fecha de ganado ilegible",
+    "quote_missing": "Expediente facturado sin cotización en Moveware",
+    "quote_no_cost": "Cotización sin costo cotizado",
+    "quote_with_tax": "Cotización cargada con IVA en Moveware",
     "duplicate_line": "El mismo documento capturado dos veces",
     "fx_outlier": "El tipo de cambio parece mal capturado",
     "embassy_billed_in_scope": "Facturado a la Embajada, con tipo CORP-PART",
@@ -76,7 +93,8 @@ PEOPLE_ES = {"Buyer and Cost Manager (Lupita)": "Compradora y Gerente de Costos 
 MONEY = ("billed", "cost", "gross_margin", "invoicing", "margin", "discipline", "total", "payable", "held",
          "waiting_billed")
 # Long, routine lists: shown folded on the page.
-ROUTINE = ("no_cost_posted", "cost_without_sales", "currency_missing")
+ROUTINE = ("no_cost_posted", "cost_without_sales", "currency_missing", "quote_missing", "quote_with_tax",
+           "quote_no_cost")
 
 
 def rule_for(month: str) -> str:
@@ -113,11 +131,81 @@ def month_rates(lines, s: E.Settings) -> tuple:
             statistics.median(every) if every else s.usd_mxn, bool(every))
 
 
-def build(lines, s: E.Settings, bookings=None) -> dict:
+def _quote_months(by_month, quotes) -> tuple:
+    """(first, per_month). `first` = the month each job is first invoiced: its
+    booked quote is shown and counted there, once. per_month = how many of those
+    files have a quote, which do not, and the sale prices found."""
+    first = {}
+    for m in sorted(by_month):
+        for x in by_month[m]:
+            if x.billed > 0:
+                first.setdefault(x.job, m)
+    per = {}
+    for job, m in sorted(first.items()):
+        d = per.setdefault(m, {"files": 0, "found": 0, "missing": [], "bookings": 0.0})
+        d["files"] += 1
+        q = quotes.get(job)
+        if q and q["sale"] is not None:
+            d["found"] += 1
+            d["bookings"] += q["sale"]
+        else:
+            d["missing"].append(job)
+    return first, per
+
+
+def _quote_problems(by_month, first, quotes) -> list:
+    """Points about the quotes of the files in the report."""
+    out = []
+    for job, m in sorted(first.items()):
+        q = quotes.get(job)
+        if not q or q["sale"] is None:
+            out.append({"kind": "quote_missing", "job": job,
+                        "detail": f"first invoiced in {m}: no booked quote in the Moveware reports loaded",
+                        "detail_es": f"facturado por primera vez en {m}: sin cotización en los reportes de Moveware cargados"})
+            continue
+        if q["with_tax"]:
+            out.append({"kind": "quote_with_tax", "job": job,
+                        "detail": "loaded in Moveware with IVA; the sale price used is the value excluding IVA, the "
+                                  "quoted cost is as loaded",
+                        "detail_es": "cargado en Moveware con IVA; el precio de venta usado es el valor sin IVA, el "
+                                     "costo cotizado es el cargado", "amount_mxn": round(q["sale"], 2)})
+        if q["cost"] is None:
+            out.append({"kind": "quote_no_cost", "job": job,
+                        "detail": "sale price found, but no cost option with status W in the Move Costing Sheet",
+                        "detail_es": "hay precio de venta, pero ninguna opción de costo con estatus W en el Move Costing Sheet",
+                        "amount_mxn": round(q["sale"], 2)})
+        if q["move_type"] in Q.AGENT_MOVE_TYPES or q["customer_type"] in ("Diplomatic", "Agent"):
+            out.append({"kind": "moveware_type_differs", "job": job,
+                        "detail": f"Corporate or Private in Finance's report, but move type {q['move_type']} and "
+                                  f"customer type {q['customer_type']} in Moveware",
+                        "detail_es": f"corporativo o particular en el reporte de Finanzas, pero tipo de mudanza "
+                                     f"{q['move_type']} y tipo de cliente {q['customer_type']} en Moveware"})
+    return out
+
+
+def book_quotes(lines, removals, control, costings, s: E.Settings) -> tuple:
+    """(quotes, problems) from what the two Moveware readers kept, checked
+    against Finance's invoices for the currency of each job."""
+    billed = {job: j["billed_fin_mxn"] for (job, t), j in F.jobs(lines, s).items() if t == F.IN_SCOPE}
+    pesos = Q.looks_like_pesos(removals, billed)
+    return Q.book(removals, costings, s, pesos=pesos), Q.problems(removals, control, costings, pesos=pesos)
+
+
+def build(lines, s: E.Settings, bookings=None, quotes=None, quote_problems=()) -> dict:
+    """`quotes` = quotes.book(...): the booked quote of each job, or None when
+    the Moveware reports have not been loaded. A month's bookings are, in this
+    order: the figure typed on the page; the booked quotes (when every file of
+    the month has one); the budget, as a placeholder."""
     s.check()
     bookings = clean_bookings(bookings)
     by_month = F.commission_lines(lines, s)
     problems = F.problems(lines, s)
+    first, qmonths, won = {}, {}, {}
+    if quotes is not None:
+        first, qmonths = _quote_months(by_month, quotes)
+        in_scope = {job for (job, t) in F.jobs(lines, s) if t == F.IN_SCOPE}
+        won = Q.won_by_month(quotes, also=in_scope)
+        problems = problems + list(quote_problems) + _quote_problems(by_month, first, quotes)
     flagged = {}
     for p in problems:
         if p["kind"] not in ROUTINE:
@@ -129,8 +217,17 @@ def build(lines, s: E.Settings, bookings=None) -> dict:
         if not budget:
             no_budget.append(m)
             continue
-        known = m in bookings
-        res = E.calc_month(m, by_month[m], bookings[m] if known else budget, s)
+        qd = qmonths.get(m)
+        if m in bookings:
+            source, booked = "entered", bookings[m]
+        elif s.bookings_basis == "won" and won.get(m, 0) > 0:
+            source, booked = "quotes", won[m]
+        elif s.bookings_basis == "invoiced" and qd and qd["files"] and not qd["missing"]:
+            source, booked = "quotes", qd["bookings"]
+        else:
+            source, booked = "placeholder", budget
+        known = source != "placeholder"
+        res = E.calc_month(m, by_month[m], booked, s)
         waiting = [x for x in res.lines if x.margin_pending]
         cost = sum(x.line.cost for x in res.lines)
         rate = rates.get(m, rate_other)
@@ -139,7 +236,12 @@ def build(lines, s: E.Settings, bookings=None) -> dict:
             "rate": rate, "lines": len(res.lines),
             "billed": res.billed, "cost": cost, "gross_margin": res.billed - cost,
             "margin_pct": (res.billed - cost) / res.billed if abs(res.billed) > 1e-9 else None,
-            "budget": budget, "bookings": bookings.get(m), "bookings_known": known, "reach": res.reach,
+            "budget": budget, "bookings": booked if known else None, "bookings_known": known,
+            "bookings_source": source, "reach": res.reach,
+            "quote": None if quotes is None else {
+                "files": qd["files"] if qd else 0, "found": qd["found"] if qd else 0,
+                "missing": list(qd["missing"]) if qd else [], "bookings": qd["bookings"] if qd else 0.0,
+                "won": won.get(m, 0.0)},
             "invoicing": sum(x.invoicing for x in res.lines), "margin": sum(x.margin for x in res.lines),
             "discipline": sum(x.discipline for x in res.lines), "total": res.total,
             "payable": res.payable_total, "held": res.held_total,
@@ -147,9 +249,14 @@ def build(lines, s: E.Settings, bookings=None) -> dict:
         mrow = months[-1]
         mrow["usd"] = {k: mrow[k] / rate for k in MONEY}
         mrow["usd"]["budget"] = budget / rate
-        mrow["usd"]["bookings"] = bookings[m] / rate if known else None
+        mrow["usd"]["bookings"] = booked / rate if known else None
         for x in sorted(res.lines, key=lambda z: z.line.job):
+            q = quotes.get(x.line.job) if quotes is not None else None
+            here = bool(q) and first.get(x.line.job) == m          # the quote is shown once, where first invoiced
             rows.append({
+                "status": "Ganado" if (q and q["status"] == "W") else "",
+                "sale_price": q["sale"] if here else None, "quote_cost": q["cost"] if here else None,
+                "quote_month": first.get(x.line.job) if q else None,
                 "month": m, "job": x.line.job, "billed": x.line.billed, "cost": x.line.cost,
                 "gross_margin": x.gross_margin, "margin_pct": x.margin_pct, "cost_posted": x.line.cost_posted,
                 "invoicing": x.invoicing, "margin": x.margin, "discipline": x.discipline, "total": x.total,
@@ -192,6 +299,7 @@ def build(lines, s: E.Settings, bookings=None) -> dict:
             "rates": {"by_month": {r["month"]: r["rate"] for r in months}, "other": rate_other,
                       "from_report": rates_found},
             "placeholder_months": [r["month"] for r in months if not r["bookings_known"]],
+            "quotes_loaded": quotes is not None, "bookings_basis": s.bookings_basis,
             "source": {"lines": len(lines), "from": min(dates).isoformat() if dates else None,
                        "to": max(dates).isoformat() if dates else None,
                        "jobs_in_scope": sum(1 for (_, t) in F.jobs(lines, s) if t == F.IN_SCOPE)}}

@@ -183,7 +183,7 @@ def test_bookings_change_sales_reach(client, tmp_path):
     assert store.get("bookings")[0] == {"2026-05": pytest.approx(round(budget * 1.5, 2))}
     page = client.get("/commissions").data.decode()
     assert "0.9000" in page and "150.0%" in page                 # May: 1.5 x 0.60
-    assert "Bookings are not entered for 2 month(s)" in page     # June and July of the fixture
+    assert "Bookings are not known for 2 month(s)" in page       # June and July of the fixture
     rep = R.build(F.from_records(store.get("finance_report")[0]["records"]), W.settings(), store.get("bookings")[0])
     assert rep["months"][0]["reach"] == pytest.approx(0.9) and f"{rep['total_new']['total']:,.2f}" in page
 
@@ -283,7 +283,7 @@ def test_page_carries_both_languages_and_both_currencies(client, tmp_path):
     page = client.get("/commissions").data.decode()
     assert 'id="ccySeg"' in page and 'data-c="usd"' in page and 'id="langSeg"' in page and 'data-l="es"' in page
     for es in ("Reporte de comisiones TMS", "Prueba. No usar para pago.", "Facturado", "Costo real", "Margen bruto",
-               "Alcance de ventas", "Por mes de factura", "Puntos por revisar en el reporte de Finanzas",
+               "Alcance de ventas", "Por mes de factura", "Puntos por revisar",
                "Ventas contratadas por mes", "Subir reporte", "Descargar en Excel", "Cálculo nuevo",
                "El tipo de cambio parece mal capturado", "fila 17: tipo de cambio 12.6231", "espera costo",
                "Compradora y Gerente de Costos (Lupita)", "Reporte cargado: 19 líneas", "mayo 2026"):
@@ -397,3 +397,71 @@ def test_the_new_calculation_starts_in_june_2026():
     assert [R.rule_for(m) for m in ("2026-01", "2026-04", "2026-05", "2026-06", "2026-12")] == [
         "Old calculation", "Old calculation", "Old calculation", "New calculation", "New calculation"]
     assert set(R.rule_for(f"2026-{m:02d}") for m in range(1, 13)) <= set(R.RULES_ES)
+
+
+# ── the two Moveware reports ─────────────────────────────────────────────────
+def _moveware_files(tmp_path):
+    import test_commissions_quotes as TQ
+    jobs = [TQ.J(j["job"], ex=250000.0) for j in ({"job": x} for x in sorted({r[2] for r in ROWS[:-1] if r[1] == "CORP-PART"}))]
+    rem = open(TQ.xl(tmp_path, TQ.removals_rows(jobs), "rem.xlsx"), "rb").read()
+    cst = open(TQ.xl(tmp_path, TQ.costing_rows([(jobs[0]["job"], "IMP", "Private", [TQ.O()])]), "cst.xlsx"), "rb").read()
+    return rem, cst, TQ.NAMES
+
+
+def _send(c, route, data, csrf="tok", filename="report.xlsx"):
+    return c.post(route, data={"csrf": csrf, "report": (io.BytesIO(data), filename)}, content_type="multipart/form-data")
+
+
+def test_moveware_reports_are_loaded_without_their_names_and_fill_the_quotes(client, tmp_path):
+    login(client)
+    upload(client, xlsx(tmp_path))
+    before = client.get("/commissions").data.decode()
+    assert "Removals Summary: not loaded yet." in before and "Move Costing Sheet: not loaded yet." in before
+    rem, cst, names = _moveware_files(tmp_path)
+    assert _send(client, "/commissions/upload-removals", rem).status_code == 302
+    page = client.get("/commissions").data.decode()
+    assert "Removals Summary loaded:" in page and "Customer names in it were not kept." in page
+    assert _send(client, "/commissions/upload-costing", cst).status_code == 302
+    page = client.get("/commissions").data.decode()
+    assert "Move Costing Sheet loaded: 1 jobs." in page and "Removals Summary in use: uploaded" in page
+    assert "2026-01-01" in page and "2026-10-09" in page and "Files first invoiced" in page and "the booked quotes" in page
+    with store.engine().connect() as c:
+        everything = " ".join(str(v) for row_ in c.exec_driver_sql("select * from commission_docs") for v in row_)
+    for name in names + tuple(NAMES):
+        assert name not in everything and name not in page
+    # the page, the stored report and the Excel download agree
+    rep = W._report(F.from_records(store.get("finance_report")[0]["records"]), W.settings())
+    assert rep["quotes_loaded"] and any(m["bookings_source"] == "quotes" for m in rep["months"])
+    assert f"{rep['total_new']['total']:,.2f}" in page
+    wb = openpyxl.load_workbook(io.BytesIO(client.get("/commissions/workbook").data))
+    first = [x for x in rep["lines"] if x["sale_price"] is not None][0]
+    ws = wb[T.sheet_name(first["month"])]
+    row_ = next(r_ for r_ in range(4, 40) if ws[f"B{r_}"].value == first["job"])
+    assert (ws[f"C{row_}"].value, ws[f"D{row_}"].value) == ("Ganado", pytest.approx(first["sale_price"]))
+    log = store.get("uploads")[0]
+    assert [x["what"] for x in log] == ["finance_report", "removals_summary", "costing_sheet"]
+
+
+def test_moveware_uploads_need_the_token_and_refuse_other_files(client, tmp_path):
+    login(client)
+    rem, cst, _ = _moveware_files(tmp_path)
+    for route in ("/commissions/upload-removals", "/commissions/upload-costing"):
+        assert _send(client, route, rem, csrf="wrong").status_code == 400
+        assert _send(client, route, b"PK\x03\x04 not a workbook").status_code == 302
+        assert "Nothing was changed" in client.get("/commissions").data.decode()
+        assert _send(client, route, rem, filename="report.csv").status_code == 302
+        assert "must be an Excel workbook" in client.get("/commissions").data.decode()
+    assert _send(client, "/commissions/upload-removals", cst).status_code == 302      # the wrong report in each box
+    assert "does not look like the Moveware Removals Summary" in client.get("/commissions").data.decode()
+    assert _send(client, "/commissions/upload-costing", rem).status_code == 302
+    assert "does not look like the Moveware Move Costing Sheet" in client.get("/commissions").data.decode()
+    assert store.get("removals_summary")[0] is None and store.get("costing_sheet")[0] is None
+
+
+def test_the_page_works_with_a_stored_moveware_report_that_cannot_be_read_back(client, tmp_path):
+    login(client)
+    upload(client, xlsx(tmp_path))
+    store.put("removals_summary", {"records": {"jobs": [{"job": "x"}], "control": {}}}, by=LUPITA)
+    r = client.get("/commissions")
+    assert r.status_code == 200 and b"could not be read back" in r.data and b"Removals Summary: not loaded yet." in r.data
+    assert client.get("/commissions/workbook").status_code == 200

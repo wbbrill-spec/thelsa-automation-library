@@ -29,6 +29,7 @@ figure for that invoice: see `collected` and report.auto_payments.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import math
 import re
 import unicodedata
@@ -96,7 +97,8 @@ def _period(text: str) -> tuple:
 
 
 def load(src) -> tuple:
-    """(payments, info). info = {"company": 'TRS' …, "from", "to": the report's
+    """(payments, info). info = {"company": 'TRS' … or '' when not known, "key":
+    what tells this company's report from another's, "from", "to": the report's
     own period as ISO dates, "currencies": […], "paid": {currency: sum}}."""
     try:
         with warnings.catch_warnings():
@@ -104,7 +106,7 @@ def load(src) -> tuple:
             wb = openpyxl.load_workbook(src, data_only=True)
     except Exception:
         _bad("the file could not be opened as an Excel workbook", "el archivo no se pudo abrir como libro de Excel")
-    out, info = [], {"company": "", "from": "", "to": "", "currencies": [], "paid": {}}
+    out, info = [], {"company": "", "key": "", "from": "", "to": "", "currencies": [], "paid": {}}
     for si, ws in enumerate(wb.worksheets, start=1):
         rows = [tuple(r) for r in ws.iter_rows(values_only=True)]
         head = next((i for i, r in enumerate(rows)
@@ -119,9 +121,14 @@ def load(src) -> tuple:
             _bad(f"sheet {si}: the currency of the report is not US dollars or Mexican pesos",
                  f"hoja {si}: la moneda del reporte no es dólar americano ni peso mexicano")
         company = next((COMPANIES[_plain(c)] for c in top if _plain(c) in COMPANIES), "")
-        if company and info["company"] and company != info["company"]:
+        # The company is printed at the end of the first line. One this module does not know is kept as a short
+        # fingerprint of its name, not as text: enough to tell two companies' reports apart.
+        first = [c for c in rows[0] if isinstance(c, str) and c.strip()] if rows else []
+        raw = _plain(first[-1]) if len(first) > 1 else ""
+        key = company or ("co-" + hashlib.sha256(raw.encode()).hexdigest()[:8] if raw else "?")
+        if info.get("key") and key != info["key"]:
             _bad("the sheets of the workbook are of different companies", "las hojas del libro son de empresas distintas")
-        info["company"] = info["company"] or company
+        info["company"], info["key"] = company, key
         frm, to = next((_period(c) for c in top if _plain(c).startswith("DEL:")), ("", ""))
         info["from"], info["to"] = info["from"] or frm, max(info["to"], to)
         names = [_plain(c) for c in rows[head]]
@@ -171,7 +178,9 @@ def to_records(payments, info) -> dict:
 def from_records(doc) -> tuple:
     try:
         ps = [Payment(**r) for r in doc["payments"]]
-        info = {"company": str(doc["info"].get("company", "")), "from": str(doc["info"].get("from", "")),
+        info = {"company": str(doc["info"].get("company", "")),
+                "key": str(doc["info"].get("key", "") or doc["info"].get("company", "") or "?"),
+                "from": str(doc["info"].get("from", "")),
                 "to": str(doc["info"].get("to", "")), "currencies": list(doc["info"].get("currencies", [])),
                 "paid": dict(doc["info"].get("paid", {}))}
         ok = all((p.date == "" or dt.date.fromisoformat(p.date)) and p.currency in ("USD", "MXN")
@@ -179,6 +188,7 @@ def from_records(doc) -> tuple:
                  and isinstance(p.paid, (int, float)) and not isinstance(p.paid, bool) and math.isfinite(p.paid)
                  for p in ps)
         ok = ok and info["company"] in set(COMPANIES.values()) | {""}
+        ok = ok and bool(re.fullmatch(r"\?|co-[0-9a-f]{8}|[A-Z ]{2,8}", info["key"]))
         ok = ok and all(v == "" or dt.date.fromisoformat(v) for v in (info["from"], info["to"]))
         ok = ok and set(info["currencies"]) <= {"USD", "MXN"}
     except Exception:

@@ -283,12 +283,13 @@ def commissions_upload_payments(email):
     doc, _ = store.get("payment_reports")
     doc = doc if isinstance(doc, dict) and isinstance(doc.get("sources"), dict) else {"sources": {}}
     digest = hashlib.sha256(data).hexdigest()
-    name = info["company"] or "?"
+    name = info["key"] or "?"
     doc["sources"][name] = {"records": P.to_records(ps, info), "sha256": digest, "by": email,
                             "at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")}
     store.put("payment_reports", doc, by=email)
     _log_upload(email, f"payment_report {name}", len(ps), digest)
-    who = {"?": ("a company this report does not know", "una empresa que este reporte no conoce")}.get(name, (name, name))
+    who = (name, name) if info["company"] else ("a company this page does not know by name",
+                                                "una empresa que esta página no conoce por nombre")
     _say(f"Payments report loaded for {who[0]}: {len(ps):,} payments from {info['from'] or '?'} to {info['to'] or '?'}. "
          "Customer names and bank references in it were not kept.",
          f"Reporte de pagos cargado para {who[1]}: {len(ps):,} pagos del {info['from'] or '?'} al {info['to'] or '?'}. "
@@ -591,7 +592,7 @@ input[type=file]{font:inherit}button.go,.btn{background:var(--navy);color:#fff;b
 <div class="card" id="collected"><h2>{{ t('Collected invoices', 'Facturas cobradas') }}</h2>
 <p class="small">{{ t('Finance\'s report of customer payments (CONTPAQ: "Análisis de IVA de pagos de clientes"), one workbook per company, from 1 January to today. Each upload replaces the report of that same company. A line becomes Paid when every invoice behind it is collected in full, and Pending when the report covers its invoices and one is not; a mark made in the lines table below always wins. The workbook is read and not kept; customer names and bank references in it are never stored.',
 'Reporte de pagos de clientes de Finanzas (CONTPAQ: "Análisis de IVA de pagos de clientes"), un libro por empresa, del 1 de enero a hoy. Cada carga sustituye al reporte de esa misma empresa. Una línea pasa a Pagada cuando todas sus facturas están cobradas por completo, y a Pendiente cuando el reporte cubre sus facturas y alguna no lo está; una marca hecha en la tabla de líneas de abajo siempre prevalece. El libro se lee y no se guarda; nunca se almacenan los nombres de clientes ni las referencias bancarias.') }}</p>
-{% for ps, info, m in col %}<p>{{ info.company or '?' }}: {{ ps|length }} {{ t('payments from', 'pagos del') }} {{ info['from'] or '?' }} {{ t('to', 'al') }} {{ info['to'] or '?' }} · {{ t('uploaded', 'subido el') }} {{ m.at|cm_when if m.at else '?' }} {{ t('by', 'por') }} {{ m.by }}.</p>{% else %}<p>{{ t('No payments report loaded yet.', 'Aún no se ha cargado ningún reporte de pagos.') }}</p>{% endfor %}
+{% for ps, info, m in col %}<p>{{ info.company or t('Company not known by name', 'Empresa no conocida por nombre') }}: {{ ps|length }} {{ t('payments from', 'pagos del') }} {{ info['from'] or '?' }} {{ t('to', 'al') }} {{ info['to'] or '?' }} · {{ t('uploaded', 'subido el') }} {{ m.at|cm_when if m.at else '?' }} {{ t('by', 'por') }} {{ m.by }}.</p>{% else %}<p>{{ t('No payments report loaded yet.', 'Aún no se ha cargado ningún reporte de pagos.') }}</p>{% endfor %}
 <form method="post" action="/commissions/upload-payments" enctype="multipart/form-data" class="row">
 <input type="hidden" name="csrf" value="{{ csrf }}"><input type="file" name="report" accept=".xlsx" required aria-label="Payments report">
 <button type="submit" class="go">{{ t('Upload payments report', 'Subir reporte de pagos') }}</button></form>

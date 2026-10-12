@@ -575,9 +575,14 @@ def test_payments_report_makes_collected_lines_payable(client, tmp_path):
     _send(client, "/commissions/upload-payments", data2)
     data3, _ = _payfile(tmp_path, [TP.pay(46150, 11, 116000.0, series="PART")], name="c.xlsx", company="THELSA MOBILITY SOLUTIONS")
     _send(client, "/commissions/upload-payments", data3)
+    data4, _ = _payfile(tmp_path, [TP.pay(46150, 12, 5.0, series="PART")], name="d.xlsx", company="Some Other Company")
+    _send(client, "/commissions/upload-payments", data4)
+    assert "a company this page does not know by name" in client.get("/commissions").data.decode()
     doc = store.get("payment_reports")[0]
-    assert sorted(doc["sources"]) == ["TMS", "TRS"] and len(doc["sources"]["TRS"]["records"]["payments"]) == 1
-    assert W._collections()["error"] is None and len(W._collections()["sources"]) == 2
+    assert len(doc["sources"]) == 3 and {"TMS", "TRS"} < set(doc["sources"]) and "Some Other" not in json.dumps(doc)
+    assert len(doc["sources"]["TRS"]["records"]["payments"]) == 1
+    assert len(W._collections()["sources"]) == 3
+    assert W._collections()["error"] is None
 
 
 def test_payments_upload_needs_the_token_and_refuses_other_files(client, tmp_path):

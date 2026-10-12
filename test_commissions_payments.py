@@ -55,7 +55,7 @@ def test_payments_report_is_read_without_customers_or_bank_references(tmp_path):
     p = report(tmp_path, mxp=[pay(46086, 1138, 725082.24), pay(dt.datetime(2026, 4, 1), 1139, 352781.53),
                               pay(46112, 1139, 444.45, total=999.0)], usd=[pay(46044, 1120, 22685.05)])
     got, info = P.load(p)
-    assert info == {"company": "TRS", "from": "2026-01-01", "to": "2026-09-30", "currencies": ["USD", "MXN"],
+    assert info == {"company": "TRS", "key": "TRS", "from": "2026-01-01", "to": "2026-09-30", "currencies": ["USD", "MXN"],
                     "paid": {"USD": 22685.05, "MXN": 1078308.22}}
     assert [(x.date, x.currency, x.series, x.folio, x.paid) for x in got] == [
         ("2026-01-22", "USD", "TMS", "1120", 22685.05), ("2026-03-05", "MXN", "TMS", "1138", 725082.24),
@@ -103,7 +103,10 @@ def test_a_payments_report_that_cannot_be_read_is_refused_without_quoting_it(tmp
 
 def test_a_company_the_report_does_not_know_is_not_named(tmp_path):
     got, info = P.load(report(tmp_path, mxp=[pay(46086, 1138, 10.0)], company="Jane Secret Holdings"))
-    assert info["company"] == "" and "Jane" not in json.dumps(P.to_records(got, info))
+    assert info["company"] == "" and info["key"].startswith("co-") and len(info["key"]) == 11
+    assert "Jane" not in json.dumps(P.to_records(got, info)) and P.from_records(P.to_records(got, info)) == (got, info)
+    other, info2 = P.load(report(tmp_path, mxp=[pay(46086, 1138, 10.0)], company="Another Hidden Company", name="o.xlsx"))
+    assert info2["key"].startswith("co-") and info2["key"] != info["key"]          # two unknown companies stay apart
     with pytest.raises(P.PaymentReportError) as e:                         # two companies in one workbook
         wb = openpyxl.Workbook()
         sheet(wb.active, "Peso Mexicano", [pay(46086, 1138, 10.0)])

@@ -73,3 +73,46 @@ def test_unpack_service_is_delivery_not_pack():
                                trip("110739", "ZAPOPAN, JAL", "ZAPOPAN, JAL", D(2026, 8, 13), None, "DESEMPAQUE")])]
     j = sm.collect(snaps, TODAY)["110739"]
     assert j["pack"] is None and j["delivery"]["date"] == "2026-08-13"
+
+
+def test_texas_border_towns_are_hubs_not_deliveries():
+    assert sm.is_hub("BROWNSVILLE, TX") and sm.is_hub("PHARR TX") and sm.is_hub("Hidalgo, Texas")
+    snaps = [(D(2026, 9, 30), [trip("110800", "BODEGA THELSA MEXICO", "BROWNSVILLE, TX",
+                                    D(2026, 9, 10), D(2026, 9, 12), "INT C")])]
+    j = sm.collect(snaps, TODAY)["110800"]
+    assert j["pack"] is None and j["delivery"] is None
+
+
+def test_moved_is_the_first_truck_day_even_between_hubs():
+    snaps = [(D(2026, 9, 30), [
+        trip("110800", "BODEGA THELSA MEXICO", "BODEGA THELSA VERACRUZ", D(2026, 9, 10), D(2026, 9, 11), "TRAN F COMP"),
+        trip("110800", "BODEGA THELSA VERACRUZ", "PUERTO DE VERACRUZ", D(2026, 9, 14), D(2026, 9, 14), "INT C"),
+        trip("110800", "X", "X", D(2026, 9, 1), None, "HUACAL"),          # a service, not a truck move
+        trip("110800", "X", "X", D(2026, 9, 2), None, "DESEMPAQUE")])]
+    j = sm.collect(snaps, TODAY)["110800"]
+    assert j["moved"]["date"] == "2026-09-10" and j["moved"]["status"] == "done"
+
+
+def test_one_workbook_per_month_the_last_one():
+    named = [(D(2026, 8, 27), 1, "a27-1"), (D(2026, 8, 31), 2, "a31-2"), (D(2026, 8, 31), 3, "a31-3"),
+             (D(2026, 9, 30), 1, "s30-1"), (D(2026, 9, 29), 3, "s29-3"),
+             (D(2026, 10, 9), 3, "o9-3"), (D(2026, 10, 12), 2, "o12-2"),
+             (D(2025, 6, 30), 3, "too old"), (D(2026, 10, 20), 1, "in the future")]
+    got = sm.pick_workbooks(named, today=D(2026, 10, 13))
+    assert got == [(D(2026, 8, 31), "a31-3"), (D(2026, 9, 30), "s30-1"), (D(2026, 10, 12), "o12-2")]
+
+
+def test_a_closed_months_last_workbook_counts_as_published_at_month_end():
+    # last August plan is dated the 28th; a row for the 30th still stands as done
+    named = [(D(2026, 8, 28), 3, "aug")]
+    (as_of, _item), = sm.pick_workbooks(named, today=D(2026, 10, 13))
+    assert as_of == D(2026, 8, 31)
+    jobs = sm.collect([(as_of, [trip("110700", "TOLUCA", "BODEGA THELSA", D(2026, 8, 30), D(2026, 8, 30))])], TODAY)
+    assert jobs["110700"]["pack"]["status"] == "done"
+
+
+def test_coverage_counts_rows_without_a_file_number():
+    snaps = [(D(2026, 9, 30), [trip("110800", "A", "B", None, None), trip("", "A", "B", None, None),
+                               trip("", "A", "B", None, None), trip("110801", "A", "B", None, None, src="TIM")])]
+    assert sm.coverage(snaps) == {"tms_rows": 3, "tms_rows_with_file_number": 1,
+                                  "tms_rows_without_file_number": 2, "customers_without_file_number": 1}

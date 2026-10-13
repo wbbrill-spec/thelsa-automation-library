@@ -12,6 +12,15 @@ isn't kept), so this module reads the plan history and gives each TMS file:
   delivery  = the last day a truck UNLOADS at the customer's end (destination is
               not one of those)
 
+A third date, `moved`, is the first day a truck carried the file at all
+(warehouse to port or border included). It is not a pack or a delivery, but it
+shows the move really happened when the plan holds neither.
+
+The workbook is MONTH-TO-DATE: it restarts on the 1st and keeps every row of the
+month (measured 13 Oct 2026: the 27 Aug plans carried rows loaded from 31 Jul).
+So a closed month needs only its last workbook, and the current month only the
+latest one — see pick_workbooks().
+
 A plan is a schedule, not a confirmation, so every date carries how sure we are:
 
   "done"       the day has passed and the row was still in a plan published on
@@ -34,7 +43,9 @@ HUB_WORDS = ("BODEGA", "THELSA", "PUERTO", "PORT ", "AEROPUERTO", "AIRPORT", "AD
              "RECINTO", "FISCAL", "PATIO", "CRUCE", "FRONTERA", "TERMINAL", "NAVIERA",
              "MANZANILLO", "LAZARO CARDENAS", "LÁZARO CÁRDENAS", "ALTAMIRA", "VERACRUZ PUERTO",
              "NUEVO LAREDO", "LAREDO", "REYNOSA", "TIJUANA", "CIUDAD JUAREZ", "CD. JUAREZ",
-             "MCALLEN", "MC. ALLEN", "MC ALLEN", "EL PASO", "AICM", "AIFA")
+             "MCALLEN", "MC. ALLEN", "MC ALLEN", "EL PASO", "AICM", "AIFA",
+             # export trucks hand over at the Texas border; that is not a delivery
+             "BROWNSVILLE", "PHARR", ", TX", " TX ", "TEXAS")
 _DATE_IN_NAME = re.compile(r"(\d{1,2})\s+DE\s+([A-ZÁÉÍÓÚ]+)\s+(\d{4})\s*(?:\((\d)\))?", re.I)
 _MONTHS = {"ENERO": 1, "FEBRERO": 2, "MARZO": 3, "ABRIL": 4, "MAYO": 5, "JUNIO": 6, "JULIO": 7,
            "AGOSTO": 8, "SEPTIEMBRE": 9, "SETIEMBRE": 9, "OCTUBRE": 10, "NOVIEMBRE": 11, "DICIEMBRE": 12}
@@ -88,10 +99,10 @@ def collect(snapshots, today: dt.date | None = None) -> dict:
             leg["unload"] = t.unload_date
             leg["unit"] = t.unit
     for j in jobs.values():
-        pack = deliv = None
+        pack = deliv = moved = None
         for leg in j["legs"].values():
             kind = re.sub(r"[^a-z]", "", (leg.get("tipo") or "").lower())
-            p_day = d_day = None
+            p_day = d_day = m_day = None
             if kind.startswith(("desemp", "desep")):          # unpacking at the customer = delivery
                 d_day = leg.get("load") or leg.get("unload")
             elif kind in ("huacal", "suelto", "muebles", "empaque", "embalaje"):
@@ -102,12 +113,16 @@ def collect(snapshots, today: dt.date | None = None) -> dict:
                     p_day = leg.get("load")
                 if not is_hub(leg["destination"]):
                     d_day = leg.get("unload")
+                m_day = leg.get("load") or leg.get("unload")
             if p_day and (pack is None or p_day < pack[0]):
                 pack = (p_day, leg)
             if d_day and (deliv is None or d_day > deliv[0]):
                 deliv = (d_day, leg)
+            if m_day and (moved is None or m_day < moved[0]):
+                moved = (m_day, leg)
         j["pack"] = _milestone(pack, today)
         j["delivery"] = _milestone(deliv, today)
+        j["moved"] = _milestone(moved, today)
         j["legs"] = [{**v, "load": _iso(v.get("load")), "unload": _iso(v.get("unload")),
                       "first_seen": _iso(v["first_seen"]), "last_seen": _iso(v["last_seen"])}
                      for v in j["legs"].values()]
@@ -164,12 +179,65 @@ def compare(sit_jobs: dict, mw_files: list, today: dt.date | None = None) -> dic
     }
 
 
+def coverage(snapshots) -> dict:
+    """How much of the plan can be tied to a MoveWare file — counts only."""
+    rows = keyed = 0
+    unkeyed_customers = set()
+    for _pub, trips in snapshots:
+        for t in trips:
+            src = getattr(getattr(t, "source", None), "value", None) or getattr(t, "source", None)
+            if src != "TMS":
+                continue
+            rows += 1
+            if t.job_no:
+                keyed += 1
+            else:
+                unkeyed_customers.add((getattr(t, "customer", "") or "").strip().upper())
+    return {"tms_rows": rows, "tms_rows_with_file_number": keyed,
+            "tms_rows_without_file_number": rows - keyed,
+            "customers_without_file_number": len(unkeyed_customers - {""})}
+
+
+def _month_end(day: dt.date) -> dt.date:
+    nxt = dt.date(day.year + (day.month == 12), day.month % 12 + 1, 1)
+    return nxt - dt.timedelta(days=1)
+
+
+def pick_workbooks(named, today: dt.date | None = None, months: int = 13):
+    """Which workbooks to read. `named` is [(plan_date, pass_no, item)].
+
+    The plan is month-to-date, so each month is read from ONE workbook: its last.
+    For a closed month that workbook is final, so it is treated as published on
+    the month's last day (every row in it stood until the month closed); for the
+    current month it keeps its own date. Returns [(as_of_date, item)] oldest first,
+    no further back than `months` months."""
+    today = today or dt.date.today()
+    y, m = today.year, today.month - months
+    while m <= 0:
+        m += 12
+        y -= 1
+    since = dt.date(y, m, 1)
+    best = {}
+    for day, n, item in named:
+        if not day or day < since or day > today:
+            continue
+        key = (day.year, day.month)
+        if key not in best or (day, n) > best[key][:2]:
+            best[key] = (day, n, item)
+    out = []
+    for (yy, mm), (day, _n, item) in sorted(best.items()):
+        closed = (yy, mm) != (today.year, today.month)
+        out.append((_month_end(day) if closed else day, item))
+    return out
+
+
 # ── reading the plan history from OneDrive ──────────────────────────────────────
 _LOCK = threading.Lock()
-_STATE = {"jobs": {}, "built_at": None, "workbooks": [], "error": None, "running": False}
+_STATE = {"jobs": {}, "built_at": None, "workbooks": [], "error": None, "running": False,
+          "coverage": {}}
 
 
-def _list_workbooks(days: int):
+def _list_workbooks(months: int):
     import requests
     from crossborder import sit
     from crossborder.graph_auth import get_token
@@ -188,28 +256,27 @@ def _list_workbooks(days: int):
         j = r.json()
         kids += j.get("value") or []
         url = j.get("@odata.nextLink")
-    since = dt.date.today() - dt.timedelta(days=days)
-    # One workbook per day is enough for history: the last pass of each day.
-    best = {}
+    named = []
     for k in kids:
-        d, n = workbook_date(k.get("name", ""))
-        if d and d >= since and str(k.get("name", "")).lower().endswith((".xlsm", ".xlsx")):
-            if d not in best or n > best[d][0]:
-                best[d] = (n, k)
-    return drive, hdr, [(d, v[1]) for d, v in sorted(best.items())]
+        if str(k.get("name", "")).lower().endswith((".xlsm", ".xlsx")):
+            d, n = workbook_date(k.get("name", ""))
+            if d:
+                named.append((d, n, k))
+    return drive, hdr, pick_workbooks(named, months=months)
 
 
-def build(days: int | None = None) -> dict:
-    """Read one workbook per day for the last `days` days (default 90)."""
+def build(months: int | None = None) -> dict:
+    """Read one workbook per month (see pick_workbooks) for the last `months`
+    months (default 13: the audit's 12-month window plus the month it starts in)."""
     import requests
     from crossborder import sit
-    days = days or int(os.environ.get("SIT_HISTORY_DAYS", "90"))
+    months = months or int(os.environ.get("SIT_HISTORY_MONTHS", "13"))
     with _LOCK:
         if _STATE["running"]:
             return _STATE
         _STATE["running"] = True
     try:
-        drive, hdr, books = _list_workbooks(days)
+        drive, hdr, books = _list_workbooks(months)
         snaps, used = [], []
         for d, k in books:
             r = requests.get(f"https://graph.microsoft.com/v1.0/drives/{drive}/items/{k['id']}/content",
@@ -221,7 +288,8 @@ def build(days: int | None = None) -> dict:
             used.append({"date": d.isoformat(), "name": k.get("name"), "trips": info.get("trips")})
         jobs = collect(snaps)
         with _LOCK:
-            _STATE.update(jobs=jobs, built_at=time.time(), workbooks=used, error=None)
+            _STATE.update(jobs=jobs, built_at=time.time(), workbooks=used, error=None,
+                          coverage=coverage(snaps))
     except Exception as e:  # noqa: BLE001
         with _LOCK:
             _STATE["error"] = f"{type(e).__name__}: {e}"[:300]

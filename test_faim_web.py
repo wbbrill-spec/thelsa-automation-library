@@ -85,7 +85,8 @@ def test_an_import_with_no_pack_date_counts_by_its_delivery_date():
     ])
     s = out["selection"]
     assert s["moves_in_window"] == 2
-    assert s["moves_by_key_date"] == {"pack": 1, "delivery": 1, "sit_pack": 0, "sit_delivery": 0}
+    assert s["moves_by_key_date"] == {"pack": 1, "delivery": 1, "sit_pack": 0, "sit_delivery": 0,
+                                      "sit_truck": 0}
     assert (s["key_date_before_window"], s["key_date_ahead"], s["no_key_date"]) == (1, 1, 0)
 
 
@@ -111,7 +112,7 @@ def test_coverage_is_measured_over_audited_files_only():
     ])["metrics"]
     crit = {c["name"]: c["v"] for c in m["byCriterion"]}
     assert crit == {"Coordinator assigned": 50, "Survey on file": 50,
-                    "Delivery date logged": 50}
+                    "Delivery date logged": 50, "Pack date logged": 100}
     assert m["byCoordinator"] == [{"name": "Ana Sanchez", "v": 100, "files": 1},
                                   {"name": "Unassigned", "v": 0, "files": 1}]
     assert m["breaches"][0]["file"] == "2"
@@ -442,7 +443,7 @@ def test_an_import_with_no_date_in_moveware_is_dated_by_sit_delivery():
     crit = {c["name"]: c["v"] for c in out["metrics"]["byCriterion"]}
     assert crit["Delivery date logged"] == 0
     assert out["metrics"]["breaches"][0]["rule"] == (
-        "Missing: survey, delivery date (SIT plan: delivered 2026-09-30)")
+        "Missing: survey, delivery date (SIT plan: delivered 2026-09-30)")   # import: no pack gap
 
 
 def test_moveware_dates_win_over_sit():
@@ -467,3 +468,27 @@ def test_page_says_when_the_sit_plan_is_still_loading(client, monkeypatch):
     assert "trip plan is still loading" in client.get("/faim/api/metrics").get_json()["generatedNote"]
     monkeypatch.setattr(faim_web, "_sit", lambda: ({}, {"loaded": True}))
     assert "trip plan is still" not in client.get("/faim/api/metrics").get_json()["generatedNote"]
+
+
+# ── Pack date is a milestone to log, except on an import ────────────────────────
+def test_pack_date_gap_shows_the_day_from_sits_plan():
+    sit = faim_web.sit_days({"1": _sit_job(pack=("2026-09-03", "done"))})
+    out = faim_web.faim_snapshot(
+        [rec("1", "W", job_type="EXP", delivery=dt.date(2026, 9, 20), survey=dt.date(2026, 8, 1)),
+         rec("2", "W", job_type="EXP", pack=dt.date(2026, 9, 4), delivery=dt.date(2026, 9, 20),
+             survey=dt.date(2026, 8, 1)),
+         rec("3", "W", job_type="IMA", delivery=dt.date(2026, 9, 20), survey=dt.date(2026, 8, 1))],
+        today=TODAY, sit=sit)
+    crit = {c["name"]: c["v"] for c in out["metrics"]["byCriterion"]}
+    assert crit["Pack date logged"] == 50            # 1 of the 2 exports; the import is not counted
+    assert [(b["file"], b["rule"]) for b in out["metrics"]["breaches"]] == [
+        ("1", "Missing: pack date (SIT plan: packed 2026-09-03)")]
+    assert out["selection"]["moves_by_key_date"]["sit_pack"] == 1
+
+
+def test_a_file_with_only_a_truck_movement_in_the_plan_still_counts_as_a_move():
+    sit = faim_web.sit_days({"1": {"pack": None, "delivery": None,
+                                   "moved": {"date": "2026-09-10", "status": "done"}}})
+    out = faim_web.faim_snapshot([rec("1", "W", job_type="EXP")], today=TODAY, sit=sit)
+    assert out["selection"]["moves_by_key_date"]["sit_truck"] == 1
+    assert out["metrics"]["breaches"][0]["rule"] == "Missing: survey, pack date, delivery date"

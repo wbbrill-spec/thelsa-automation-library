@@ -25,12 +25,17 @@ WHICH FILES COUNT (Moveware Integration Guide, Part B)
   "uplift, else pack" — and, when there is none, the DELIVERY date. Thelsa
   often handles only the import side of a move into Mexico and neither knows
   nor needs the day it was packed at origin (Bill, 13 Oct 2026).
-- Moveware rarely holds either date (the diary isn't kept), so where it has
-  none the day comes from SIT's Plan de Viajes (sit_milestones.py): the day a
-  truck loaded or unloaded at the customer's end, used only when the plan still
-  showed it on that day ("done") or it is still to come ("scheduled"). A SIT
-  date places the file in the window; it is NOT evidence — "delivery date
-  logged" still means logged in Moveware.
+- Coordinators rarely enter milestone dates in Moveware, so where it has none
+  the day comes from SIT's Plan de Viajes (sit_milestones.py; Bill, 13 Oct 2026:
+  "the delivery and pack dates do exist in plan de viajes"): the day a truck
+  loaded or unloaded at the customer's end, used only when the plan still showed
+  it on that day ("done") or it is still to come ("scheduled"). When the plan
+  has neither for a file, the first day a truck carried it at all (warehouse to
+  port or border) still shows the move happened. A SIT date places the file in
+  the window and is shown beside the gap so the coordinator can enter it; it is
+  NOT evidence — "logged" always means logged in Moveware.
+- An import has no pack date to log (Thelsa did not pack it), so "pack date
+  logged" is measured on every file that is not an import (type IM*).
 - Neither date = not a move yet: left out and counted separately (§3).
 - Lost and cancelled files (status L, C) are left out of the audit and counted
   (rule 9). The codes are config: FAIM_LOST_STATUSES.
@@ -144,7 +149,7 @@ def sit_days(jobs):
     out = {}
     for num, j in (jobs or {}).items():
         days = {}
-        for kind in ("pack", "delivery"):
+        for kind in ("pack", "delivery", "moved"):
             ms = j.get(kind) if isinstance(j, dict) else None
             if isinstance(ms, dict) and ms.get("status") in ("done", "scheduled"):
                 day = _as_date(ms.get("date"))
@@ -167,7 +172,7 @@ def faim_snapshot(files, today=None, sit=None):
     start = _months_ago(today, WINDOW_MONTHS)
 
     moves, no_date, upcoming, older = [], [], [], 0
-    by_key = {"pack": 0, "delivery": 0, "sit_pack": 0, "sit_delivery": 0}
+    by_key = {"pack": 0, "delivery": 0, "sit_pack": 0, "sit_delivery": 0, "sit_truck": 0}
     for f in files or []:
         if not isinstance(f, dict):
             continue
@@ -176,14 +181,18 @@ def faim_snapshot(files, today=None, sit=None):
         pack = _as_date(f.get("pack"))
         delivered = _as_date(f.get("delivery"))
         from_sit = sit.get(number.upper()) or {}
+        job_type = str(f.get("job_type") or "").strip().upper()
+        is_import = job_type.startswith("IM")
         sit_pack = None if pack else from_sit.get("pack")
         sit_delivered = None if delivered else from_sit.get("delivery")
+        sit_truck = from_sit.get("moved")
         # Key date: pack/collect, else delivery (an import handled at destination
         # only has no pack date; its delivery date is the one that counts). Moveware
         # first; SIT's plan fills a date Moveware doesn't have.
-        collect = pack or sit_pack or delivered or sit_delivered
+        collect = pack or sit_pack or delivered or sit_delivered or sit_truck
         key_src = ("pack" if pack else "sit_pack" if sit_pack
-                   else "delivery" if delivered else "sit_delivery")
+                   else "delivery" if delivered else "sit_delivery" if sit_delivered
+                   else "sit_truck")
         row = {
             "number": number,
             "status": status,
@@ -196,7 +205,10 @@ def faim_snapshot(files, today=None, sit=None):
             "survey": bool(_as_date(f.get("survey"))),
             "delivery": bool(delivered),
             "sit_delivery": sit_delivered if (sit_delivered and sit_delivered <= today) else None,
-            "type": str(f.get("job_type") or "").strip().upper(),
+            "pack": bool(pack),
+            "pack_due": not is_import,          # an import has no pack date to log
+            "sit_pack": sit_pack if (sit_pack and sit_pack <= today) else None,
+            "type": job_type,
         }
         if collect is None:
             no_date.append(row)
@@ -225,6 +237,9 @@ def faim_snapshot(files, today=None, sit=None):
          "v": _pct(sum(1 for r in survey_known if r["survey"]), len(survey_known))},
         {"name": "Delivery date logged",
          "v": _pct(sum(1 for r in audited if r["delivery"]), n)},
+        {"name": "Pack date logged",
+         "v": _pct(sum(1 for r in audited if r["pack_due"] and r["pack"]),
+                   sum(1 for r in audited if r["pack_due"]))},
     ]
     by_criterion.sort(key=lambda x: -x["v"])
 
@@ -242,6 +257,9 @@ def faim_snapshot(files, today=None, sit=None):
         gaps = []
         if r["survey_read"] and not r["survey"]:
             gaps.append("survey")
+        if r["pack_due"] and not r["pack"]:
+            gaps.append("pack date" + (f" (SIT plan: packed {r['sit_pack'].isoformat()})"
+                                       if r["sit_pack"] else ""))
         if not r["delivery"]:
             gaps.append("delivery date" + (f" (SIT plan: delivered {r['sit_delivery'].isoformat()})"
                                            if r["sit_delivery"] else ""))
@@ -328,7 +346,9 @@ def _sit():
                       "error": st.get("error"), "files_with_a_day": len(days),
                       "workbooks": len(books),
                       "plans_from": books[0].get("date") if books else None,
-                      "plans_to": books[-1].get("date") if books else None}
+                      "plans_to": books[-1].get("date") if books else None,
+                      "plan_months": [b.get("date", "")[:7] for b in books],
+                      "coverage": st.get("coverage") or {}}
     except Exception as e:
         return {}, {"loaded": False, "loading": False, "error": str(e)[:200]}
 
@@ -369,8 +389,9 @@ def faim_metrics():
         "pack/collect date or, where a file has none (an import), by delivery date "
         f"({sel['moves_by_key_date']['delivery'] + sel['moves_by_key_date']['sit_delivery']} "
         "files). Where Moveware has no date, SIT's trip plan supplies it "
-        f"({sel['moves_by_key_date']['sit_pack'] + sel['moves_by_key_date']['sit_delivery']} "
-        "files). Lost and cancelled files "
+        f"({sel['moves_by_key_date']['sit_pack'] + sel['moves_by_key_date']['sit_delivery'] + sel['moves_by_key_date']['sit_truck']} "
+        f"files; the plan on hand covers {', '.join(sit_info.get('plan_months') or []) or 'no months yet'}). "
+        "Lost and cancelled files "
         f"({', '.join(sel['lost_statuses'])}) are left out. Not counted: "
         f"{sel['no_key_date']} files with neither date on record ({no_date_booked} "
         f"of them booked) and {sel['key_date_ahead']} dated ahead."

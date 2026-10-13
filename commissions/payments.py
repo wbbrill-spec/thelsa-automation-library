@@ -34,7 +34,7 @@ import math
 import re
 import unicodedata
 import warnings
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 
 import openpyxl
 
@@ -45,6 +45,18 @@ CURRENCIES = {"DOLAR AMERICANO": "USD", "PESO MEXICANO": "MXN"}
 COMPANIES = {"THELSA RELOCATION SOLUTIONS": "TRS", "THELSA MOBILITY SOLUTIONS": "TMS",
              "THELSA MOBILITY SOLUTIONS LLC": "TMS LLC", "THELSA INTERNATIONAL MOVING": "TIM"}
 _SERIES = re.compile(r"^[A-Z][A-Z\-]{0,11}$")
+
+
+def _company(text) -> str:
+    """Which of Thelsa's companies a line of the report's heading names, '' when
+    none. CONTPAQ may print the name with or without its legal form (S.A. de
+    C.V., LLC), so the name is matched by how it starts."""
+    words = re.sub(r"[^A-Z0-9 ]", " ", _plain(text)).split()
+    name = " ".join(words)
+    for known, key in sorted(COMPANIES.items(), key=lambda kv: -len(kv[0])):
+        if name == known or name.startswith(known + " "):
+            return "TMS LLC" if key == "TMS" and "LLC" in name[len(known):].replace(" ", "") else key
+    return ""
 
 
 class PaymentReportError(ValueError):
@@ -74,6 +86,7 @@ class Payment:
     paid: float          # amount applied to the invoice, IVA included
     sheet: int           # 1-based
     row: int
+    company: str = ""    # the key of the company whose report shows the payment (info["key"])
 
 
 def _date(v):
@@ -120,7 +133,7 @@ def load(src) -> tuple:
         if not ccy:
             _bad(f"sheet {si}: the currency of the report is not US dollars or Mexican pesos",
                  f"hoja {si}: la moneda del reporte no es dólar americano ni peso mexicano")
-        company = next((COMPANIES[_plain(c)] for c in top if _plain(c) in COMPANIES), "")
+        company = next((k for k in (_company(c) for c in top) if k), "")
         # The company is printed at the end of the first line. One this module does not know is kept as a short
         # fingerprint of its name, not as text: enough to tell two companies' reports apart.
         first = [c for c in rows[0] if isinstance(c, str) and c.strip()] if rows else []
@@ -168,7 +181,7 @@ def load(src) -> tuple:
     if not info["currencies"]:
         _bad("this does not look like CONTPAQ's report of customer payments (Análisis de IVA de pagos de clientes)",
              "no parece el reporte de pagos de clientes de CONTPAQ (Análisis de IVA de pagos de clientes)")
-    return out, info
+    return [replace(p, company=info["key"]) for p in out], info
 
 
 def to_records(payments, info) -> dict:
@@ -191,6 +204,8 @@ def from_records(doc) -> tuple:
         ok = ok and bool(re.fullmatch(r"\?|co-[0-9a-f]{8}|[A-Z ]{2,8}", info["key"]))
         ok = ok and all(v == "" or dt.date.fromisoformat(v) for v in (info["from"], info["to"]))
         ok = ok and set(info["currencies"]) <= {"USD", "MXN"}
+        ok = ok and all(p.company in ("", info["key"]) for p in ps)
+        ps = [replace(p, company=info["key"]) for p in ps]         # reports stored before the company was kept
     except Exception:
         ok = False
     if not ok:
@@ -198,11 +213,21 @@ def from_records(doc) -> tuple:
     return ps, info
 
 
-def collected(payments) -> dict:
+# The company a payments report is of, as Finance's margin report names the company that issued an invoice.
+ISSUER = {"TRS": "TRS", "TMS": "TMS SA", "TMS LLC": "TMS LLC", "TIM": "TIM"}
+
+
+def collected(payments, issuer: str | None = None) -> dict:
     """{(series, folio): {"MXN": pesos paid, "USD": dollars paid, "last": ISO
-    date of the latest payment, "n": payments}} — everything applied to each invoice."""
+    date of the latest payment, "n": payments}} — everything applied to each
+    invoice. With `issuer` (the company that issued the invoices, as Finance
+    names it), payments shown in another company's report are left out: two
+    companies can use the same series and folio. A report of a company not
+    known by name is not left out."""
     out = {}
     for p in payments or []:
+        if issuer and ISSUER.get(p.company, issuer) != issuer:
+            continue
         d = out.setdefault((p.series, p.folio), {"MXN": 0.0, "USD": 0.0, "last": "", "n": 0})
         d[p.currency] += p.paid
         d["last"] = max(d["last"], p.date)

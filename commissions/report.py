@@ -19,6 +19,7 @@ from collections import defaultdict
 
 from . import engine as E
 from . import finance as F
+from . import invoices as I
 from . import payments as P
 from . import quotes as Q
 
@@ -151,27 +152,83 @@ def clean_payments(payments) -> dict:
     return out
 
 
-COLLECTED_AT = 0.98      # an invoice counts as collected in full from this share of Finance's own amount
+# When an invoice counts as collected in full. The payments reports show what the customer paid, IVA included.
+COLLECTED_AT = 0.98          # of Finance's amount without IVA, when the invoice's own total is not known
+COLLECTED_OF_TOTAL = 0.96    # of the invoice total when it carries IVA: a customer that withholds IVA on freight
+#                              pays 1.12 of the subtotal against a total of 1.16, which is 96.6 % of it
+COLLECTED_OTHER_CCY = 0.92   # when the payment was made in the other currency, at the rate of the payment day
+# Finance's margin report sometimes writes the type where the invoice series goes.
+LABEL_SERIES = ("CORP-PART", "AGENTE", "DIPLOM", "?")
 
 
-def invoice_map(lines) -> dict:
+def _real(ln, finder) -> tuple:
+    """(series, company) of the invoice a line of the margin report shows,
+    looked up in the invoice register by folio and date when the line carries
+    a type instead of a series, or no company."""
+    series, company = ln.series, ln.entity
+    found = finder.get((ln.folio, ln.date.isoformat()), {}) if finder else {}
+    if series in found:
+        return series, company or found[series]["company"]
+    if series in LABEL_SERIES and found:
+        c = {k: v for k, v in found.items() if not company or not v["company"] or v["company"] == company} or found
+        c = {k: v for k, v in c.items() if ln.job in v["jobs"]} or c
+        if len(c) == 1:
+            (series, d), = c.items()
+            company = company or d["company"]
+    return series, company
+
+
+def invoice_map(lines, register=None) -> dict:
     """{(month, job): [invoice, …]} — the invoices behind each commission line:
-    the positive sales of Corporate and Private jobs, by invoice month. An
-    invoice cancelled by a credit note of the same job is left out: it will
-    never be collected. invoice = {"series", "folio", "pesos", "dollars", "date"}."""
-    cancelled = {}
-    for ln in lines:
-        if ln.type == F.IN_SCOPE and ln.is_sale and ln.net_sales_mxn < 0 and ln.cancels:
-            cancelled.setdefault(ln.job, set()).add(ln.cancels)
+    the positive sales of Corporate and Private jobs, by invoice month.
+
+    invoice = {"series", "folio", "company", "date", "pesos", "dollars": this
+    line's part of it, "whole_pesos", "whole_dollars": the invoice over every
+    file it bills (dollars None when not all known), "due": the part of the
+    invoice left after credit notes that name it, "total", "subtotal",
+    "currency", "rate": the invoice as issued, from the register (None, None, '',
+    None without it)}.
+
+    An invoice taken back in full, by credit notes that name it or by a
+    negative line under its own number, is left out: it will never be
+    collected. `register` = invoices.Invoice rows of Finance's invoice register."""
+    finder = I.real_series(register) if register else {}
+    numbers = I.by_number(register) if register else {}
+    sales = [(ln,) + _real(ln, finder) for ln in lines if ln.is_sale and ln.date]
+    issuers = {}                    # two companies can use the same series and folio: an invoice is told by all three
+    for ln, series, company in sales:
+        issuers.setdefault((series, ln.folio), set()).add(company)
+
+    def number(series, folio, company):
+        known = issuers.get((series, folio), set()) - {""}
+        return series, folio, company or (next(iter(known)) if len(known) == 1 else "")
+    whole, credit = {}, {}
+    for ln, series, company in sales:
+        w = whole.setdefault(number(series, ln.folio, company), {"pesos": 0.0, "dollars": 0.0, "all": True})
+        w["pesos"] += ln.net_sales_mxn
+        w["dollars"] += ln.usd_equiv or 0.0
+        w["all"] = w["all"] and bool(ln.usd_equiv)
+        if ln.net_sales_mxn < 0 and ln.cancels:
+            a, _, b = ln.cancels.rpartition(" ")
+            credit[number(a, b, company)] = credit.get(number(a, b, company), 0.0) - ln.net_sales_mxn
     out = {}
-    for ln in lines:
-        if ln.type != F.IN_SCOPE or not ln.is_sale or ln.net_sales_mxn <= 0 or not ln.date:
+    for ln, series, company in sales:
+        if ln.type != F.IN_SCOPE or ln.net_sales_mxn <= 0:
             continue
-        if f"{ln.series} {ln.folio}" in cancelled.get(ln.job, ()):
-            continue
+        key = number(series, ln.folio, company)
+        w, company = whole[key], key[2]
+        due = 1.0 - credit.get(key, 0.0) / w["pesos"] if w["pesos"] >= F.NET_ZERO else 0.0
+        if due < 0.01:
+            continue                                             # taken back
+        same = numbers.get((series, ln.folio), [])
+        reg = next((d for d in same if d["company"] == company), same[0] if len(same) == 1 and not company else None)
+        known = bool(reg) and reg["total"] > 0 and reg["currency"] in ("USD", "MXN")
         out.setdefault((ln.date.strftime("%Y-%m"), ln.job), []).append({
-            "series": ln.series, "folio": ln.folio, "pesos": ln.net_sales_mxn,
-            "dollars": ln.usd_equiv if (ln.usd_equiv and ln.usd_equiv > 0) else None, "date": ln.date.isoformat()})
+            "series": series, "folio": ln.folio, "company": company, "date": ln.date.isoformat(),
+            "pesos": ln.net_sales_mxn, "dollars": ln.usd_equiv if (ln.usd_equiv and ln.usd_equiv > 0) else None,
+            "whole_pesos": w["pesos"], "whole_dollars": w["dollars"] if (w["all"] and w["dollars"] > 0) else None,
+            "due": min(due, 1.0), "total": reg["total"] if known else None, "subtotal": reg["subtotal"] if known else None,
+            "currency": reg["currency"] if known else "", "rate": reg["rate"] if known else None})
     return out
 
 
@@ -186,44 +243,99 @@ def payment_reach(sources) -> dict:
     return out
 
 
-def auto_payments(lines, payments, reach=None) -> tuple:
+def company_reach(sources) -> dict:
+    """{company: last day covered} from [(payments, info), …], for the reports
+    of companies known by name, named as Finance's margin report names the
+    company that issued an invoice. A company's report covers every invoice
+    that company issued up to the report's last day."""
+    out = {}
+    for _payments, info in sources or []:
+        issuer = P.ISSUER.get(info.get("key", ""))
+        if issuer:
+            out[issuer] = max(out.get(issuer, ""), info.get("to", "") or "")
+    return out
+
+
+def _reached(i, c) -> tuple:
+    """(share of what is due on the invoice that the payments reach, the share
+    from which it counts as collected in full)."""
+    usd, mxn, due = c["USD"], c["MXN"], i["due"]
+    if i["total"]:
+        with_tax = i["total"] > (i["subtotal"] or 0.0) * 1.01
+        at = COLLECTED_OF_TOTAL if with_tax else COLLECTED_AT
+        if i["currency"] == "USD":
+            need = max(i["total"], i["whole_dollars"] or 0.0) * due
+            rate = i["rate"] or (i["whole_pesos"] / i["whole_dollars"] if i["whole_dollars"] else None)
+            return usd / need + (mxn / (need * rate) if rate else 0.0), COLLECTED_OTHER_CCY if mxn > 0 else at
+        need = max(i["total"], i["whole_pesos"]) * due
+        return mxn / need + (usd * i["rate"] / need if i["rate"] else 0.0), COLLECTED_OTHER_CCY if usd > 0 else at
+    share = mxn / (i["whole_pesos"] * due) + (usd / (i["whole_dollars"] * due) if i["whole_dollars"] else 0.0)
+    return share, COLLECTED_AT
+
+
+def auto_payments(lines, payments, reach=None, register=None, companies=None) -> tuple:
     """(status, problems, summary) from Finance's payments reports.
 
     status = {(month, job): {"paid": True | False, "date": ISO of the latest
     payment or ''}} for the lines the reports can speak about. A line is Paid
     when every invoice behind it is collected in full; Pending when the reports
-    cover its invoices (`reach`: their series appears in a report, and they are
-    dated within that report's period) and at least one is not collected in
-    full. A line with an invoice the reports do not cover gets no status.
+    cover its invoices and at least one is not collected in full. A line with
+    an invoice the reports do not cover gets no status.
 
-    The reports show payments with IVA and Finance's report shows sales without
-    it, so "in full" means the payments reach COLLECTED_AT of Finance's amount,
-    in the currency each payment was made in."""
-    col = P.collected(payments)
-    reach = dict(reach) if reach is not None else {series: "" for (series, _folio) in col}
-    inv = invoice_map(lines)
+    A report covers an invoice when it is the report of the company that
+    issued it (`companies`, from company_reach) and the invoice is dated within
+    the report's period. Where the company of the invoice or of the report is
+    not known, `reach` (payment_reach) decides: the invoice's series appears in
+    a report.
+
+    The reports show payments with IVA. With the invoice register (`register`)
+    an invoice is collected in full when the payments reach its own total (see
+    COLLECTED_OF_TOTAL); without it, when they reach Finance's amount without
+    IVA (COLLECTED_AT), a weaker test. Either way the whole invoice is
+    compared, not the part of it that belongs to one file."""
+    everything = P.collected(payments)
+    by_issuer = {}
+    reach = dict(reach) if reach is not None else {series: "" for (series, _folio) in everything}
+    loose = {p.series for p in payments or [] if p.company not in P.ISSUER}     # reports of companies not known by name
+    inv = invoice_map(lines, register)
     known = {(i["series"], i["folio"]) for invs in inv.values() for i in invs}
     status, problems = {}, []
     counts = {"invoices": 0, "covered": 0, "full": 0, "part": 0, "open": 0}
+    per = {}
     for (month, job), invs in sorted(inv.items()):
         states, last = [], ""
         for i in invs:
-            counts["invoices"] += 1
-            c = col.get((i["series"], i["folio"]))
-            in_reach = i["series"] in reach and (not reach[i["series"]] or i["date"] <= reach[i["series"]])
-            counts["covered"] += bool(c) or in_reach
+            co = i["company"]
+            if companies is not None and co:
+                if co in companies:
+                    in_reach = not companies[co] or i["date"] <= companies[co]
+                else:
+                    in_reach = i["series"] in loose and (not reach.get(i["series"]) or i["date"] <= reach[i["series"]])
+                if co not in by_issuer:
+                    by_issuer[co] = P.collected(payments, co)
+                c = by_issuer[co].get((i["series"], i["folio"]))
+            else:
+                in_reach = i["series"] in reach and (not reach[i["series"]] or i["date"] <= reach[i["series"]])
+                c = everything.get((i["series"], i["folio"]))
+            tally = per.setdefault(co or "?", {"invoices": 0, "covered": 0, "full": 0, "part": 0, "open": 0})
+            for t in (counts, tally):
+                t["invoices"] += 1
+                t["covered"] += bool(c) or in_reach
             if not c:
                 states.append("open" if in_reach else "unknown")
                 counts["open"] += in_reach
+                tally["open"] += in_reach
                 continue
-            share = c["MXN"] / i["pesos"] + (c["USD"] / i["dollars"] if i["dollars"] else 0.0)
-            if share >= COLLECTED_AT:
+            share, at = _reached(i, c)
+            if share >= at:
                 states.append("full")
                 counts["full"] += 1
+                tally["full"] += 1
                 last = max(last, c["last"])
             else:
                 states.append("part")
                 counts["part"] += 1
+                tally["part"] += 1
                 problems.append({
                     "kind": "partly_collected", "job": job,
                     "detail": f"invoice {i['series']} {i['folio']} of {i['date']}: payments reach {share:.0%} of the "
@@ -234,8 +346,11 @@ def auto_payments(lines, payments, reach=None) -> tuple:
         if "unknown" in states:
             continue
         status[(month, job)] = {"paid": all(x == "full" for x in states), "date": last if all(x == "full" for x in states) else ""}
-    stray = sorted(k for k in col if k not in known)
-    summary = dict(counts, not_in_report=[f"{a} {b}" for a, b in stray], series=sorted(reach))
+    stray = sorted(k for k in everything if k not in known)
+    summary = dict(counts, not_in_report=[f"{a} {b}" for a, b in stray], series=sorted(reach),
+                   register=bool(register),
+                   companies=[dict(v, company=k, report=(k in (companies or {})), to=(companies or {}).get(k, ""))
+                              for k, v in sorted(per.items())])
     return status, problems, summary
 
 
@@ -300,7 +415,7 @@ def book_quotes(lines, removals, control, costings, s: E.Settings) -> tuple:
 
 
 def build(lines, s: E.Settings, bookings=None, quotes=None, quote_problems=(), payments=None,
-          collected=None, collected_reach=None) -> dict:
+          collected=None, collected_reach=None, register=None, collected_companies=None) -> dict:
     """`quotes` = quotes.book(...): the booked quote of each job, or None when
     the Moveware reports have not been loaded. A month's bookings are, in this
     order: the figure typed on the page; the booked quotes (when every file of
@@ -308,7 +423,10 @@ def build(lines, s: E.Settings, bookings=None, quotes=None, quote_problems=(), p
 
     `payments` = the payment status marked on the page per line (file and
     invoice month). `collected` = the payments read from Finance's payments
-    reports (payments.Payment), `collected_reach` what they cover (payment_reach).
+    reports (payments.Payment), `collected_reach` and `collected_companies` what
+    they cover (payment_reach, company_reach). `register` = Finance's invoice
+    register (invoices.Invoice), which gives each invoice its real series, its
+    company and its total.
     Commission is payable only on lines that are Paid: by a mark on the page,
     or, where there is no mark, because the reports show every invoice of the
     line collected in full."""
@@ -317,7 +435,10 @@ def build(lines, s: E.Settings, bookings=None, quotes=None, quote_problems=(), p
     pay = clean_payments(payments)
     auto, auto_problems, collection = ({}, [], None)
     if collected is not None:
-        auto, auto_problems, collection = auto_payments(lines, collected, collected_reach)
+        auto, auto_problems, collection = auto_payments(lines, collected, collected_reach, register,
+                                                        collected_companies)
+    elif register is not None:                    # no payments yet: only which company's report each invoice needs
+        auto, auto_problems, collection = auto_payments(lines, [], {}, register, {})
 
     def paid(m, job):
         if (m, job) in pay:
@@ -434,7 +555,7 @@ def build(lines, s: E.Settings, bookings=None, quotes=None, quote_problems=(), p
             "placeholder_months": [r["month"] for r in months if not r["bookings_known"]],
             "quotes_loaded": quotes is not None, "bookings_basis": s.bookings_basis,
             "paid_lines": sum(r["paid_lines"] for r in months), "pending_lines": sum(r["pending_lines"] for r in months),
-            "collection": collection,
+            "collection": collection, "register_loaded": register is not None,
             "payments_unused": sorted(f"{m}|{j}" for (m, j) in pay
                                       if not any(x.job == j for x in by_month.get(m, ()))),
             "source": {"lines": len(lines), "from": min(dates).isoformat() if dates else None,

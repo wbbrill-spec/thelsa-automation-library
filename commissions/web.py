@@ -6,6 +6,7 @@ web.py — the /commissions pages.
     /commissions/bookings   bookings per month, typed in (POST)
     /commissions/payments   payment status per line, Paid or Pending (POST)
     /commissions/upload-payments   Finance's report of customer payments, one per company (POST)
+    /commissions/upload-invoices   Finance's register of invoices issued (POST)
     /commissions/upload-removals, /commissions/upload-costing
                             the two Moveware reports that hold each file's booked quote (POST)
     /commissions/workbook   the same report as an Excel workbook, one sheet per month in Finance's own layout
@@ -38,6 +39,7 @@ from flask import (Blueprint, abort, make_response, redirect, render_template_st
 
 from . import engine as E
 from . import finance as F
+from . import invoices as I
 from . import payments as P
 from . import quotes as Q
 from . import report as R
@@ -147,16 +149,30 @@ def _collections() -> dict:
     return out
 
 
+def _register() -> dict:
+    """Finance's invoice register as stored: {"invoices": [...] | None, "info", "meta", "error": (en, es) | None}."""
+    doc, meta = store.get("invoice_register")
+    out = {"invoices": None, "info": None, "meta": meta, "error": None}
+    if doc:
+        try:
+            out["invoices"], out["info"] = I.from_records(doc.get("records") or {})
+        except I.InvoiceRegisterError:
+            out["error"] = ("The stored invoice register could not be read back. Please upload it again.",
+                            "No se pudo leer el registro de facturas guardado. Súbalo de nuevo.")
+    return out
+
+
 def _report(lines, s: E.Settings, mw=None) -> dict:
     """The report as the page and the Excel download show it: Finance's lines,
     the bookings typed in, and the booked quotes when the Removals Summary is loaded."""
     mw = mw or _moveware()
     bookings = store.get("bookings", {})[0]
     col = _collections()["sources"]
-    more = dict(payments=store.get("payments", {})[0])
+    more = dict(payments=store.get("payments", {})[0], register=_register()["invoices"])
     if col:
-        more.update(collected=[p for ps, _i, _m in col for p in ps],
-                    collected_reach=R.payment_reach([(ps, info) for ps, info, _m in col]))
+        src = [(ps, info) for ps, info, _m in col]
+        more.update(collected=[p for ps, _i, _m in col for p in ps], collected_reach=R.payment_reach(src),
+                    collected_companies=R.company_reach(src))
     if not mw["removals"]:
         return R.build(lines, s, bookings, **more)
     rem, control, _ = mw["removals"]
@@ -186,10 +202,11 @@ def commissions_home(email):
     pmeta = store.get("payments", {})[1]
     mw = _moveware()
     col = _collections()
+    reg = _register()
     rep = _report(lines, s, mw) if lines else None
     months = sorted(s.budgets)
     resp = make_response(render_template_string(
-        PAGE, rep=rep, meta=meta, error=error or mw["error"] or col["error"], mw=mw, col=col["sources"], pmeta=pmeta, msg=session.pop("commission_msg", None), csrf=_csrf(),
+        PAGE, rep=rep, meta=meta, error=error or mw["error"] or col["error"] or reg["error"], mw=mw, col=col["sources"], reg=reg, pmeta=pmeta, msg=session.pop("commission_msg", None), csrf=_csrf(),
         s=s, bookings=R.clean_bookings(bookings), bmeta=bmeta, months=months, month_label=_month_label,
         month_label_es=_month_label_es, durable=store.durable(), new_from=_month_label(R.NEW_FROM),
         new_from_es=_month_label_es(R.NEW_FROM), email=email))
@@ -294,6 +311,35 @@ def commissions_upload_payments(email):
          "Customer names and bank references in it were not kept.",
          f"Reporte de pagos cargado para {who[1]}: {len(ps):,} pagos del {info['from'] or '?'} al {info['to'] or '?'}. "
          "No se guardaron los nombres de clientes ni las referencias bancarias.")
+    return home
+
+
+@commissions_bp.route("/commissions/upload-invoices", methods=["POST"])
+@_restricted
+def commissions_upload_invoices(email):
+    """Finance's register of invoices issued. It replaces the one stored."""
+    _check_csrf()
+    home = redirect(url_for("commissions.commissions_home") + "#collected")
+    data = _uploaded()
+    if data is None:
+        return home
+    try:
+        invoices, info = I.load(io.BytesIO(data))
+    except I.InvoiceRegisterError as e:          # these messages carry no text from the workbook
+        _say(f"The invoice register was not loaded: {e}. Nothing was changed.",
+             f"El registro de facturas no se cargó: {e.es}. No se cambió nada.", bad=True)
+        return home
+    except Exception:
+        _say("The file could not be read. Nothing was changed.", "El archivo no se pudo leer. No se cambió nada.",
+             bad=True)
+        return home
+    digest = hashlib.sha256(data).hexdigest()
+    store.put("invoice_register", {"records": I.to_records(invoices), "sha256": digest}, by=email)
+    _log_upload(email, "invoice_register", len(invoices), digest)
+    _say(f"Invoice register loaded: {info['invoices']:,} invoices from {info['from']} to {info['to']}. "
+         "Customer and staff names in it were not kept.",
+         f"Registro de facturas cargado: {info['invoices']:,} facturas del {info['from']} al {info['to']}. "
+         "No se guardaron los nombres de clientes ni del personal.")
     return home
 
 
@@ -526,7 +572,7 @@ input[type=file]{font:inherit}button.go,.btn{background:var(--navy);color:#fff;b
 <ul>
 {% if rep.placeholder_months %}<li>{{ t('Bookings are not known for ' ~ rep.placeholder_months|length ~ ' month(s). Those months use the budget as a placeholder, which gives a sales reach of 0.60 (yellow cells).',
 'No se conocen las ventas contratadas de ' ~ rep.placeholder_months|length ~ ' mes(es). Esos meses usan el presupuesto como valor provisional, lo que da un alcance de ventas de 0.60 (celdas amarillas).') }}</li>{% endif %}
-{% if not rep.paid_lines %}<li>{{ t('No line is marked as paid yet, so nothing is payable.', 'Ninguna línea está marcada como pagada todavía, así que no hay nada por pagar.') }}</li>{% else %}<li>{{ rep.paid_lines }} {{ t('line(s) are paid. Only those are payable.', 'línea(s) están pagadas. Solo esas son pagaderas.') }}{% if rep.collection and rep.collection.invoices > rep.collection.covered %} {{ rep.collection.invoices - rep.collection.covered }} {{ t('invoices are of series no payments report loaded covers.', 'facturas son de series que ningún reporte de pagos cargado cubre.') }}{% endif %}</li>{% endif %}
+{% if not rep.paid_lines %}<li>{{ t('No line is marked as paid yet, so nothing is payable.', 'Ninguna línea está marcada como pagada todavía, así que no hay nada por pagar.') }}</li>{% else %}<li>{{ rep.paid_lines }} {{ t('line(s) are paid. Only those are payable.', 'línea(s) están pagadas. Solo esas son pagaderas.') }}{% if rep.collection and rep.collection.invoices > rep.collection.covered %} {{ rep.collection.invoices - rep.collection.covered }} {{ t('invoices are not covered by any payments report loaded.', 'facturas no están cubiertas por ningún reporte de pagos cargado.') }}{% endif %}</li>{% endif %}
 <li>{{ t('Costs arrive about two months after the invoice. Recent months show too much margin until their costs are posted.',
 'Los costos llegan unos dos meses después de la factura. Los meses recientes muestran margen de más hasta que se registran sus costos.') }}</li>
 <li>{{ t('January to May follow the old calculation. They are shown here on the new calculation for comparison only.',
@@ -596,7 +642,15 @@ input[type=file]{font:inherit}button.go,.btn{background:var(--navy);color:#fff;b
 <form method="post" action="/commissions/upload-payments" enctype="multipart/form-data" class="row">
 <input type="hidden" name="csrf" value="{{ csrf }}"><input type="file" name="report" accept=".xlsx" required aria-label="Payments report">
 <button type="submit" class="go">{{ t('Upload payments report', 'Subir reporte de pagos') }}</button></form>
-{% if rep and rep.collection %}{% set c = rep.collection %}<p style="margin-top:12px">{{ c.invoices }} {{ t('invoices are behind the commission lines.', 'facturas respaldan las líneas de comisión.') }} {{ c.covered }} {{ t('are covered by the reports loaded (series', 'están cubiertas por los reportes cargados (series') }} {{ c.series|join(', ') }}): {{ c.full }} {{ t('collected in full,', 'cobradas por completo,') }} {{ c.part }} {{ t('in part,', 'en parte,') }} {{ c.open }} {{ t('not collected.', 'sin cobrar.') }} {{ c.invoices - c.covered }} {{ t('are of series no report loaded covers, so their lines have no status yet.', 'son de series que ningún reporte cargado cubre, así que sus líneas aún no tienen estatus.') }}</p>
+<p style="margin-top:14px">{% if reg.invoices %}{{ t('Invoice register in use:', 'Registro de facturas en uso:') }} {{ reg.info.invoices }} {{ t('invoices from', 'facturas del') }} {{ reg.info['from'] }} {{ t('to', 'al') }} {{ reg.info['to'] }} · {{ t('uploaded', 'subido el') }} {{ reg.meta.at|cm_when }} {{ t('by', 'por') }} {{ reg.meta.by }}.{% else %}{{ t('Invoice register: not loaded yet.', 'Registro de facturas: aún no se ha cargado.') }}{% endif %}</p>
+<p class="small">{{ t('Finance\'s register of invoices issued (FACTURADO ACUMULADO YTD) gives each invoice its real series, the company that issued it and its total. With it a payment is matched to the right invoice, and an invoice counts as collected in full when the payments reach its total. Each upload replaces the one before. The workbook is read and not kept; customer and staff names in it are never stored.',
+'El registro de facturas emitidas de Finanzas (FACTURADO ACUMULADO YTD) da a cada factura su serie real, la empresa que la emitió y su total. Con él cada pago se liga a la factura correcta, y una factura cuenta como cobrada por completo cuando los pagos alcanzan su total. Cada carga sustituye a la anterior. El libro se lee y no se guarda; nunca se almacenan los nombres de clientes ni del personal.') }}</p>
+<form method="post" action="/commissions/upload-invoices" enctype="multipart/form-data" class="row">
+<input type="hidden" name="csrf" value="{{ csrf }}"><input type="file" name="report" accept=".xlsx" required aria-label="Invoice register">
+<button type="submit" class="go">{{ t('Upload invoice register', 'Subir registro de facturas') }}</button></form>
+{% if rep and rep.collection %}{% set c = rep.collection %}<p style="margin-top:14px">{{ c.invoices }} {{ t('invoices are behind the commission lines.', 'facturas respaldan las líneas de comisión.') }} {{ c.covered }} {{ t('are covered by the payments reports loaded:', 'están cubiertas por los reportes de pagos cargados:') }} {{ c.full }} {{ t('collected in full,', 'cobradas por completo,') }} {{ c.part }} {{ t('in part,', 'en parte,') }} {{ c.open }} {{ t('not collected.', 'sin cobrar.') }} {{ c.invoices - c.covered }} {{ t('are not covered by any report loaded, so their lines have no status yet.', 'no están cubiertas por ningún reporte cargado, así que sus líneas aún no tienen estatus.') }}</p>
+<div class="scroll"><table><tr><th class="l">{{ t('Company that issued the invoice', 'Empresa que emitió la factura') }}</th><th>{{ t('Invoices', 'Facturas') }}</th><th class="l">{{ t('Payments report', 'Reporte de pagos') }}</th><th>{{ t('Collected in full', 'Cobradas por completo') }}</th><th>{{ t('In part', 'En parte') }}</th><th>{{ t('Not collected', 'Sin cobrar') }}</th><th>{{ t('Not covered', 'Sin cubrir') }}</th></tr>
+{% for k in c.companies %}<tr><td class="l">{{ k.company if k.company != '?' else t('Not known', 'No conocida') }}</td><td>{{ k.invoices }}</td><td class="l">{% if k.report %}{{ t('loaded, to', 'cargado, al') }} {{ k.to or '?' }}{% else %}<span class="tag w">{{ t('not loaded', 'no cargado') }}</span>{% endif %}</td><td>{{ k.full }}</td><td>{{ k.part }}</td><td>{{ k.open }}</td><td>{{ k.invoices - k.covered }}</td></tr>{% endfor %}</table></div>
 {% if c.not_in_report %}<p class="small">{{ c.not_in_report|length }} {{ t('paid invoices are not behind any Corporate or Private line of Finance\'s report and are ignored:', 'facturas pagadas no respaldan ninguna línea corporativa o particular del reporte de Finanzas y se ignoran:') }} {{ c.not_in_report|join(', ') }}.</p>{% endif %}{% endif %}</div>
 
 <div class="card" id="moveware"><h2>{{ t('Booked quotes from Moveware', 'Cotizaciones contratadas de Moveware') }}</h2>

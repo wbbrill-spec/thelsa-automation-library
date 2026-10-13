@@ -550,10 +550,17 @@ def test_payments_report_makes_collected_lines_payable(client, tmp_path):
     login(client)
     upload(client, xlsx(tmp_path))
     assert b"No payments report loaded yet." in client.get("/commissions").data
-    data, _ = _payfile(tmp_path, [TP.pay(46150, 10, 203000.0, series="CORP"), TP.pay(46151, 77777, 5.0, series="CORP")])
+    rows = [TP.pay(46150, 10, 203000.0, series="CORP"), TP.pay(46151, 77777, 5.0, series="CORP")]
+    # the invoice is of TMS LLC: the same payment in another company's report is of another invoice
+    other, _ = _payfile(tmp_path, rows, name="trs.xlsx")
+    _send(client, "/commissions/upload-payments", other)
+    assert "Payments report loaded for TRS" in client.get("/commissions").data.decode()
+    assert {(x["month"], x["job"]): x["payment"] for x in _lines_of(client)["lines"]}[("2026-05", "110001")] == ""
+    store.put("payment_reports", {"sources": {}}, by=LUPITA)
+    data, _ = _payfile(tmp_path, rows, company="THELSA MOBILITY SOLUTIONS LLC")
     assert _send(client, "/commissions/upload-payments", data).status_code == 302
     page = client.get("/commissions").data.decode()
-    assert "Payments report loaded for TRS: 2 payments from 2026-01-01 to 2026-09-30." in page
+    assert "Payments report loaded for TMS LLC: 2 payments from 2026-01-01 to 2026-09-30." in page
     assert "Customer names and bank references in it were not kept." in page and "CORP 77777" in page
     rep = _lines_of(client)
     by = {(x["month"], x["job"]): x for x in rep["lines"]}
@@ -571,16 +578,16 @@ def test_payments_report_makes_collected_lines_payable(client, tmp_path):
     client.post("/commissions/payments", data={"csrf": "tok", "p_2026-05_110001": "Pending"})
     assert {(x["month"], x["job"]): x["payment"] for x in _lines_of(client)["lines"]}[("2026-05", "110001")] == "Pending"
     # a new report for the same company replaces the old one; another company's report is kept beside it
-    data2, _ = _payfile(tmp_path, [TP.pay(46150, 10, 1.0, series="CORP")], name="b.xlsx")
+    data2, _ = _payfile(tmp_path, [TP.pay(46150, 10, 1.0, series="CORP")], name="b.xlsx", company="Thelsa Mobility Solutions L.L.C.")
     _send(client, "/commissions/upload-payments", data2)
-    data3, _ = _payfile(tmp_path, [TP.pay(46150, 11, 116000.0, series="PART")], name="c.xlsx", company="THELSA MOBILITY SOLUTIONS")
+    data3, _ = _payfile(tmp_path, [TP.pay(46150, 11, 116000.0, series="PART")], name="c.xlsx", company="Thelsa Mobility Solutions, S.A. de C.V.")
     _send(client, "/commissions/upload-payments", data3)
     data4, _ = _payfile(tmp_path, [TP.pay(46150, 12, 5.0, series="PART")], name="d.xlsx", company="Some Other Company")
     _send(client, "/commissions/upload-payments", data4)
     assert "a company this page does not know by name" in client.get("/commissions").data.decode()
     doc = store.get("payment_reports")[0]
-    assert len(doc["sources"]) == 3 and {"TMS", "TRS"} < set(doc["sources"]) and "Some Other" not in json.dumps(doc)
-    assert len(doc["sources"]["TRS"]["records"]["payments"]) == 1
+    assert len(doc["sources"]) == 3 and {"TMS", "TMS LLC"} < set(doc["sources"]) and "Some Other" not in json.dumps(doc)
+    assert len(doc["sources"]["TMS LLC"]["records"]["payments"]) == 1
     assert len(W._collections()["sources"]) == 3
     assert W._collections()["error"] is None
 
@@ -599,3 +606,44 @@ def test_payments_upload_needs_the_token_and_refuses_other_files(client, tmp_pat
     upload(client, xlsx(tmp_path))
     r = client.get("/commissions")
     assert r.status_code == 200 and b"stored payments report could not be read back" in r.data
+
+
+# ── Finance's invoice register ───────────────────────────────────────────────
+def test_invoice_register_is_loaded_without_names_and_shows_whose_reports_are_needed(client, tmp_path):
+    import test_commissions_invoices as TI
+    import test_commissions_payments as TP
+    login(client)
+    upload(client, xlsx(tmp_path))
+    assert "Invoice register: not loaded yet." in client.get("/commissions").data.decode()
+    data = open(TI.register(tmp_path, [TI.inv("LLC", "CORP", 110001, TI.D(2026, 5, 4), "CORP", 10, 10000.0, 10000.0, ccy="USD"),
+                                       TI.inv("SA", "PART", 110002, TI.D(2026, 5, 9), "PART", 11, 116000.0, 100000.0)]), "rb").read()
+    assert _send(client, "/commissions/upload-invoices", data).status_code == 302
+    page = client.get("/commissions").data.decode()
+    assert "Invoice register loaded: 2 invoices from 2026-05-04 to 2026-05-09." in page and "Invoice register in use:" in page
+    assert "Company that issued the invoice" in page and "not loaded" in page          # no payments report yet
+    with store.engine().connect() as c:
+        everything = " ".join(str(v) for row_ in c.exec_driver_sql("select * from commission_docs") for v in row_)
+    for name in TI.NAMES + tuple(NAMES):
+        assert name not in everything and name not in page
+    # 110002's invoice carries IVA: paid without it, the line is not collected; in full, it is
+    for amount, want in ((100000.0, "Pending"), (116000.0, "Paid")):
+        pay_, _ = _payfile(tmp_path, [TP.pay(46160, 11, amount, series="PART")], company="Thelsa Mobility Solutions SA de CV")
+        _send(client, "/commissions/upload-payments", pay_)
+        assert {x["job"]: x["payment"] for x in _lines_of(client)["lines"] if x["month"] == "2026-05"}["110002"] == want
+    assert client.get("/commissions").status_code == 200
+
+
+def test_invoice_register_upload_needs_the_token_and_refuses_other_files(client, tmp_path):
+    login(client)
+    assert _send(client, "/commissions/upload-invoices", xlsx(tmp_path), csrf="nope").status_code == 400
+    assert _send(client, "/commissions/upload-invoices", xlsx(tmp_path)).status_code == 302          # Finance's margin report
+    assert "does not look like Finance" in client.get("/commissions").data.decode()
+    assert _send(client, "/commissions/upload-invoices", b"junk").status_code == 302
+    assert "Nothing was changed" in client.get("/commissions").data.decode() and store.get("invoice_register")[0] is None
+    store.put("invoice_register", {"records": {"invoices": [{"x": 1}]}}, by=LUPITA)
+    upload(client, xlsx(tmp_path))
+    r = client.get("/commissions")
+    assert r.status_code == 200 and "The stored invoice register could not be read back" in r.data.decode()
+    client.get("/logout", follow_redirects=False)
+    login(client, OUTSIDER)
+    assert _send(client, "/commissions/upload-invoices", b"x").status_code == 404

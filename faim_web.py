@@ -33,6 +33,7 @@ import calendar
 import datetime as dt
 import functools
 import os
+import re
 
 from flask import (
     Blueprint,
@@ -352,6 +353,46 @@ def faim_raw():
     except Exception as e:
         out["error"] = str(e)
     return jsonify(out)
+
+
+_CHECK_PATH = re.compile(r"^/jobs/\d+(/[A-Za-z]+(/\d+)?)*$")
+_DATE_LIKE = re.compile(r"^\d{4}-\d{2}-\d{2}")
+_CODE_LIKE = re.compile(r"^[A-Z0-9]{1,6}$")
+
+
+def _shape(v, depth=0):
+    """The shape of a Moveware payload without its contents: field names, dates,
+    numbers and short upper-case codes are shown; every other text is reduced to
+    its length, so no name, address, email or note leaves the server."""
+    if isinstance(v, dict):
+        if depth >= 6:
+            return f"object({len(v)} fields)"
+        return {k: _shape(x, depth + 1) for k, x in v.items()}
+    if isinstance(v, list):
+        return {"count": len(v), "first": [_shape(x, depth + 1) for x in v[:3]]}
+    if isinstance(v, str):
+        if not v:
+            return ""
+        if _DATE_LIKE.match(v) or _CODE_LIKE.match(v):
+            return v
+        return f"text({len(v)})"
+    return v
+
+
+@faim_bp.route("/faim/check")
+@_login_required
+def faim_check():
+    """Debug: the shape of one Moveware job path, e.g. ?path=/jobs/110926/activities
+    — field names, dates and codes only (see _shape). Read-only (GET)."""
+    path = (request.args.get("path") or "").strip()
+    if not _CHECK_PATH.match(path):
+        return jsonify({"error": "pass ?path=/jobs/<id> or /jobs/<id>/<resource>"}), 400
+    if not _HAVE_MW or not mw_live.have_creds():
+        return jsonify({"have_creds": False})
+    try:
+        return jsonify({"path": path, "shape": _shape(mw_live._get_timed(path, 12))})
+    except Exception as e:
+        return jsonify({"path": path, "error": str(e)[:200]})
 
 
 @faim_bp.route("/faim/rebuild", methods=["GET", "POST"])

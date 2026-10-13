@@ -388,3 +388,28 @@ def test_probe_keeps_going_while_each_band_finds_something(monkeypatch):
     assert mw_live._probe_ahead() == 3
     assert "525" in mw_live._AUDIT["files"] and "545" not in mw_live._AUDIT["files"]
     assert mw_live._AUDIT["ahead_read"] == 40                  # 3 bands with a hit + 1 empty
+
+
+# ── /faim/check shows a payload's shape, never its contents ─────────────────────
+def test_check_route_hides_text_and_keeps_dates_and_codes(client):
+    client.fake._get_timed = lambda path, t: {"activities": [
+        {"type": "DEL", "date": "2026-06-01", "description": "Deliver to Jane Doe, 5 Elm St",
+         "contact": {"email": "jane@example.com"}, "hours": 2.5}]}
+    r = client.get("/faim/check?path=/jobs/110926/activities")
+    body = r.get_data(as_text=True)
+    first = r.get_json()["shape"]["activities"]["first"][0]
+    assert first["type"] == "DEL" and first["date"] == "2026-06-01" and first["hours"] == 2.5
+    assert first["description"] == "text(29)" and first["contact"]["email"] == "text(16)"
+    assert "Jane" not in body and "example.com" not in body
+
+
+@pytest.mark.parametrize("path", ["", "/suppliers", "/jobs/1/x?name=a", "/jobs/abc",
+                                  "https://evil.example/jobs/1"])
+def test_check_route_only_opens_job_paths(client, path):
+    assert client.get("/faim/check", query_string={"path": path}).status_code == 400
+
+
+def test_check_route_needs_a_signed_in_user(client):
+    with client.session_transaction() as s:
+        s.clear()
+    assert client.get("/faim/check?path=/jobs/1").status_code == 302

@@ -2,29 +2,34 @@
 faim_web.py — FAIM Move-File Quality Audit dashboard for the Thelsa
 Automation Library.
 
-Login-gated /faim route (reuses the library's Google session — no second
-sign-in), matching audit_web.py / campaigns.py.
+Login-gated /faim route (reuses the library's session — no second sign-in),
+matching audit_web.py / campaigns.py.
 
-This build is an EVIDENCE-COVERAGE view, not a compliance score. On live data,
-most FAIM criteria depend on Moveware fields/sub-resources that are still being
-confirmed (documents, invoices, signed inventories) — so instead of scoring
-compliance we honestly report what evidence IS vs ISN'T on record per file:
-survey, insurance, priced quote, delivery date. Full compliance scoring resumes
-once the field mapping + document/invoice endpoints are confirmed with Moveware.
+This is an EVIDENCE-COVERAGE view, not a compliance score: it reports which
+evidence IS and ISN'T on record per move file (survey, delivery date,
+coordinator). Full FAIM scoring waits on the Moveware document/claims endpoints.
 
-DATA ACCESS (V2 / MoveConnect REST)
------------------------------------
-/faim/api/metrics reads the EXACT file total from the `x-total-count` header
-(count=true) and evidence coverage from the most recent /jobs page. V2 paginates
-by `page=` (1-indexed; it ignores `offset=`) and its list items are rich
-(activityDates, roles, status), so no per-file sub-calls are needed. /faim/raw
-exposes the true total + a raw V2 list item for validation.
+WHERE THE FILES COME FROM
+-------------------------
+/faim does not read Moveware itself. It reads the file book that mw_live's
+background auditor already keeps for the Move-File Audit page (/audit): the
+whole list walked, hidden lost/cancelled jobs read by id, saved to disk and
+refreshed every few hours. One reader, one book, so /faim and /audit agree.
+
+WHICH FILES COUNT (Moveware Integration Guide, Part B)
+------------------------------------------------------
+- One row per removal: a sequel (412042A) is its own move (rule 1).
+- A file is a move in the window when its collect date falls in the last
+  12 months, bounded at today (rules 2-3). Thelsa logs the collect date as
+  uplift or, more often, pack; mw_live's `pack` field is "uplift, else pack".
+- No collect date = not a move yet: left out and counted separately (§3).
+- Lost and cancelled files (status L, C) are left out of the audit and counted
+  (rule 9). The codes are config: FAIM_LOST_STATUSES.
 """
+import calendar
 import datetime as dt
 import functools
-import json
-import time
-import urllib.request
+import os
 
 from flask import (
     Blueprint,
@@ -43,12 +48,6 @@ try:
 except Exception:
     _HAVE_MW = False
 
-try:
-    import mw_ingest
-    _HAVE_INGEST = True
-except Exception:
-    _HAVE_INGEST = False
-
 
 def _login_required(f):
     @functools.wraps(f)
@@ -60,235 +59,205 @@ def _login_required(f):
     return wrapped
 
 
-# ── Sample fallback (shown only when creds/data are unavailable) ─────────────────
+# ── Config (client-specific values live in the environment, not in the rules) ────
+def _env_codes(name, default):
+    vals = [x.strip().upper() for x in os.environ.get(name, "").split(",") if x.strip()]
+    return set(vals or default)
+
+
+LOST_STATUSES = _env_codes("FAIM_LOST_STATUSES", ["L", "C"])
+BOOKED_STATUS = "W"
+WINDOW_MONTHS = int(os.environ.get("FAIM_WINDOW_MONTHS", "12"))
+PASS_BAR = 80
+_MAX_GAP_ROWS = 15
+
+_EMPTY_TILES = {"moves": 0, "lost": 0, "audited": 0, "booked": 0, "pending": 0,
+                "missingSurvey": 0}
+
+# Shown only when Moveware credentials are not set on the host.
 SAMPLE_METRICS = {
-    "generatedNote": "SAMPLE data — live Moveware pull inactive (no creds or no data returned).",
-    "window": "sample",
-    "passBar": 80,
-    "tiles": {"removals": 0, "active": 0, "missingSurvey": 0, "unassigned": 0},
+    "generatedNote": "No live data \u2014 Moveware credentials are not set on this host.",
+    "window": "not connected",
+    "passBar": PASS_BAR,
+    "tiles": dict(_EMPTY_TILES),
     "byCoordinator": [],
-    "byCriterion": [
-        {"name": "Survey on file", "v": 0},
-        {"name": "Delivery date logged", "v": 0},
-        {"name": "Collect date logged", "v": 0},
-        {"name": "Coordinator assigned", "v": 0},
-    ],
+    "byCriterion": [],
     "breaches": [],
 }
-
-
-# ── Config ──────────────────────────────────────────────────────────────────────
-_LIVE_CACHE = {"at": 0.0, "data": None}
-_LIVE_TTL = 600            # seconds
-_PAGE_BUDGET = 12.0        # seconds spent paging the light /jobs feed
-_ENRICH_BUDGET = 14.0      # seconds spent deep-checking sampled files
-_MAX_PAGES = 60
-_SAMPLE_N = 20             # deep-checked files per load (kept small for speed)
 
 
 def _pct(p, a):
     return round(100 * p / a) if a else 0
 
 
-def _mw_get(path_or_url, timeout=6):
-    """GET a Moveware path OR a full _links URL."""
-    if str(path_or_url).startswith("http"):
-        url = path_or_url
-    else:
-        url = mw_live.BASE_URL + "/" + str(path_or_url).lstrip("/")
-    req = urllib.request.Request(url, headers=mw_live._headers(), method="GET")
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
-
-
-def _g(d, *keys, default=""):
-    if not isinstance(d, dict):
-        return default
-    for k in keys:
-        if d.get(k) not in (None, ""):
-            return d[k]
-    return default
-
-
-def _num(v):
-    try:
-        return float(str(v).replace(",", "").replace("$", "").strip() or 0)
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def _has(v):
-    return bool(str(v or "").strip()) and str(v).strip() not in ("0", "0.00")
-
-
-def _next_link(payload):
-    """Return the pagination 'next' href from a Moveware _links block, if any."""
-    if not isinstance(payload, dict):
-        return None
-    links = payload.get("_links") or {}
-    candidates = [links.get("next")]
-    pages = links.get("pages")
-    if isinstance(pages, dict):
-        candidates.append(pages.get("next"))
-    for c in candidates:
-        if isinstance(c, dict) and c.get("href"):
-            return c["href"]
-        if isinstance(c, str) and c.startswith("http"):
-            return c
+def _as_date(v):
+    """A date from mw_live's record: a date object, or an ISO string, or None."""
+    if isinstance(v, dt.datetime):
+        return v.date()
+    if isinstance(v, dt.date):
+        return v
+    if isinstance(v, str) and len(v) >= 10:
+        try:
+            return dt.date.fromisoformat(v[:10])
+        except ValueError:
+            return None
     return None
 
 
-def _mw_total(query):
-    """GET a /jobs query with count=true; return x-total-count as int (or None)."""
-    url = mw_live.BASE_URL + "/" + str(query).lstrip("/")
-    req = urllib.request.Request(url, headers=mw_live._headers(), method="GET")
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        raw = resp.headers.get("x-total-count")
-    try:
-        return int(raw) if raw is not None else None
-    except (TypeError, ValueError):
-        return None
+def _months_ago(day, months):
+    y, m = day.year, day.month - months
+    while m <= 0:
+        m += 12
+        y -= 1
+    return dt.date(y, m, min(day.day, calendar.monthrange(y, m)[1]))
 
 
-def _fetch_recent_jobs():
-    """V2: exact file total via x-total-count, plus the MOST RECENT files.
+def _base_number(num):
+    """Collapse a sequel to its base file number: 412042W -> 412042."""
+    s = str(num or "")
+    i = len(s)
+    while i > 0 and s[i - 1].isalpha():
+        i -= 1
+    return s[:i] or s
 
-    The /jobs feed is oldest-first and paginates by `page=` (1-indexed; V2 honours
-    `page=` and ignores `offset=`), so the last page holds the newest files. V2 list
-    items are rich (activityDates, roles, status), so no per-file calls are needed.
-    Returns (recent_jobs, total).
+
+def _status_label(code):
+    if code == BOOKED_STATUS:
+        return "Booked"
+    return {"P": "Pending", "": "No status"}.get(code, code)
+
+
+# ── The audit selection + evidence coverage ──────────────────────────────────────
+def faim_snapshot(files, today=None):
+    """Pick the legitimate move files out of the file book and measure evidence.
+
+    `files` are mw_live's mapped records. Returns {"metrics": ..., "selection": ...}
+    where `selection` is counts only (no names) for /faim/raw.
     """
-    total = None
-    try:
-        total = _mw_total("/jobs?limit=1&page=1&count=true")
-    except Exception:
-        total = None
+    today = today or dt.date.today()
+    start = _months_ago(today, WINDOW_MONTHS)
 
-    last_page = 1
-    if total and total > _SAMPLE_N:
-        last_page = (total + _SAMPLE_N - 1) // _SAMPLE_N
-
-    recent = []
-    for pg in (last_page, 1):
-        try:
-            payload = _mw_get(f"/jobs?limit={_SAMPLE_N}&page={pg}", timeout=10)
-        except Exception:
-            payload = None
-        recent = list(payload.get("jobs") or []) if isinstance(payload, dict) else []
-        if recent:
-            break
-
-    if total is None:
-        total = len(recent)
-    return recent[-_SAMPLE_N:], total
-
-
-def _faim_live_metrics():
-    """Build a live evidence-coverage snapshot, or None to fall back to sample."""
-    if not _HAVE_MW or not mw_live.have_creds():
-        return None
-    now = time.time()
-    if _LIVE_CACHE["data"] is not None and now - _LIVE_CACHE["at"] < _LIVE_TTL:
-        return _LIVE_CACHE["data"]
-
-    try:
-        jobs, total = _fetch_recent_jobs()
-    except Exception:
-        return None
-    if not jobs:
-        return None
-
-    def _coord(j):
-        ent = ((j.get("roles") or {}).get("coordinator") or {}).get("entity") or {}
-        nm = _g(ent, "name")
-        if not nm:
-            nm = (str(_g(ent, "firstName")) + " " + str(_g(ent, "lastName"))).strip()
-        return nm or "Unassigned"
-
-    sample = []
-    for j in jobs:
-        if not isinstance(j, dict):
+    moves, no_date, upcoming, older = [], [], [], 0
+    for f in files or []:
+        if not isinstance(f, dict):
             continue
-        ad = j.get("activityDates") or {}
-        status = str(_g(j, "status")).upper()
-        coord = _coord(j)
-        sample.append({
-            "file": str(_g(j, "number", "id") or ""),
-            "cust": _g(j, "name") or str(_g(j, "number", "id") or ""),
-            "coord": coord,
+        status = str(f.get("status") or "").strip().upper()
+        collect = _as_date(f.get("pack"))
+        row = {
+            "number": str(f.get("job") or f.get("number") or f.get("job_id") or ""),
             "status": status,
-            "active": status not in ("C", "X", "Z"),
-            "survey": _has(_g((ad.get("survey") or {}), "date")),
-            "delivery": _has(_g((ad.get("delivery") or {}), "date"))
-            or _has(_g((ad.get("estimatedDelivery") or {}), "date")),
-            "coordinator": coord != "Unassigned",
-        })
+            "collect": collect,
+            "coord": str(f.get("coordinator") or "").strip() or "Unassigned",
+            "survey_read": "survey" in f,
+            "survey": bool(_as_date(f.get("survey"))),
+            "delivery": bool(_as_date(f.get("delivery"))),
+        }
+        if collect is None:
+            no_date.append(row)
+        elif collect > today:
+            upcoming.append(row)
+        elif collect < start:
+            older += 1
+        else:
+            moves.append(row)
 
-    s = len(sample)
-    cov = {
-        "Survey on file": sum(1 for x in sample if x["survey"]),
-        "Delivery date logged": sum(1 for x in sample if x["delivery"]),
-        "Coordinator assigned": sum(1 for x in sample if x["coordinator"]),
-    }
-    by_criterion = sorted(
-        [{"name": k, "v": _pct(v, s)} for k, v in cov.items()],
-        key=lambda x: -x["v"],
-    )
+    lost = [r for r in moves if r["status"] in LOST_STATUSES]
+    audited = [r for r in moves if r["status"] not in LOST_STATUSES]
+    booked = [r for r in audited if r["status"] == BOOKED_STATUS]
+    n = len(audited)
 
-    coord_tot, coord_cov = {}, {}
-    for x in sample:
-        c = x["coord"]
-        coord_tot[c] = coord_tot.get(c, 0) + 1
-        if x["survey"] and x["delivery"]:
-            coord_cov[c] = coord_cov.get(c, 0) + 1
+    # Survey dates arrive as the auditor re-reads each file; a record read before
+    # that carries no survey field at all, which is "not read", not "missing".
+    survey_known = [r for r in audited if r["survey_read"]]
+    survey_pending = n - len(survey_known)
+
+    by_criterion = [
+        {"name": "Coordinator assigned",
+         "v": _pct(sum(1 for r in audited if r["coord"] != "Unassigned"), n)},
+        {"name": "Survey on file",
+         "v": _pct(sum(1 for r in survey_known if r["survey"]), len(survey_known))},
+        {"name": "Delivery date logged",
+         "v": _pct(sum(1 for r in audited if r["delivery"]), n)},
+    ]
+    by_criterion.sort(key=lambda x: -x["v"])
+
+    ctot, ccov = {}, {}
+    for r in audited:
+        ctot[r["coord"]] = ctot.get(r["coord"], 0) + 1
+        if r["survey"] and r["delivery"]:
+            ccov[r["coord"]] = ccov.get(r["coord"], 0) + 1
     by_coordinator = sorted(
-        [{"name": c, "v": _pct(coord_cov.get(c, 0), coord_tot[c])} for c in coord_tot],
-        key=lambda x: -x["v"],
-    )
+        [{"name": c, "v": _pct(ccov.get(c, 0), ctot[c]), "files": ctot[c]} for c in ctot],
+        key=lambda x: (-x["v"], -x["files"], x["name"]))
 
-    missing = []
-    for x in sample:
+    gaps_rows = []
+    for r in audited:
         gaps = []
-        if not x["survey"]:
+        if r["survey_read"] and not r["survey"]:
             gaps.append("survey")
-        if not x["delivery"]:
+        if not r["delivery"]:
             gaps.append("delivery date")
-        if not x["coordinator"]:
+        if r["coord"] == "Unassigned":
             gaps.append("coordinator")
         if gaps:
-            missing.append({
-                "file": x["file"], "cust": x["cust"],
-                "rule": "Missing: " + ", ".join(gaps), "coord": x["coord"],
+            gaps_rows.append({
+                "file": r["number"], "cust": _status_label(r["status"]),
+                "rule": "Missing: " + ", ".join(gaps), "coord": r["coord"],
                 "days": f"{len(gaps)} gap{'s' if len(gaps) != 1 else ''}",
-                "sev": "crit" if len(gaps) >= 2 else "warn", "_age": len(gaps),
+                "sev": "crit" if len(gaps) >= 2 else "warn",
+                "_k": (-len(gaps), r["status"] != BOOKED_STATUS, -r["collect"].toordinal()),
             })
-    missing.sort(key=lambda m: -m["_age"])
-    for m in missing:
-        m.pop("_age", None)
+    gaps_rows.sort(key=lambda b: b["_k"])
+    for b in gaps_rows:
+        b.pop("_k", None)
 
-    active_n = sum(1 for x in sample if x["active"])
-    result = {
-        "generatedNote": (
-            f"LIVE Moveware — company 64000 · {total} files total (via x-total-count) "
-            f"· evidence read on the {s} most recent files, straight from the /jobs "
-            "payload (survey, delivery, coordinator). Priced-quote, insurance and document "
-            "criteria are the next phase (options/invoices + the documents endpoint)."
-        ),
-        "window": "live coverage snapshot",
-        "passBar": 80,
-        "tiles": {
-            "totalFiles": total,
-            "activeFiles": active_n,
-            "sampleFiles": s,
-            "missingInsurance": sum(1 for x in sample if not x["survey"]),
+    def _by_status(rows):
+        out = {}
+        for r in rows:
+            k = r["status"] or "(blank)"
+            out[k] = out.get(k, 0) + 1
+        return out
+
+    return {
+        "metrics": {
+            "tiles": {
+                "moves": len(moves),
+                "lost": len(lost),
+                "audited": n,
+                "booked": len(booked),
+                "pending": n - len(booked),
+                "missingSurvey": sum(1 for r in survey_known if not r["survey"]),
+            },
+            "byCriterion": by_criterion,
+            "byCoordinator": by_coordinator,
+            "breaches": gaps_rows[:_MAX_GAP_ROWS],
+            "gapFiles": len(gaps_rows),
         },
-        "byCoordinator": by_coordinator,
-        "byCriterion": by_criterion,
-        "breaches": missing[:12],
+        "selection": {
+            "window_start": start.isoformat(),
+            "window_end": today.isoformat(),
+            "lost_statuses": sorted(LOST_STATUSES),
+            "book_records": len(files or []),
+            "moves_in_window": len(moves),
+            "move_files_in_window": len({_base_number(r["number"]) for r in moves}),
+            "moves_by_status": _by_status(moves),
+            "lost_or_cancelled": len(lost),
+            "audited": n,
+            "booked": len(booked),
+            "no_collect_date": len(no_date),
+            "no_collect_date_by_status": _by_status(no_date),
+            "collect_date_ahead": len(upcoming),
+            "collect_date_ahead_by_status": _by_status(upcoming),
+            "collected_before_window": older,
+            "survey_not_read_yet": survey_pending,
+        },
     }
-    _LIVE_CACHE["data"] = result
-    _LIVE_CACHE["at"] = time.time()
-    return result
+
+
+def _book():
+    """(files, progress) from the shared background auditor; starts it if needed."""
+    mw_live.ensure_auditor()
+    return mw_live.audited_in_window(), mw_live.audit_progress()
 
 
 # ── Routes ──────────────────────────────────────────────────────────────────────
@@ -301,55 +270,65 @@ def faim():
 @faim_bp.route("/faim/api/metrics")
 @_login_required
 def faim_metrics():
+    viewer = session.get("user_email", "")
+    if not _HAVE_MW or not mw_live.have_creds():
+        return jsonify(dict(SAMPLE_METRICS, viewer=viewer))
     try:
-        build = mw_ingest.load_build() if _HAVE_INGEST else None
+        files, prog = _book()
     except Exception:
-        build = None
-    if build and build.get("metrics", {}).get("tiles"):
-        m = build["metrics"]
-        diag = build.get("diagnostics", {})
-        complete = bool(diag.get("complete"))
-        note = (
-            "LIVE Moveware \u2014 Thelsa (port 64000) \u00b7 "
-            f"{diag.get('removals_in_window', 0)} removals in the window "
-            f"({diag.get('files_in_window', 0)} files) \u00b7 built "
-            f"{build.get('generatedAt', '')[:16].replace('T', ' ')}Z. "
-            + str(diag.get("coverage_note", ""))
-        )
-        data = {
-            "generatedNote": note,
-            "window": "live build" + ("" if complete else " \u00b7 partial"),
-            "passBar": 80,
-            "tiles": m["tiles"],
-            "byCoordinator": m.get("byCoordinator", []),
-            "byCriterion": m.get("byCriterion", []),
-            "breaches": m.get("breaches", []),
-        }
-    else:
-        try:
-            if _HAVE_INGEST and _HAVE_MW and mw_live.have_creds():
-                mw_ingest.trigger_build()
-        except Exception:
-            pass
-        data = dict(SAMPLE_METRICS)
-        data["generatedNote"] = (
-            "Building the live view from Moveware now \u2014 the first build reads "
-            "the book in the background (a few minutes). Use Refresh shortly."
-        )
-    data["viewer"] = session.get("user_email", "")
-    return jsonify(data)
+        files, prog = [], {}
+    if not files:
+        return jsonify({
+            "generatedNote": "Reading the file book from Moveware \u2014 this takes a "
+                             "few minutes after a restart. Reload shortly.",
+            "window": "loading", "passBar": PASS_BAR, "tiles": dict(_EMPTY_TILES),
+            "byCoordinator": [], "byCriterion": [], "breaches": [], "viewer": viewer,
+        })
+
+    snap = faim_snapshot(files)
+    sel, m = snap["selection"], snap["metrics"]
+    complete = bool(prog.get("complete"))
+    no_date_booked = sel["no_collect_date_by_status"].get(BOOKED_STATUS, 0)
+    note = (
+        "LIVE Moveware \u2014 Thelsa (port 64000), the same file book as the Move-File "
+        f"Audit page. Moves with a pack/collect date from {sel['window_start']} to "
+        f"{sel['window_end']}; lost and cancelled files ({', '.join(sel['lost_statuses'])}) "
+        f"are left out. Not counted: {sel['no_collect_date']} files with no collect date "
+        f"yet ({no_date_booked} of them booked) and {sel['collect_date_ahead']} with a "
+        "collect date still ahead."
+    )
+    if not complete:
+        note += (" The book is still being read from Moveware "
+                 f"({prog.get('audited_total', 0)} of {prog.get('total') or '?'} files so "
+                 "far), so these counts can still rise.")
+    if sel["survey_not_read_yet"]:
+        note += (f" Survey dates are still being read for {sel['survey_not_read_yet']} "
+                 "files; the survey figures cover the rest.")
+    return jsonify({
+        "generatedNote": note,
+        "window": "live" + ("" if complete else " \u00b7 book still loading"),
+        "passBar": PASS_BAR,
+        "tiles": m["tiles"],
+        "byCoordinator": m["byCoordinator"],
+        "byCriterion": m["byCriterion"],
+        "breaches": m["breaches"],
+        "gapFiles": m["gapFiles"],
+        "viewer": viewer,
+    })
 
 
 @faim_bp.route("/faim/raw")
 @_login_required
 def faim_raw():
-    """Debug: the current build's diagnostics + builder status."""
-    out = {"have_ingest": _HAVE_INGEST}
+    """Debug: how the audited files were picked, and the state of the file book.
+    Counts, dates and status codes only \u2014 no names."""
+    if not _HAVE_MW or not mw_live.have_creds():
+        return jsonify({"have_creds": False})
+    out = {"have_creds": True}
     try:
-        out["status"] = mw_ingest.build_status() if _HAVE_INGEST else None
-        b = mw_ingest.load_build() if _HAVE_INGEST else None
-        out["generatedAt"] = b.get("generatedAt") if b else None
-        out["diagnostics"] = b.get("diagnostics") if b else None
+        files, prog = _book()
+        out["book"] = prog
+        out["selection"] = faim_snapshot(files)["selection"]
     except Exception as e:
         out["error"] = str(e)
     return jsonify(out)
@@ -358,13 +337,16 @@ def faim_raw():
 @faim_bp.route("/faim/rebuild", methods=["GET", "POST"])
 @_login_required
 def faim_rebuild():
-    """Kick off a background build of the live book."""
-    if not _HAVE_INGEST:
-        return jsonify({"error": "mw_ingest not importable"})
+    """Re-read the in-window files from Moveware now (background)."""
+    if not _HAVE_MW or not mw_live.have_creds():
+        return jsonify({"started": False, "reason": "not connected to Moveware"})
     try:
-        return jsonify(mw_ingest.trigger_build())
+        mw_live.ensure_auditor()
+        started = mw_live.force_refresh()
+        return jsonify({"started": bool(started),
+                        "reason": "" if started else "already running"})
     except Exception as e:
-        return jsonify({"error": str(e)})
+        return jsonify({"started": False, "reason": str(e)})
 
 
 DASHBOARD_HTML = r"""<!DOCTYPE html>
@@ -445,12 +427,12 @@ td.num{font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
 <div class="cols2">
 <div class="card">
 <h2>Coverage by coordinator</h2>
-<p class="note">Share of each coordinator's recent files with both survey and delivery date on record. Line = 80% target.</p>
+<p class="note">Share of each coordinator's audited files with both survey and delivery date on record. Line = 80% target.</p>
 <div class="bars" id="byCoord"></div>
 </div>
 <div class="card">
 <h2>Evidence coverage by type</h2>
-<p class="note">Share of checked files that carry each piece of evidence in Moveware. Line = 80% target.</p>
+<p class="note">Share of audited files that carry each piece of evidence in Moveware. Line = 80% target.</p>
 <div class="bars" id="byCrit"></div>
 </div>
 </div>
@@ -462,9 +444,9 @@ td.num{font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
 
 <div class="card">
 <h2>Files missing evidence</h2>
-<p class="note">What's not on record for each checked file. (Alerting + auto-drafted follow-ups are a later phase — this view only reports gaps, it does not send anything yet.)</p>
+<p class="note">What's not on record, worst first<span id="gapCount"></span>. (Alerting + auto-drafted follow-ups are a later phase — this view only reports gaps, it does not send anything yet.)</p>
 <table>
-<thead><tr><th>File</th><th>Customer</th><th>Missing evidence</th><th>Coordinator</th><th class="num">Gaps</th><th>Status</th></tr></thead>
+<thead><tr><th>File</th><th>Moveware status</th><th>Missing evidence</th><th>Coordinator</th><th class="num">Gaps</th><th>Severity</th></tr></thead>
 <tbody id="breaches"></tbody>
 </table>
 </div>
@@ -473,10 +455,10 @@ td.num{font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
 </div>
 <script>
 function toggleTheme(){const r=document.documentElement;r.setAttribute('data-theme',r.getAttribute('data-theme')==='dark'?'light':'dark');}
-async function rebuild(){const b=document.getElementById('sampleBanner');b.style.display='block';b.textContent='● Starting a fresh build from Moveware…';try{const r=await fetch('/faim/rebuild',{method:'POST'});const j=await r.json();b.textContent='● '+(j.started?'Build started — reading the live book in the background; use Refresh / reload in a few minutes.':(j.reason?('Build '+j.reason):'Build status received.'));}catch(e){b.textContent='● Could not start the build.';}}
+async function rebuild(){const b=document.getElementById('sampleBanner');b.style.display='block';b.textContent='● Asking Moveware for the latest…';try{const r=await fetch('/faim/rebuild',{method:'POST'});const j=await r.json();b.textContent='● '+(j.started?'Re-reading the last 12 months from Moveware in the background — reload this page in a few minutes.':('Refresh not started: '+(j.reason||'unknown reason')+'.'));}catch(e){b.textContent='● Could not start the refresh.';}}
 const THR=80;
 function bars(el,data){
-if(!data||!data.length){el.innerHTML='<p style="font-size:12px;color:var(--muted);margin:0">No files checked this load.</p>';return;}
+if(!data||!data.length){el.innerHTML='<p style="font-size:12px;color:var(--muted);margin:0">No files to show yet.</p>';return;}
 el.innerHTML=data.map(d=>{const under=d.v<THR;
 return `<div class="row"><span class="name" title="${d.name}">${d.name}</span>
 <div class="track"><div class="fill ${under?'under':''}" style="width:${d.v}%"></div>
@@ -492,18 +474,19 @@ document.getElementById('viewer').textContent=d.viewer||'';
 if(d.generatedNote){const b=document.getElementById('sampleBanner');b.style.display='block';b.textContent='● '+d.generatedNote;}
 const t=d.tiles||{};
 document.getElementById('tiles').innerHTML=`
-<div class="tile"><p class="label">Removals in window</p><p class="val">${t.removals}</p><p class="sub2">last 12 months, by collect date</p></div>
-<div class="tile"><p class="label">Active (not lost/cancelled)</p><p class="val">${t.active}</p><p class="sub2">eligible for FAIM audit</p></div>
-<div class="tile"><p class="label">Missing survey</p><p class="val">${t.missingSurvey}</p><p class="sub2">of active files</p></div>
-<div class="tile"><p class="label">Unassigned coordinator</p><p class="val">${t.unassigned}</p><p class="sub2">of active files</p></div>`;
+<div class="tile"><p class="label">Moves in the window</p><p class="val">${t.moves}</p><p class="sub2">collected in the last 12 months, any status</p></div>
+<div class="tile"><p class="label">Lost or cancelled</p><p class="val">${t.lost}</p><p class="sub2">left out of the audit</p></div>
+<div class="tile"><p class="label">Files audited</p><p class="val">${t.audited}</p><p class="sub2">${t.booked} booked · ${t.pending} not marked booked</p></div>
+<div class="tile"><p class="label">Missing survey</p><p class="val">${t.missingSurvey}</p><p class="sub2">of audited files</p></div>`;
 bars(document.getElementById('byCoord'),d.byCoordinator||[]);
 bars(document.getElementById('byCrit'),d.byCriterion||[]);
 const tb=document.getElementById('breaches');
+document.getElementById('gapCount').textContent=d.gapFiles?` — showing ${(d.breaches||[]).length} of ${d.gapFiles} files with a gap`:'';
 const rows=(d.breaches||[]);
 tb.innerHTML=rows.length?rows.map(b=>`
 <tr><td class="num">${b.file}</td><td>${b.cust}</td><td>${b.rule}</td><td>${b.coord}</td>
-<td class="num">${b.days}</td><td><span class="pill ${b.sev}">${b.sev==='crit'?'● Several gaps':'▲ Minor gaps'}</span></td></tr>`).join(''):'<tr><td colspan="6" style="color:var(--muted)">No gaps in the checked sample.</td></tr>';
-document.getElementById('foot').textContent='Evidence coverage is read live from Moveware; a file counts as covered only when the evidence is actually on record. Full FAIM compliance scoring (deadlines, documents, signed inventories) resumes once the remaining Moveware endpoints and field mapping are confirmed.';
+<td class="num">${b.days}</td><td><span class="pill ${b.sev}">${b.sev==='crit'?'● Several gaps':'▲ Minor gaps'}</span></td></tr>`).join(''):'<tr><td colspan="6" style="color:var(--muted)">No gaps on the audited files.</td></tr>';
+document.getElementById('foot').textContent='Evidence coverage is read from Moveware; a file counts as covered only when the evidence is actually on record. Full FAIM compliance scoring (deadlines, documents, signed inventories) resumes once the remaining Moveware endpoints and field mapping are confirmed.';
 }
 load();
 </script>

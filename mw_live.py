@@ -850,6 +850,7 @@ def _map_job(job: dict, prefetched: dict | None = None) -> dict | None:
         "pack": pack,
         "delivery": delivery,
         "created": created,
+        "survey": survey,             # Survey date — detail only (guide §3); FAIM evidence
         "booked": _adate("booked"),   # Date Won — detail only (guide §3); commission sales reach
         # How Moveware itself classes the job, for telling Corporate, Private, agent and
         # diplomatic work apart. Codes and yes/no only — never the account's name.

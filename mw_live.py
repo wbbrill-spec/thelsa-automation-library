@@ -552,6 +552,20 @@ def _role_entity_type(roles_obj, name: str) -> str:
     return t if isinstance(t, str) and len(t) <= 20 and t.replace(" ", "").replace("-", "").isalpha() else ""
 
 
+def _role_person(role) -> str:
+    """Name of the person on a V2 role record. V2 puts the staff member on
+    role.entity (firstName/lastName); the role's own name fields are blank."""
+    if not isinstance(role, dict):
+        return ""
+    ent = role.get("entity") if isinstance(role.get("entity"), dict) else {}
+    for src in (ent, role):
+        nm = (f"{_first(src, 'firstName', default='') or ''} "
+              f"{_first(src, 'lastName', default='') or ''}").strip()
+        if nm:
+            return nm
+    return ""
+
+
 def _map_job(job: dict, prefetched: dict | None = None) -> dict | None:
     # `prefetched` is the GET /jobs/{id} detail if the caller already has it
     # (the gap-fill reads the detail to decide tenant vs foreign, then passes it
@@ -644,8 +658,8 @@ def _map_job(job: dict, prefetched: dict | None = None) -> dict | None:
     # handler's @thelsa.com address is attached to another role (e.g. originClient);
     # the client's own email is external (never @thelsa.com), so the @thelsa.com
     # scan addresses the file to the real handler instead of "Unassigned".
+    role_rows = []
     if not coordinator_email:
-        role_rows = []
         if isinstance(roles_obj, dict):
             role_rows += [v for v in roles_obj.values() if isinstance(v, dict)]
         try:
@@ -686,6 +700,24 @@ def _map_job(job: dict, prefetched: dict | None = None) -> dict | None:
         _local = coordinator_email.split("@")[0]
         _parts = [p for p in re.split(r"[._\-]+", _local) if p]
         coordinator = " ".join(p.capitalize() for p in _parts) if _parts else coordinator_email
+
+    # Who Moveware itself names as running the move (guide §6): the coordinator
+    # role, else the move manager, read from role.entity; when the detail's roles
+    # block is empty, from the /roles list fetched above. Kept apart from
+    # `coordinator`/`coordinator_email` (which address alerts) so those are unchanged.
+    mw_coordinator = ""
+    for _rk in ("coordinator", "moveManager"):
+        mw_coordinator = _role_person(_first(roles_obj, _rk, default={}) or {})
+        if not mw_coordinator:
+            for r in role_rows:
+                if (_code_text(_first(r, "type", default="")) or "").lower() == _rk.lower():
+                    mw_coordinator = _role_person(r)
+                    if mw_coordinator:
+                        break
+        if mw_coordinator:
+            break
+    if mw_coordinator and client and mw_coordinator.lower() == client.strip().lower():
+        mw_coordinator = ""
 
     # Options → accepted-option sell + sell charge lines (quote scope). Only the
     # charge-line sub-calls are gated by AUDIT_DEEP_LINES (they add calls/file);
@@ -846,6 +878,7 @@ def _map_job(job: dict, prefetched: dict | None = None) -> dict | None:
         "ins": ins,
         "coordinator": coordinator,
         "coordinator_email": coordinator_email,
+        "mw_coordinator": mw_coordinator,   # Moveware's coordinator / move manager name
         "agent": None,
         "pack": pack,
         "delivery": delivery,

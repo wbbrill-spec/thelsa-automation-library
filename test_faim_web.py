@@ -197,3 +197,65 @@ def test_refresh_button_asks_the_shared_reader_once(client):
     assert client.post("/faim/rebuild").get_json() == {"started": True, "reason": ""}
     assert client.post("/faim/rebuild").get_json() == {"started": False,
                                                        "reason": "already running"}
+
+
+# ── What the shared reader (mw_live) records for /faim ──────────────────────────
+import mw_live
+
+
+def _map(monkeypatch, job, roles_list=None):
+    def fake_get(path):
+        if path == f"/jobs/{job['id']}":
+            return job
+        if path.endswith("/roles"):
+            return {"roles": roles_list or []}
+        return {}
+    monkeypatch.setattr(mw_live, "_get", fake_get)
+    return mw_live._map_job({"id": str(job["id"])})
+
+
+def _role(first="", last="", email="", **more):
+    """A V2 role as Moveware sends it: the person sits on role.entity."""
+    return dict({"firstName": "", "lastName": "", "email": "",
+                 "entity": {"firstName": first, "lastName": last, "email": email}}, **more)
+
+
+def test_survey_date_is_recorded(monkeypatch):
+    m = _map(monkeypatch, {"id": 1, "status": "W", "activityDates": {
+        "survey": {"date": "2026-04-02"}, "uplift": {"date": "2026-05-01"}}})
+    assert m["survey"] == dt.date(2026, 4, 2) and m["pack"] == dt.date(2026, 5, 1)
+
+
+def test_moveware_coordinator_is_read_from_the_role_entity(monkeypatch):
+    m = _map(monkeypatch, {"id": 2, "status": "W", "name": "Doe/Jane", "roles": {
+        "coordinator": _role("Itzel", "Urbina", "itzel@thelsa.com"),
+        "moveManager": _role("Other", "Person")}})
+    assert m["mw_coordinator"] == "Itzel Urbina"
+    # the fields the audit page and its alerts use are left exactly as they were
+    assert m["coordinator"] == "" and m["coordinator_email"] == ""
+
+
+def test_move_manager_is_used_when_no_coordinator(monkeypatch):
+    m = _map(monkeypatch, {"id": 3, "status": "W", "roles": {
+        "coordinator": _role(), "moveManager": _role("Ana", "Sanchez")}})
+    assert m["mw_coordinator"] == "Ana Sanchez"
+
+
+def test_empty_roles_block_falls_back_to_the_roles_list(monkeypatch):
+    m = _map(monkeypatch, {"id": 4, "status": "W", "roles": {}},
+             roles_list=[_role("Jane", "Doe", type="originClient"),
+                         _role("Dulce", "Araujo", type="coordinator")])
+    assert m["mw_coordinator"] == "Dulce Araujo"
+
+
+def test_no_coordinator_on_the_file_stays_blank(monkeypatch):
+    m = _map(monkeypatch, {"id": 5, "status": "P", "roles": {"coordinator": _role()}})
+    assert m["mw_coordinator"] == ""
+
+
+def test_faim_prefers_the_moveware_coordinator_over_the_alert_name():
+    out = snap([rec("1", pack=dt.date(2026, 5, 1), coordinator="", mw_coordinator="Itzel Urbina"),
+                rec("2", pack=dt.date(2026, 5, 1), coordinator="Old Name", mw_coordinator=""),
+                rec("3", pack=dt.date(2026, 5, 1), coordinator="Old Name")])
+    names = sorted(c["name"] for c in out["metrics"]["byCoordinator"])
+    assert names == ["Itzel Urbina", "Old Name", "Unassigned"]

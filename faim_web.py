@@ -147,7 +147,10 @@ def faim_snapshot(files, today=None):
             "number": str(f.get("job") or f.get("number") or f.get("job_id") or ""),
             "status": status,
             "collect": collect,
-            "coord": str(f.get("coordinator") or "").strip() or "Unassigned",
+            # Moveware's own coordinator / move manager; a record read before that
+            # field existed falls back to the name the audit page uses.
+            "coord": str((f.get("mw_coordinator") if "mw_coordinator" in f
+                          else f.get("coordinator")) or "").strip() or "Unassigned",
             "survey_read": "survey" in f,
             "survey": bool(_as_date(f.get("survey"))),
             "delivery": bool(_as_date(f.get("delivery"))),

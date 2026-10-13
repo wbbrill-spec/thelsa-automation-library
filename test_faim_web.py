@@ -4,6 +4,7 @@ It never calls Moveware itself: the files come from mw_live's background auditor
 (the same book /audit uses).
 """
 import datetime as dt
+import re
 import types
 
 import pytest
@@ -291,8 +292,9 @@ def test_job_type_code_is_recorded(monkeypatch):
 def _book_with(monkeypatch, files):
     monkeypatch.setattr(mw_live, "_feed_total", lambda: 1)
     monkeypatch.setattr(mw_live, "_get_timed", lambda url, to: {"jobs": []})
-    for k, v in {"files": dict(files), "total": 1, "cycles": 0,
-                 "kept_on_failed_read": 0}.items():
+    for k, v in {"files": dict(files), "old_ids": set(), "foreign_ids": set(), "total": 1,
+                 "cycles": 0, "errors": 0, "kept_on_failed_read": 0, "ahead_read": 0,
+                 "ahead_kept": 0}.items():
         monkeypatch.setitem(mw_live._AUDIT, k, v)        # restored after the test
 
 
@@ -345,3 +347,44 @@ def test_a_failed_read_is_marked_hollow(monkeypatch):
     monkeypatch.setattr(mw_live, "_get", lambda path: (_ for _ in ()).throw(TimeoutError()))
     m = mw_live._map_job({"id": "444"})
     assert m["detail_ok"] is False and m["status"] == ""
+
+
+# ── New jobs above the highest id in the book ───────────────────────────────────
+def _moveware_with(monkeypatch, existing_ids):
+    def fake_get(path):
+        m = re.fullmatch(r"/jobs/(\d+)", path)
+        if m:
+            if int(m.group(1)) in existing_ids:
+                return {"id": int(m.group(1)), "status": "W",
+                        "activityDates": {"pack": {"date": dt.date.today().isoformat()}}}
+            raise OSError("HTTP 404")
+        return {}
+    monkeypatch.setattr(mw_live, "_get", fake_get)
+
+
+def test_refresh_finds_new_jobs_above_the_highest_known_id(monkeypatch):
+    _book_with(monkeypatch, {"500": {"job": "500", "status": "W", "detail_ok": True}})
+    _moveware_with(monkeypatch, {500, 503, 510})
+    mw_live._refresh_recent()
+    assert {"500", "503", "510"} <= set(mw_live._AUDIT["files"])
+    assert mw_live._AUDIT["files"]["510"]["status"] == "W"
+    p = mw_live.audit_progress()
+    assert p["ahead_kept"] == 2 and p["highest_id"] == 510
+
+
+def test_ids_that_are_not_jobs_yet_are_not_remembered_as_foreign(monkeypatch):
+    _book_with(monkeypatch, {"500": {"job": "500", "status": "W", "detail_ok": True}})
+    _moveware_with(monkeypatch, {500})
+    assert mw_live._probe_ahead() == 0
+    assert mw_live._AUDIT["foreign_ids"] == set()
+    assert set(mw_live._AUDIT["files"]) == {"500"}
+
+
+def test_probe_keeps_going_while_each_band_finds_something(monkeypatch):
+    monkeypatch.setattr(mw_live, "_GAP_AHEAD", 10)
+    monkeypatch.setattr(mw_live, "_GAP_AHEAD_ROUNDS", 5)
+    _book_with(monkeypatch, {"500": {"job": "500", "status": "W", "detail_ok": True}})
+    _moveware_with(monkeypatch, {500, 505, 515, 525, 545})     # 545 is past an empty band
+    assert mw_live._probe_ahead() == 3
+    assert "525" in mw_live._AUDIT["files"] and "545" not in mw_live._AUDIT["files"]
+    assert mw_live._AUDIT["ahead_read"] == 40                  # 3 bands with a hit + 1 empty

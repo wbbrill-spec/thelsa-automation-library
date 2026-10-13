@@ -1015,6 +1015,7 @@ _AUDIT = {
     "gapfill_done": False,
     "gap_read": 0, "gap_kept": 0, "gap_foreign": 0,
     "kept_on_failed_read": 0,   # re-reads that failed and left the earlier record in place
+    "ahead_read": 0, "ahead_kept": 0,   # ids opened above the highest known id / jobs found
 }
 _AUDIT_LOCK = threading.Lock()
 _AUDIT_THREAD = None
@@ -1041,6 +1042,13 @@ _GAPFILL = os.environ.get("AUDIT_GAPFILL", "1") == "1"
 _GAP_SPAN = int(os.environ.get("AUDIT_GAP_SPAN", "4000") or 4000)   # ids below max to probe
 _GAP_CHUNK = int(os.environ.get("AUDIT_GAP_CHUNK", "60") or 60)     # ids per cycle (gentle on the beta)
 _GAP_WORKERS = min(_AUDIT_WORKERS, 8)   # Dave: "don't hammer it" — cap gap concurrency
+# The band above stops at the highest id already in the book, so a brand-new job
+# the list hides was never found (measured 13 Oct 2026: 111181/111182/111188,
+# booked and packed, were absent while the book's highest id was 111178). Each
+# refresh therefore also opens the ids just ABOVE the highest known one (guide
+# §5.1 step 2), a band at a time for as long as a band finds something.
+_GAP_AHEAD = int(os.environ.get("AUDIT_GAP_AHEAD", "60") or 60)          # ids per band
+_GAP_AHEAD_ROUNDS = int(os.environ.get("AUDIT_GAP_AHEAD_ROUNDS", "5") or 5)
 
 
 def _safe_map(job):
@@ -1438,6 +1446,35 @@ def _keep_earlier(jid: str, m: dict) -> bool:
     return False
 
 
+def _probe_ahead() -> int:
+    """Open the ids just above the highest id in the book and keep the real jobs.
+    An id that isn't a job yet is NOT remembered as foreign: it may be created
+    tomorrow. Returns how many jobs were found."""
+    with _AUDIT_LOCK:
+        known = {int(k) for k in list(_AUDIT["files"]) + list(_AUDIT["old_ids"])
+                 if str(k).isdigit()}
+    if not known:
+        return 0
+    start, found = max(known) + 1, 0
+    for _round in range(max(1, _GAP_AHEAD_ROUNDS)):
+        band = list(range(start, start + _GAP_AHEAD))
+        with ThreadPoolExecutor(max_workers=_GAP_WORKERS) as ex:
+            results = dict(zip(band, ex.map(_map_gap, band)))
+        hits = 0
+        with _AUDIT_LOCK:
+            for i, (st, m) in results.items():
+                if st == "kept" and m:
+                    _AUDIT["files"][str(i)] = _trim_historical(m) if _is_out_of_window(m) else m
+                    hits += 1
+            _AUDIT["ahead_read"] = _AUDIT.get("ahead_read", 0) + len(band)
+            _AUDIT["ahead_kept"] = _AUDIT.get("ahead_kept", 0) + hits
+        found += hits
+        if not hits:
+            break
+        start += _GAP_AHEAD
+    return found
+
+
 def _refresh_recent():
     """Scheduled refresh (full-coverage mode). Old files are immutable, so only
     RE-audit the in-window files (new invoices/dates) and pick up brand-new files
@@ -1484,6 +1521,13 @@ def _refresh_recent():
                     continue
                 _AUDIT["files"][jid] = _trim_historical(m) if _is_out_of_window(m) else m
             _AUDIT["cycles"] += 1
+    # New jobs the list doesn't show sit above the highest id we hold.
+    if _GAPFILL:
+        try:
+            _probe_ahead()
+        except Exception:
+            with _AUDIT_LOCK:
+                _AUDIT["errors"] += 1
 
 
 def _auditor_loop():
@@ -1711,6 +1755,9 @@ def audit_progress():
             # Re-reads that failed and left the earlier record in place, and in-window
             # records that are still hollow (never read successfully).
             "kept_on_failed_read": _AUDIT.get("kept_on_failed_read", 0),
+            "ahead_read": _AUDIT.get("ahead_read", 0),
+            "ahead_kept": _AUDIT.get("ahead_kept", 0),
+            "highest_id": max((int(k) for k in files if str(k).isdigit()), default=None),
             "hollow_in_window": sum(1 for m in files.values()
                                     if not _is_out_of_window(m) and not _was_read(m)),
             # "complete" per the guide: both the list backfill AND the gap-fill done.

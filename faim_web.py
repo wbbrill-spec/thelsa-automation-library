@@ -34,8 +34,13 @@ WHICH FILES COUNT (Moveware Integration Guide, Part B)
   port or border) still shows the move happened. A SIT date places the file in
   the window and is shown beside the gap so the coordinator can enter it; it is
   NOT evidence — "logged" always means logged in Moveware.
-- An import has no pack date to log (Thelsa did not pack it), so "pack date
-  logged" is measured on every file that is not an import (type IM*).
+- Agent work is audited for Thelsa's part only (Bill, 13 Oct 2026; Lupita
+  confirmed EXA = Export Agent moves the same day):
+    agent export (type EXA) — Thelsa's responsibility ends when the shipment
+      departs origin, so NO delivery date is expected;
+    agent import (type IMA) — Thelsa did not pack it, so NO pack date is expected.
+  TMS-booked files (EXP, IMP, DIN, ...) are expected to carry both. The type codes
+  are config: FAIM_AGENT_EXPORT_TYPES, FAIM_AGENT_IMPORT_TYPES.
 - Neither date = not a move yet: left out and counted separately (§3).
 - Lost and cancelled files (status L, C) are left out of the audit and counted
   (rule 9). The codes are config: FAIM_LOST_STATUSES.
@@ -81,6 +86,8 @@ def _env_codes(name, default):
 
 
 LOST_STATUSES = _env_codes("FAIM_LOST_STATUSES", ["L", "C"])
+AGENT_EXPORT_TYPES = _env_codes("FAIM_AGENT_EXPORT_TYPES", ["EXA"])   # no delivery date due
+AGENT_IMPORT_TYPES = _env_codes("FAIM_AGENT_IMPORT_TYPES", ["IMA"])   # no pack date due
 BOOKED_STATUS = "W"
 WINDOW_MONTHS = int(os.environ.get("FAIM_WINDOW_MONTHS", "12"))
 PASS_BAR = 80
@@ -182,7 +189,6 @@ def faim_snapshot(files, today=None, sit=None):
         delivered = _as_date(f.get("delivery"))
         from_sit = sit.get(number.upper()) or {}
         job_type = str(f.get("job_type") or "").strip().upper()
-        is_import = job_type.startswith("IM")
         sit_pack = None if pack else from_sit.get("pack")
         sit_delivered = None if delivered else from_sit.get("delivery")
         sit_truck = from_sit.get("moved")
@@ -206,7 +212,8 @@ def faim_snapshot(files, today=None, sit=None):
             "delivery": bool(delivered),
             "sit_delivery": sit_delivered if (sit_delivered and sit_delivered <= today) else None,
             "pack": bool(pack),
-            "pack_due": not is_import,          # an import has no pack date to log
+            "pack_due": job_type not in AGENT_IMPORT_TYPES,       # agent import: not ours to pack
+            "delivery_due": job_type not in AGENT_EXPORT_TYPES,   # agent export: ends at origin
             "sit_pack": sit_pack if (sit_pack and sit_pack <= today) else None,
             "type": job_type,
         }
@@ -236,7 +243,8 @@ def faim_snapshot(files, today=None, sit=None):
         {"name": "Survey on file",
          "v": _pct(sum(1 for r in survey_known if r["survey"]), len(survey_known))},
         {"name": "Delivery date logged",
-         "v": _pct(sum(1 for r in audited if r["delivery"]), n)},
+         "v": _pct(sum(1 for r in audited if r["delivery_due"] and r["delivery"]),
+                   sum(1 for r in audited if r["delivery_due"]))},
         {"name": "Pack date logged",
          "v": _pct(sum(1 for r in audited if r["pack_due"] and r["pack"]),
                    sum(1 for r in audited if r["pack_due"]))},
@@ -246,7 +254,7 @@ def faim_snapshot(files, today=None, sit=None):
     ctot, ccov = {}, {}
     for r in audited:
         ctot[r["coord"]] = ctot.get(r["coord"], 0) + 1
-        if r["survey"] and r["delivery"]:
+        if r["survey"] and (r["delivery"] or not r["delivery_due"]):
             ccov[r["coord"]] = ccov.get(r["coord"], 0) + 1
     by_coordinator = sorted(
         [{"name": c, "v": _pct(ccov.get(c, 0), ctot[c]), "files": ctot[c]} for c in ctot],
@@ -260,7 +268,7 @@ def faim_snapshot(files, today=None, sit=None):
         if r["pack_due"] and not r["pack"]:
             gaps.append("pack date" + (f" (SIT plan: packed {r['sit_pack'].isoformat()})"
                                        if r["sit_pack"] else ""))
-        if not r["delivery"]:
+        if r["delivery_due"] and not r["delivery"]:
             gaps.append("delivery date" + (f" (SIT plan: delivered {r['sit_delivery'].isoformat()})"
                                            if r["sit_delivery"] else ""))
         if r["coord"] == "Unassigned":
@@ -310,6 +318,11 @@ def faim_snapshot(files, today=None, sit=None):
             "move_files_in_window": len({_base_number(r["number"]) for r in moves}),
             "moves_by_status": _by_status(moves),
             "moves_by_key_date": by_key,
+            "audited_by_type": _by(audited, "type"),
+            "delivery_date_due": sum(1 for r in audited if r["delivery_due"]),
+            "pack_date_due": sum(1 for r in audited if r["pack_due"]),
+            "agent_export_types": sorted(AGENT_EXPORT_TYPES),
+            "agent_import_types": sorted(AGENT_IMPORT_TYPES),
             "lost_or_cancelled": len(lost),
             "audited": n,
             "booked": len(booked),
@@ -572,12 +585,12 @@ td.num{font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
 <div class="cols2">
 <div class="card">
 <h2>Coverage by coordinator</h2>
-<p class="note">Share of each coordinator's audited files with both survey and delivery date on record. Line = 80% target.</p>
+<p class="note">Share of each coordinator's audited files with a survey on record and, unless it is an agent export, a delivery date. Line = 80% target.</p>
 <div class="bars" id="byCoord"></div>
 </div>
 <div class="card">
 <h2>Evidence coverage by type</h2>
-<p class="note">Share of audited files that carry each piece of evidence in Moveware. Line = 80% target.</p>
+<p class="note">Share of audited files that carry each piece of evidence in Moveware. A delivery date is not expected on an agent export (EXA), nor a pack date on an agent import (IMA). Line = 80% target.</p>
 <div class="bars" id="byCrit"></div>
 </div>
 </div>

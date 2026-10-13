@@ -492,3 +492,43 @@ def test_a_file_with_only_a_truck_movement_in_the_plan_still_counts_as_a_move():
     out = faim_web.faim_snapshot([rec("1", "W", job_type="EXP")], today=TODAY, sit=sit)
     assert out["selection"]["moves_by_key_date"]["sit_truck"] == 1
     assert out["metrics"]["breaches"][0]["rule"] == "Missing: survey, pack date, delivery date"
+
+
+# ── Agent work is audited for Thelsa's part only ────────────────────────────────
+def _full(job, job_type, **kw):
+    base = dict(pack=dt.date(2026, 5, 1), delivery=dt.date(2026, 6, 1), survey=dt.date(2026, 4, 1))
+    base.update(kw)
+    return rec(job, "W", job_type=job_type, **base)
+
+
+def test_agent_export_is_not_asked_for_a_delivery_date():
+    out = snap([_full("1", "EXA", delivery=None),        # agent export: ends at origin
+                _full("2", "EXP", delivery=None),        # TMS-booked export: delivery is due
+                _full("3", "EXP")])
+    crit = {c["name"]: c["v"] for c in out["metrics"]["byCriterion"]}
+    assert crit["Delivery date logged"] == 50            # 1 of the 2 files where it is due
+    assert [(b["file"], b["rule"]) for b in out["metrics"]["breaches"]] == [
+        ("2", "Missing: delivery date")]
+    assert out["selection"]["delivery_date_due"] == 2
+    assert out["selection"]["audited_by_type"] == {"EXA": 1, "EXP": 2}
+
+
+def test_agent_import_is_not_asked_for_a_pack_date_but_a_booked_import_is():
+    out = snap([_full("1", "IMA", pack=None),            # agent import: Thelsa did not pack it
+                _full("2", "IMP", pack=None)])           # TMS-booked import: pack date is due
+    crit = {c["name"]: c["v"] for c in out["metrics"]["byCriterion"]}
+    assert crit["Pack date logged"] == 0                 # 0 of the 1 file where it is due
+    assert [(b["file"], b["rule"]) for b in out["metrics"]["breaches"]] == [
+        ("2", "Missing: pack date")]
+    assert out["selection"]["pack_date_due"] == 1
+
+
+def test_an_agent_export_with_its_survey_counts_as_covered_for_its_coordinator():
+    m = snap([_full("1", "EXA", delivery=None), _full("2", "EXP", delivery=None)])["metrics"]
+    assert m["byCoordinator"] == [{"name": "Ana Sanchez", "v": 50, "files": 2}]
+
+
+def test_agent_type_codes_are_configurable(monkeypatch):
+    monkeypatch.setattr(faim_web, "AGENT_EXPORT_TYPES", {"EXA", "EXT"})
+    out = snap([_full("1", "EXT", delivery=None)])
+    assert out["metrics"]["breaches"] == []

@@ -19,10 +19,13 @@ refreshed every few hours. One reader, one book, so /faim and /audit agree.
 WHICH FILES COUNT (Moveware Integration Guide, Part B)
 ------------------------------------------------------
 - One row per removal: a sequel (412042A) is its own move (rule 1).
-- A file is a move in the window when its collect date falls in the last
-  12 months, bounded at today (rules 2-3). Thelsa logs the collect date as
-  uplift or, more often, pack; mw_live's `pack` field is "uplift, else pack".
-- No collect date = not a move yet: left out and counted separately (§3).
+- A file is a move in the window when its key date falls in the last
+  12 months, bounded at today (rules 2-3). The key date is the collect date —
+  Thelsa logs it as uplift or, more often, pack; mw_live's `pack` field is
+  "uplift, else pack" — and, when there is none, the DELIVERY date. Thelsa
+  often handles only the import side of a move into Mexico and neither knows
+  nor needs the day it was packed at origin (Bill, 13 Oct 2026).
+- Neither date = not a move yet: left out and counted separately (§3).
 - Lost and cancelled files (status L, C) are left out of the audit and counted
   (rule 9). The codes are config: FAIM_LOST_STATUSES.
 """
@@ -138,11 +141,16 @@ def faim_snapshot(files, today=None):
     start = _months_ago(today, WINDOW_MONTHS)
 
     moves, no_date, upcoming, older = [], [], [], 0
+    by_key = {"pack": 0, "delivery": 0}
     for f in files or []:
         if not isinstance(f, dict):
             continue
         status = str(f.get("status") or "").strip().upper()
-        collect = _as_date(f.get("pack"))
+        pack = _as_date(f.get("pack"))
+        delivered = _as_date(f.get("delivery"))
+        # Key date: pack/collect, else delivery (an import handled at destination
+        # only has no pack date; its delivery date is the one that counts).
+        collect = pack or delivered
         row = {
             "number": str(f.get("job") or f.get("number") or f.get("job_id") or ""),
             "status": status,
@@ -153,7 +161,8 @@ def faim_snapshot(files, today=None):
                           else f.get("coordinator")) or "").strip() or "Unassigned",
             "survey_read": "survey" in f,
             "survey": bool(_as_date(f.get("survey"))),
-            "delivery": bool(_as_date(f.get("delivery"))),
+            "delivery": bool(delivered),
+            "type": str(f.get("job_type") or "").strip().upper(),
         }
         if collect is None:
             no_date.append(row)
@@ -163,6 +172,7 @@ def faim_snapshot(files, today=None):
             older += 1
         else:
             moves.append(row)
+            by_key["pack" if pack else "delivery"] += 1
 
     lost = [r for r in moves if r["status"] in LOST_STATUSES]
     audited = [r for r in moves if r["status"] not in LOST_STATUSES]
@@ -214,12 +224,14 @@ def faim_snapshot(files, today=None):
     for b in gaps_rows:
         b.pop("_k", None)
 
-    def _by_status(rows):
+    def _by(rows, field="status"):
         out = {}
         for r in rows:
-            k = r["status"] or "(blank)"
+            k = r[field] or "(blank)"
             out[k] = out.get(k, 0) + 1
         return out
+
+    _by_status = _by
 
     return {
         "metrics": {
@@ -244,14 +256,18 @@ def faim_snapshot(files, today=None):
             "moves_in_window": len(moves),
             "move_files_in_window": len({_base_number(r["number"]) for r in moves}),
             "moves_by_status": _by_status(moves),
+            "moves_by_key_date": by_key,
             "lost_or_cancelled": len(lost),
             "audited": n,
             "booked": len(booked),
-            "no_collect_date": len(no_date),
-            "no_collect_date_by_status": _by_status(no_date),
-            "collect_date_ahead": len(upcoming),
-            "collect_date_ahead_by_status": _by_status(upcoming),
-            "collected_before_window": older,
+            "no_key_date": len(no_date),
+            "no_key_date_by_status": _by_status(no_date),
+            # job type codes (import / export / ...) of the booked files with no date
+            "booked_no_key_date_by_type": _by(
+                [r for r in no_date if r["status"] == BOOKED_STATUS], "type"),
+            "key_date_ahead": len(upcoming),
+            "key_date_ahead_by_status": _by_status(upcoming),
+            "key_date_before_window": older,
             "survey_not_read_yet": survey_pending,
         },
     }
@@ -291,14 +307,15 @@ def faim_metrics():
     snap = faim_snapshot(files)
     sel, m = snap["selection"], snap["metrics"]
     complete = bool(prog.get("complete"))
-    no_date_booked = sel["no_collect_date_by_status"].get(BOOKED_STATUS, 0)
+    no_date_booked = sel["no_key_date_by_status"].get(BOOKED_STATUS, 0)
     note = (
         "LIVE Moveware \u2014 Thelsa (port 64000), the same file book as the Move-File "
-        f"Audit page. Moves with a pack/collect date from {sel['window_start']} to "
-        f"{sel['window_end']}; lost and cancelled files ({', '.join(sel['lost_statuses'])}) "
-        f"are left out. Not counted: {sel['no_collect_date']} files with no collect date "
-        f"yet ({no_date_booked} of them booked) and {sel['collect_date_ahead']} with a "
-        "collect date still ahead."
+        f"Audit page. Moves dated {sel['window_start']} to {sel['window_end']} by "
+        "pack/collect date or, where a file has none (an import), by delivery date "
+        f"({sel['moves_by_key_date']['delivery']} files). Lost and cancelled files "
+        f"({', '.join(sel['lost_statuses'])}) are left out. Not counted: "
+        f"{sel['no_key_date']} files with neither date in Moveware ({no_date_booked} "
+        f"of them booked) and {sel['key_date_ahead']} dated ahead."
     )
     if not complete:
         note += (" The book is still being read from Moveware "
@@ -477,7 +494,7 @@ document.getElementById('viewer').textContent=d.viewer||'';
 if(d.generatedNote){const b=document.getElementById('sampleBanner');b.style.display='block';b.textContent='● '+d.generatedNote;}
 const t=d.tiles||{};
 document.getElementById('tiles').innerHTML=`
-<div class="tile"><p class="label">Moves in the window</p><p class="val">${t.moves}</p><p class="sub2">collected in the last 12 months, any status</p></div>
+<div class="tile"><p class="label">Moves in the window</p><p class="val">${t.moves}</p><p class="sub2">packed or delivered in the last 12 months, any status</p></div>
 <div class="tile"><p class="label">Lost or cancelled</p><p class="val">${t.lost}</p><p class="sub2">left out of the audit</p></div>
 <div class="tile"><p class="label">Files audited</p><p class="val">${t.audited}</p><p class="sub2">${t.booked} booked · ${t.pending} not marked booked</p></div>
 <div class="tile"><p class="label">Missing survey</p><p class="val">${t.missingSurvey}</p><p class="sub2">of audited files</p></div>`;

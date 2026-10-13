@@ -36,9 +36,9 @@ def test_a_move_is_a_file_collected_inside_the_last_12_months():
     ])["selection"]
     assert s["window_start"] == "2025-10-12" and s["window_end"] == "2026-10-12"
     assert s["moves_in_window"] == 2
-    assert s["collected_before_window"] == 1
-    assert s["collect_date_ahead"] == 1
-    assert s["no_collect_date"] == 1
+    assert s["key_date_before_window"] == 1
+    assert s["key_date_ahead"] == 1
+    assert s["no_key_date"] == 1
 
 
 def test_lost_and_cancelled_files_are_left_out_and_counted():
@@ -67,10 +67,31 @@ def test_a_sequel_is_its_own_move_but_the_same_file():
     assert s["moves_in_window"] == 2 and s["move_files_in_window"] == 1
 
 
-def test_booked_files_with_no_collect_date_are_reported_separately():
-    s = snap([rec("1", "W"), rec("2", "W"), rec("3", "P")])["selection"]
+def test_booked_files_with_neither_date_are_reported_separately_by_type():
+    s = snap([rec("1", "W", job_type="IMP"), rec("2", "W", job_type="IMP"),
+              rec("3", "W", job_type="EXP"), rec("4", "P")])["selection"]
     assert s["moves_in_window"] == 0
-    assert s["no_collect_date_by_status"] == {"W": 2, "P": 1}
+    assert s["no_key_date_by_status"] == {"W": 3, "P": 1}
+    assert s["booked_no_key_date_by_type"] == {"IMP": 2, "EXP": 1}
+
+
+def test_an_import_with_no_pack_date_counts_by_its_delivery_date():
+    out = snap([
+        rec("1", pack=None, delivery=dt.date(2026, 6, 1)),      # import, delivered in window
+        rec("2", pack=None, delivery=dt.date(2025, 6, 1)),      # delivered before the window
+        rec("3", pack=None, delivery=dt.date(2026, 11, 1)),     # delivery still ahead
+        rec("4", pack=dt.date(2026, 5, 1), delivery=dt.date(2026, 6, 1)),
+    ])
+    s = out["selection"]
+    assert s["moves_in_window"] == 2
+    assert s["moves_by_key_date"] == {"pack": 1, "delivery": 1}
+    assert (s["key_date_before_window"], s["key_date_ahead"], s["no_key_date"]) == (1, 1, 0)
+
+
+def test_the_pack_date_wins_when_a_file_has_both():
+    # packed before the window, delivered inside it: dated by its pack date
+    s = snap([rec("1", pack=dt.date(2025, 9, 1), delivery=dt.date(2025, 12, 1))])["selection"]
+    assert s["moves_in_window"] == 0 and s["key_date_before_window"] == 1
 
 
 def test_dates_saved_as_text_are_read_the_same_way():
@@ -175,7 +196,7 @@ def test_metrics_come_from_the_shared_book(client):
     data = client.get("/faim/api/metrics").get_json()
     assert data["window"] == "live"
     assert (data["tiles"]["moves"], data["tiles"]["lost"], data["tiles"]["audited"]) == (2, 1, 1)
-    assert "1 files with no collect date yet (1 of them booked)" in data["generatedNote"]
+    assert "1 files with neither date in Moveware (1 of them booked)" in data["generatedNote"]
 
 
 def test_an_unfinished_book_is_labelled(client):
@@ -259,3 +280,8 @@ def test_faim_prefers_the_moveware_coordinator_over_the_alert_name():
                 rec("3", pack=dt.date(2026, 5, 1), coordinator="Old Name")])
     names = sorted(c["name"] for c in out["metrics"]["byCoordinator"])
     assert names == ["Itzel Urbina", "Old Name", "Unassigned"]
+
+
+def test_job_type_code_is_recorded(monkeypatch):
+    m = _map(monkeypatch, {"id": 6, "status": "W", "type": "IMP"})
+    assert m["job_type"] == "IMP"

@@ -864,6 +864,7 @@ def _map_job(job: dict, prefetched: dict | None = None) -> dict | None:
         "branch": branch,
         "client": client or "",
         "mode": mode,
+        "job_type": _code_text(_first(src, "type", "jobType", default="")),   # EXP / IMP / DOM … (code only)
         "status": status,
         "is_embassy": _is_embassy(client or ""),
         "est": round(est_cost, 2),

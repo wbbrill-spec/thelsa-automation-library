@@ -285,3 +285,63 @@ def test_faim_prefers_the_moveware_coordinator_over_the_alert_name():
 def test_job_type_code_is_recorded(monkeypatch):
     m = _map(monkeypatch, {"id": 6, "status": "W", "type": "IMP"})
     assert m["job_type"] == "IMP"
+
+
+# ── A failed re-read must not blank a good record ───────────────────────────────
+def _book_with(monkeypatch, files):
+    monkeypatch.setattr(mw_live, "_feed_total", lambda: 1)
+    monkeypatch.setattr(mw_live, "_get_timed", lambda url, to: {"jobs": []})
+    for k, v in {"files": dict(files), "total": 1, "cycles": 0,
+                 "kept_on_failed_read": 0}.items():
+        monkeypatch.setitem(mw_live._AUDIT, k, v)        # restored after the test
+
+
+def test_failed_reread_keeps_the_earlier_record(monkeypatch):
+    good = {"job": "111", "status": "W", "pack": dt.date.today(), "detail_ok": True}
+    _book_with(monkeypatch, {"111": good})
+    monkeypatch.setattr(mw_live, "_get", lambda path: (_ for _ in ()).throw(TimeoutError()))
+    mw_live._refresh_recent()
+    assert mw_live._AUDIT["files"]["111"] is good
+    assert mw_live.audit_progress()["kept_on_failed_read"] == 1
+
+
+def test_a_record_saved_before_this_change_is_also_protected(monkeypatch):
+    good = {"job": "111", "status": "P", "pack": dt.date.today()}      # no detail_ok key
+    _book_with(monkeypatch, {"111": good})
+    monkeypatch.setattr(mw_live, "_get", lambda path: (_ for _ in ()).throw(TimeoutError()))
+    mw_live._refresh_recent()
+    assert mw_live._AUDIT["files"]["111"] is good
+
+
+def test_successful_reread_replaces_the_record_and_heals_a_hollow_one(monkeypatch):
+    hollow = {"job": "222", "status": "", "pack": None}
+    _book_with(monkeypatch, {"222": hollow})
+    assert mw_live.audit_progress()["hollow_in_window"] == 1
+    monkeypatch.setattr(mw_live, "_get", lambda path: (
+        {"id": 222, "status": "W", "activityDates": {"uplift": {"date": "2026-05-01"}}}
+        if path == "/jobs/222" else {}))
+    mw_live._refresh_recent()
+    rec_ = mw_live._AUDIT["files"]["222"]
+    assert rec_["status"] == "W" and rec_["detail_ok"] is True
+    assert mw_live.audit_progress()["hollow_in_window"] == 0
+
+
+def test_detail_read_is_retried_once(monkeypatch):
+    calls = {"n": 0}
+
+    def flaky(path):
+        if path == "/jobs/333":
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise TimeoutError()
+            return {"id": 333, "status": "W"}
+        return {}
+    monkeypatch.setattr(mw_live, "_get", flaky)
+    m = mw_live._map_job({"id": "333"})
+    assert calls["n"] == 2 and m["status"] == "W" and m["detail_ok"] is True
+
+
+def test_a_failed_read_is_marked_hollow(monkeypatch):
+    monkeypatch.setattr(mw_live, "_get", lambda path: (_ for _ in ()).throw(TimeoutError()))
+    m = mw_live._map_job({"id": "444"})
+    assert m["detail_ok"] is False and m["status"] == ""

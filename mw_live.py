@@ -601,11 +601,16 @@ def _map_job(job: dict, prefetched: dict | None = None) -> dict | None:
     if prefetched is not None:
         detail = _first(prefetched, "data", default=prefetched) or prefetched
     else:
-        try:
-            d = _get(f"/jobs/{job_id}") or {}
-            detail = _first(d, "data", default=d) or d
-        except Exception:
-            detail = {}
+        # One retry: the beta API drops the odd call under load, and a record built
+        # without its detail is blank (no status, dates, roles or value).
+        for _attempt in (1, 2):
+            try:
+                d = _get(f"/jobs/{job_id}") or {}
+                detail = _first(d, "data", default=d) or d
+                break
+            except Exception:
+                detail = {}
+    detail_ok = bool(detail)
     src = detail or job
 
     # Display number vs internal id (Data Capture Guide §2): `number`/`numberOnly`
@@ -858,6 +863,7 @@ def _map_job(job: dict, prefetched: dict | None = None) -> dict | None:
     status = str(_code_text(_jstat)).strip().upper()
 
     return {
+        "detail_ok": detail_ok,    # False = GET /jobs/{id} failed; the record is hollow
         "job": display_number,     # display number staff/emails use (guide §2)
         "job_id": job_id,          # Moveware internal integer id (tracing/gap-fill)
         "number": display_number,
@@ -1008,6 +1014,7 @@ _AUDIT = {
     "foreign_ids": set(), # ids that 404/aren't tenant jobs — remembered, skipped next time
     "gapfill_done": False,
     "gap_read": 0, "gap_kept": 0, "gap_foreign": 0,
+    "kept_on_failed_read": 0,   # re-reads that failed and left the earlier record in place
 }
 _AUDIT_LOCK = threading.Lock()
 _AUDIT_THREAD = None
@@ -1412,6 +1419,25 @@ def _auditor_cycle():
         _AUDIT["last_cycle_at"] = time.time()
 
 
+def _was_read(m: dict) -> bool:
+    """Did this record come from a successful detail read? Records saved before
+    `detail_ok` existed are judged by having a status (a hollow one has none)."""
+    if "detail_ok" in m:
+        return bool(m["detail_ok"])
+    return bool(m.get("status"))
+
+
+def _keep_earlier(jid: str, m: dict) -> bool:
+    """True when a re-read failed and the book already holds a properly read record
+    for this file: a failed read is not data, so the earlier record stays. Caller
+    holds _AUDIT_LOCK."""
+    old = _AUDIT["files"].get(jid)
+    if old and not m.get("detail_ok", True) and _was_read(old):
+        _AUDIT["kept_on_failed_read"] = _AUDIT.get("kept_on_failed_read", 0) + 1
+        return True
+    return False
+
+
 def _refresh_recent():
     """Scheduled refresh (full-coverage mode). Old files are immutable, so only
     RE-audit the in-window files (new invoices/dates) and pick up brand-new files
@@ -1454,7 +1480,7 @@ def _refresh_recent():
                 results[futs[fut]] = fut.result()
         with _AUDIT_LOCK:
             for jid, m in results.items():
-                if not m:
+                if not m or _keep_earlier(jid, m):
                     continue
                 _AUDIT["files"][jid] = _trim_historical(m) if _is_out_of_window(m) else m
             _AUDIT["cycles"] += 1
@@ -1682,6 +1708,11 @@ def audit_progress():
             "gap_kept": _AUDIT["gap_kept"],
             "gap_foreign": _AUDIT["gap_foreign"],
             "foreign_ids": len(_AUDIT["foreign_ids"]),
+            # Re-reads that failed and left the earlier record in place, and in-window
+            # records that are still hollow (never read successfully).
+            "kept_on_failed_read": _AUDIT.get("kept_on_failed_read", 0),
+            "hollow_in_window": sum(1 for m in files.values()
+                                    if not _is_out_of_window(m) and not _was_read(m)),
             # "complete" per the guide: both the list backfill AND the gap-fill done.
             "complete": bool(_AUDIT["window_complete"] and (_AUDIT["gapfill_done"] or not _GAPFILL)),
         }

@@ -25,6 +25,12 @@ WHICH FILES COUNT (Moveware Integration Guide, Part B)
   "uplift, else pack" — and, when there is none, the DELIVERY date. Thelsa
   often handles only the import side of a move into Mexico and neither knows
   nor needs the day it was packed at origin (Bill, 13 Oct 2026).
+- Moveware rarely holds either date (the diary isn't kept), so where it has
+  none the day comes from SIT's Plan de Viajes (sit_milestones.py): the day a
+  truck loaded or unloaded at the customer's end, used only when the plan still
+  showed it on that day ("done") or it is still to come ("scheduled"). A SIT
+  date places the file in the window; it is NOT evidence — "delivery date
+  logged" still means logged in Moveware.
 - Neither date = not a move yet: left out and counted separately (§3).
 - Lost and cancelled files (status L, C) are left out of the audit and counted
   (rule 9). The codes are config: FAIM_LOST_STATUSES.
@@ -132,28 +138,54 @@ def _status_label(code):
 
 
 # ── The audit selection + evidence coverage ──────────────────────────────────────
-def faim_snapshot(files, today=None):
+def sit_days(jobs):
+    """{FILE NUMBER: {"pack": date, "delivery": date}} from sit_milestones' jobs,
+    keeping only days SIT's plan confirms ("done") or still schedules."""
+    out = {}
+    for num, j in (jobs or {}).items():
+        days = {}
+        for kind in ("pack", "delivery"):
+            ms = j.get(kind) if isinstance(j, dict) else None
+            if isinstance(ms, dict) and ms.get("status") in ("done", "scheduled"):
+                day = _as_date(ms.get("date"))
+                if day:
+                    days[kind] = day
+        if days:
+            out[str(num).strip().upper()] = days
+    return out
+
+
+def faim_snapshot(files, today=None, sit=None):
     """Pick the legitimate move files out of the file book and measure evidence.
 
-    `files` are mw_live's mapped records. Returns {"metrics": ..., "selection": ...}
-    where `selection` is counts only (no names) for /faim/raw.
+    `files` are mw_live's mapped records; `sit` is sit_days(...) or None. Returns
+    {"metrics": ..., "selection": ...} where `selection` is counts only (no names)
+    for /faim/raw.
     """
     today = today or dt.date.today()
+    sit = sit or {}
     start = _months_ago(today, WINDOW_MONTHS)
 
     moves, no_date, upcoming, older = [], [], [], 0
-    by_key = {"pack": 0, "delivery": 0}
+    by_key = {"pack": 0, "delivery": 0, "sit_pack": 0, "sit_delivery": 0}
     for f in files or []:
         if not isinstance(f, dict):
             continue
         status = str(f.get("status") or "").strip().upper()
+        number = str(f.get("job") or f.get("number") or f.get("job_id") or "")
         pack = _as_date(f.get("pack"))
         delivered = _as_date(f.get("delivery"))
+        from_sit = sit.get(number.upper()) or {}
+        sit_pack = None if pack else from_sit.get("pack")
+        sit_delivered = None if delivered else from_sit.get("delivery")
         # Key date: pack/collect, else delivery (an import handled at destination
-        # only has no pack date; its delivery date is the one that counts).
-        collect = pack or delivered
+        # only has no pack date; its delivery date is the one that counts). Moveware
+        # first; SIT's plan fills a date Moveware doesn't have.
+        collect = pack or sit_pack or delivered or sit_delivered
+        key_src = ("pack" if pack else "sit_pack" if sit_pack
+                   else "delivery" if delivered else "sit_delivery")
         row = {
-            "number": str(f.get("job") or f.get("number") or f.get("job_id") or ""),
+            "number": number,
             "status": status,
             "collect": collect,
             # Moveware's own coordinator / move manager; a record read before that
@@ -163,6 +195,7 @@ def faim_snapshot(files, today=None):
             "survey_read": "survey" in f,
             "survey": bool(_as_date(f.get("survey"))),
             "delivery": bool(delivered),
+            "sit_delivery": sit_delivered if (sit_delivered and sit_delivered <= today) else None,
             "type": str(f.get("job_type") or "").strip().upper(),
         }
         if collect is None:
@@ -173,7 +206,7 @@ def faim_snapshot(files, today=None):
             older += 1
         else:
             moves.append(row)
-            by_key["pack" if pack else "delivery"] += 1
+            by_key[key_src] += 1
 
     lost = [r for r in moves if r["status"] in LOST_STATUSES]
     audited = [r for r in moves if r["status"] not in LOST_STATUSES]
@@ -210,7 +243,8 @@ def faim_snapshot(files, today=None):
         if r["survey_read"] and not r["survey"]:
             gaps.append("survey")
         if not r["delivery"]:
-            gaps.append("delivery date")
+            gaps.append("delivery date" + (f" (SIT plan: delivered {r['sit_delivery'].isoformat()})"
+                                           if r["sit_delivery"] else ""))
         if r["coord"] == "Unassigned":
             gaps.append("coordinator")
         if gaps:
@@ -280,6 +314,25 @@ def _book():
     return mw_live.audited_in_window(), mw_live.audit_progress()
 
 
+def _sit():
+    """(sit_days, info) from SIT's Plan de Viajes history. It is read in the
+    background and kept in memory, so it is empty for a few minutes after a
+    restart; `info` says so (counts only)."""
+    try:
+        import sit_milestones as sm
+        sm.ensure_built()
+        st = sm.state()
+        days = sit_days(st.get("jobs"))
+        books = st.get("workbooks") or []
+        return days, {"loaded": bool(st.get("built_at")), "loading": bool(st.get("running")),
+                      "error": st.get("error"), "files_with_a_day": len(days),
+                      "workbooks": len(books),
+                      "plans_from": books[0].get("date") if books else None,
+                      "plans_to": books[-1].get("date") if books else None}
+    except Exception as e:
+        return {}, {"loaded": False, "loading": False, "error": str(e)[:200]}
+
+
 # ── Routes ──────────────────────────────────────────────────────────────────────
 @faim_bp.route("/faim")
 @_login_required
@@ -305,7 +358,8 @@ def faim_metrics():
             "byCoordinator": [], "byCriterion": [], "breaches": [], "viewer": viewer,
         })
 
-    snap = faim_snapshot(files)
+    sit, sit_info = _sit()
+    snap = faim_snapshot(files, sit=sit)
     sel, m = snap["selection"], snap["metrics"]
     complete = bool(prog.get("complete"))
     no_date_booked = sel["no_key_date_by_status"].get(BOOKED_STATUS, 0)
@@ -313,15 +367,22 @@ def faim_metrics():
         "LIVE Moveware \u2014 Thelsa (port 64000), the same file book as the Move-File "
         f"Audit page. Moves dated {sel['window_start']} to {sel['window_end']} by "
         "pack/collect date or, where a file has none (an import), by delivery date "
-        f"({sel['moves_by_key_date']['delivery']} files). Lost and cancelled files "
+        f"({sel['moves_by_key_date']['delivery'] + sel['moves_by_key_date']['sit_delivery']} "
+        "files). Where Moveware has no date, SIT's trip plan supplies it "
+        f"({sel['moves_by_key_date']['sit_pack'] + sel['moves_by_key_date']['sit_delivery']} "
+        "files). Lost and cancelled files "
         f"({', '.join(sel['lost_statuses'])}) are left out. Not counted: "
-        f"{sel['no_key_date']} files with neither date in Moveware ({no_date_booked} "
+        f"{sel['no_key_date']} files with neither date on record ({no_date_booked} "
         f"of them booked) and {sel['key_date_ahead']} dated ahead."
     )
     if not complete:
         note += (" The book is still being read from Moveware "
                  f"({prog.get('audited_total', 0)} of {prog.get('total') or '?'} files so "
                  "far), so these counts can still rise.")
+    if not sit_info.get("loaded"):
+        note += (" SIT's trip plan is still loading, so files dated only there are not "
+                 "counted yet." if not sit_info.get("error") else
+                 " SIT's trip plan could not be read, so files dated only there are not counted.")
     if sel["survey_not_read_yet"]:
         note += (f" Survey dates are still being read for {sel['survey_not_read_yet']} "
                  "files; the survey figures cover the rest.")
@@ -348,8 +409,10 @@ def faim_raw():
     out = {"have_creds": True}
     try:
         files, prog = _book()
+        sit, sit_info = _sit()
         out["book"] = prog
-        out["selection"] = faim_snapshot(files)["selection"]
+        out["sit_plan"] = sit_info
+        out["selection"] = faim_snapshot(files, sit=sit)["selection"]
     except Exception as e:
         out["error"] = str(e)
     return jsonify(out)

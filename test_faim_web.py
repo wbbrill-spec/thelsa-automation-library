@@ -85,7 +85,7 @@ def test_an_import_with_no_pack_date_counts_by_its_delivery_date():
     ])
     s = out["selection"]
     assert s["moves_in_window"] == 2
-    assert s["moves_by_key_date"] == {"pack": 1, "delivery": 1}
+    assert s["moves_by_key_date"] == {"pack": 1, "delivery": 1, "sit_pack": 0, "sit_delivery": 0}
     assert (s["key_date_before_window"], s["key_date_ahead"], s["no_key_date"]) == (1, 1, 0)
 
 
@@ -160,6 +160,7 @@ def client(monkeypatch):
         audited_in_window=lambda: book["files"], audit_progress=lambda: book["progress"])
     monkeypatch.setattr(faim_web, "mw_live", fake)
     monkeypatch.setattr(faim_web, "_HAVE_MW", True)
+    monkeypatch.setattr(faim_web, "_sit", lambda: ({}, {"loaded": True}))
     app = Flask(__name__)
     app.secret_key = "test"
     app.register_blueprint(faim_web.faim_bp)
@@ -197,7 +198,7 @@ def test_metrics_come_from_the_shared_book(client):
     data = client.get("/faim/api/metrics").get_json()
     assert data["window"] == "live"
     assert (data["tiles"]["moves"], data["tiles"]["lost"], data["tiles"]["audited"]) == (2, 1, 1)
-    assert "1 files with neither date in Moveware (1 of them booked)" in data["generatedNote"]
+    assert "1 files with neither date on record (1 of them booked)" in data["generatedNote"]
 
 
 def test_an_unfinished_book_is_labelled(client):
@@ -413,3 +414,56 @@ def test_check_route_needs_a_signed_in_user(client):
     with client.session_transaction() as s:
         s.clear()
     assert client.get("/faim/check?path=/jobs/1").status_code == 302
+
+
+# ── SIT's trip plan fills a date Moveware doesn't have ──────────────────────────
+def _sit_job(pack=None, delivery=None):
+    ms = lambda v: None if v is None else {"date": v[0], "status": v[1]}
+    return {"pack": ms(pack), "delivery": ms(delivery), "customer": "Jane Doe"}
+
+
+def test_sit_days_keeps_done_and_scheduled_and_drops_unconfirmed():
+    days = faim_web.sit_days({
+        "110001": _sit_job(pack=("2026-09-01", "done"), delivery=("2026-09-20", "unconfirmed")),
+        "110002a": _sit_job(delivery=("2026-11-02", "scheduled")),
+        "110003": _sit_job(pack=("2026-09-03", "unconfirmed")),
+    })
+    assert days == {"110001": {"pack": dt.date(2026, 9, 1)},
+                    "110002A": {"delivery": dt.date(2026, 11, 2)}}
+
+
+def test_an_import_with_no_date_in_moveware_is_dated_by_sit_delivery():
+    sit = faim_web.sit_days({"110926": _sit_job(delivery=("2026-09-30", "done"))})
+    out = faim_web.faim_snapshot([rec("110926", "W", job_type="IMA")], today=TODAY, sit=sit)
+    s = out["selection"]
+    assert s["moves_in_window"] == 1 and s["no_key_date"] == 0
+    assert s["moves_by_key_date"]["sit_delivery"] == 1
+    # a SIT day places the file; it is not evidence that Moveware has the date
+    crit = {c["name"]: c["v"] for c in out["metrics"]["byCriterion"]}
+    assert crit["Delivery date logged"] == 0
+    assert out["metrics"]["breaches"][0]["rule"] == (
+        "Missing: survey, delivery date (SIT plan: delivered 2026-09-30)")
+
+
+def test_moveware_dates_win_over_sit():
+    sit = faim_web.sit_days({"1": _sit_job(pack=("2026-01-05", "done"),
+                                           delivery=("2026-02-05", "done"))})
+    s = faim_web.faim_snapshot(
+        [rec("1", pack=dt.date(2026, 5, 1), delivery=dt.date(2026, 6, 1))],
+        today=TODAY, sit=sit)
+    assert s["selection"]["moves_by_key_date"]["pack"] == 1
+    assert s["metrics"]["breaches"][0]["rule"] == "Missing: survey"
+
+
+def test_a_sit_day_still_to_come_is_dated_ahead():
+    sit = faim_web.sit_days({"1": _sit_job(pack=("2026-10-20", "scheduled"))})
+    s = faim_web.faim_snapshot([rec("1")], today=TODAY, sit=sit)["selection"]
+    assert s["key_date_ahead"] == 1 and s["moves_in_window"] == 0
+
+
+def test_page_says_when_the_sit_plan_is_still_loading(client, monkeypatch):
+    client.book["files"] = [rec("1", pack=dt.date.today())]
+    monkeypatch.setattr(faim_web, "_sit", lambda: ({}, {"loaded": False, "loading": True}))
+    assert "trip plan is still loading" in client.get("/faim/api/metrics").get_json()["generatedNote"]
+    monkeypatch.setattr(faim_web, "_sit", lambda: ({}, {"loaded": True}))
+    assert "trip plan is still" not in client.get("/faim/api/metrics").get_json()["generatedNote"]

@@ -216,7 +216,7 @@ def test_workbook_download_matches_the_page(client, tmp_path):
     assert r.headers["Cache-Control"] == "no-store"
     wb = openpyxl.load_workbook(io.BytesIO(r.data))
     rep = R.build(F.load_base(io.BytesIO(xlsx(tmp_path))), W.settings(), {"2026-05": 3000000.0})
-    assert wb.sheetnames == [T.sheet_name(m["month"]) for m in rep["months"]] and "May 2026" in wb.sheetnames
+    assert wb.sheetnames == [T.sheet_name(m["month"]) for m in rep["months"]] + [T.PERSON_SHEET] and "May 2026" in wb.sheetnames
     text = " ".join(str(c.value) for ws in wb for r_ in ws.iter_rows() for c in r_ if c.value is not None)
     for name in NAMES:
         assert name not in text

@@ -310,17 +310,86 @@ def build_book(report: dict, s: E.Settings, out=None) -> Workbook:
     invoice month, each in Finance's layout. Saved to `out` when given."""
     wb = Workbook()
     wb.remove(wb.active)
+    placed = []                                 # (month, sheet, cell positions) of the new-calculation months
     for m in report["months"]:
         rows = rows_for_month(report, m["month"])
         ws = wb.create_sheet(sheet_name(m["month"]))
         m = dict(m, bookings_basis=report.get("bookings_basis", "invoiced"))
         summed = m.get("bookings_source") == "quotes" and m["bookings_basis"] == "invoiced"
-        write(ws, rows, s, m["budget"],        # with complete quotes the total is the sum of the sale prices
-              bookings=None if summed else (m["bookings"] if m["bookings_known"] else m["budget"]),
-              notes=month_notes(m, rows, s))
+        pos = write(ws, rows, s, m["budget"],        # with complete quotes the total is the sum of the sale prices
+                    bookings=None if summed else (m["bookings"] if m["bookings_known"] else m["budget"]),
+                    notes=month_notes(m, rows, s))
+        if m.get("new"):
+            placed.append((m["month"], ws.title, pos))
+    if placed and report.get("people"):
+        by_person(wb.create_sheet(PERSON_SHEET), report, s, placed)
     if not wb.sheetnames:
         wb.create_sheet("No months").cell(row=1, column=1, value="No month in the report has a budget.")
-    wb.active = len(wb.sheetnames) - 1          # opens on the latest month
+    last_month = [n for n in wb.sheetnames if n != PERSON_SHEET]
+    wb.active = wb.sheetnames.index(last_month[-1]) if last_month else 0   # opens on the latest month
     if out is not None:
         wb.save(out)
     return wb
+
+
+PERSON_SHEET = "By person"
+
+
+def by_person(ws, report: dict, s: E.Settings, placed) -> None:
+    """A statement per person for the new-calculation months: what each person
+    is paid each month. The payable cells are links to the split by role under
+    each month's sheet, so they move with any change made there; the second
+    block (what each person would get if every invoice were collected) is the
+    report's own figure. Amounts are not rounded: no rounding rule is set yet."""
+    bold, base = Font(name="Calibri", size=11, bold=True), Font(name="Calibri", size=11)
+    head = _fill(_FILL["dist"])
+    ws["A1"].value, ws["A1"].font = "Commission by person, new calculation (MXN)", Font(name="Calibri", size=14, bold=True)
+    ws["A2"].value = ("Payable = the person's share of the commission on lines marked Paid (invoices collected). "
+                      "Each amount links to the split by role on that month's sheet.")
+    ws["A2"].font = Font(name="Calibri", size=10, italic=True)
+    names = [n for n, _ in s.sales_people] + [n for n, _ in s.admin_people]
+    n_sales = len(s.sales_people)
+
+    def block(top, title, value_of):
+        ws.cell(row=top, column=1, value=title).font = bold
+        hdr = top + 1
+        cols = ["Role and name", "Group"] + [sheet for _m, sheet, _p in placed] + ["Total"]
+        for c, h in enumerate(cols, start=1):
+            cell = ws.cell(row=hdr, column=c, value=h)
+            cell.font, cell.fill, cell.border = bold, head, _box
+            cell.alignment = Alignment(horizontal="center", wrap_text=True)
+        for i, name in enumerate(names):
+            r = hdr + 1 + i
+            ws.cell(row=r, column=1, value=name).font = base
+            ws.cell(row=r, column=2, value="Sales" if i < n_sales else "Adm, MC and Buyer").font = base
+            for j, (m, sheet, pos) in enumerate(placed):
+                c = ws.cell(row=r, column=3 + j, value=value_of(i, m, sheet, pos))
+                c.number_format, c.border = MONEY, _box
+            last = L(2 + len(placed))
+            c = ws.cell(row=r, column=3 + len(placed), value=f"=SUM(C{r}:{last}{r})")
+            c.number_format, c.font, c.border = MONEY, bold, _box
+        tot = hdr + 1 + len(names)
+        ws.cell(row=tot, column=1, value="Total").font = bold
+        for j in range(len(placed) + 1):
+            col = L(3 + j)
+            c = ws.cell(row=tot, column=3 + j, value=f"=SUM({col}{hdr + 1}:{col}{tot - 1})")
+            c.number_format, c.font, c.border = MONEY, bold, _box
+        return tot
+
+    def payable(i, _m, sheet, pos):
+        if i < n_sales:
+            return f"='{sheet}'!Y{pos['targets'] + i}"
+        return f"='{sheet}'!Z{pos['adm_first'] + i - n_sales}"
+
+    people = report["people"]
+
+    def if_collected(i, m, _sheet, _pos):
+        row = next((x for x in people[i].get("months", ()) if x["month"] == m), None)
+        return round(row["if_collected"], 2) if row else 0.0
+
+    end = block(4, "Payable now (invoices collected)", payable)
+    block(end + 3, "If every invoice were collected (calculated, not yet payable)", if_collected)
+    ws.column_dimensions["A"].width, ws.column_dimensions["B"].width = 36, 18
+    for j in range(len(placed) + 1):
+        ws.column_dimensions[L(3 + j)].width = 13
+    ws.freeze_panes = "C6"

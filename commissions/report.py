@@ -534,7 +534,13 @@ def build(lines, s: E.Settings, bookings=None, quotes=None, quote_problems=(), p
              [(n, "Adm, MC and Buyer", s.admin_share, p) for n, p in s.admin_people]
     people = [{"name": n, "name_es": PEOPLE_ES.get(n, n), "group": g, "group_es": PEOPLE_ES.get(g, g), "share": p,
                "if_collected": new["total"] * gs * p, "payable": new["payable"] * gs * p,
-               "usd": {"if_collected": new["usd"]["total"] * gs * p, "payable": new["usd"]["payable"] * gs * p}}
+               "usd": {"if_collected": new["usd"]["total"] * gs * p, "payable": new["usd"]["payable"] * gs * p},
+               # the statement: each new-calculation month, what this person gets
+               "months": [{"month": r["month"], "if_collected": r["total"] * gs * p, "payable": r["payable"] * gs * p,
+                           "held": r["held"] * gs * p,
+                           "usd": {"if_collected": r["usd"]["total"] * gs * p, "payable": r["usd"]["payable"] * gs * p,
+                                   "held": r["usd"]["held"] * gs * p}}
+                          for r in months if r["new"]]}
               for n, g, gs, p in shares]
     order = list(LABELS) + sorted({p["kind"] for p in problems} - set(LABELS))
     checks = []

@@ -613,7 +613,16 @@ input[type=file]{font:inherit}button.go,.btn{background:var(--navy);color:#fff;b
 <tr><th>{{ t('Role and name', 'Puesto y nombre') }}</th><th class="l">{{ t('Group', 'Grupo') }}</th><th>{{ t('Share of the group', 'Parte del grupo') }}</th><th>{{ t('If every invoice were collected', 'Si se cobraran todas las facturas') }}</th><th>{{ t('Payable now', 'Por pagar hoy') }}</th></tr>
 {% for p in rep.people %}<tr><td>{{ t(p.name, p.name_es) }}</td><td class="l">{{ t(p.group, p.group_es) }}</td><td>{{ p.share|cm_pct }}</td><td>{{ M(p.if_collected, p.usd.if_collected, 2) }}</td><td>{{ M(p.payable, p.usd.payable, 2) }}</td></tr>{% endfor %}
 <tr class="tot"><td colspan="3">Total</td><td>{{ M(rep.total_new.total, rep.total_new.usd.total, 2) }}</td><td>{{ M(rep.total_new.payable, rep.total_new.usd.payable, 2) }}</td></tr>
-</table></div><p class="small">{{ t('Sales two thirds, Adm, MC and Buyer one third. Control (total paid out minus total calculated):',
+</table></div>
+{% if rep.people and rep.people[0].months %}{% set pm = rep.people[0].months %}
+{% for key, title, title_es in (('payable', 'Statement by person: payable each month (invoices collected)', 'Estado por persona: por pagar cada mes (facturas cobradas)'), ('if_collected', 'Statement by person: calculated each month, if every invoice were collected', 'Estado por persona: calculado cada mes, si se cobraran todas las facturas')) %}
+<details {{ 'open' if key == 'payable' else '' }}><summary>{{ t(title, title_es) }}</summary><div class="scroll"><table>
+<tr><th>{{ t('Role and name', 'Puesto y nombre') }}</th>{% for x in pm %}<th>{{ mon(x.month) }}</th>{% endfor %}<th>Total</th></tr>
+{% for p in rep.people %}<tr><td>{{ t(p.name, p.name_es) }}</td>{% for x in p.months %}<td>{{ M(x[key], x.usd[key], 2) }}</td>{% endfor %}<td><b>{{ M(p[key], p.usd[key], 2) }}</b></td></tr>{% endfor %}
+</table></div></details>{% endfor %}
+<p class="small">{{ t('The Excel download has the same statement on its sheet "By person". Amounts are not rounded: no rounding rule is set yet.',
+'La descarga de Excel tiene el mismo estado en la hoja "By person". Los importes no se redondean: aún no hay regla de redondeo.') }}</p>{% endif %}
+<p class="small">{{ t('Sales two thirds, Adm, MC and Buyer one third. Control (total paid out minus total calculated):',
 'Ventas dos tercios; Adm, MC y Compras un tercio. Control (total repartido menos total calculado):') }} {{ rep.control|cm_money(2) }}.</p></div>
 
 <div class="card" id="checks"><h2>{{ t('Points to look at', 'Puntos por revisar') }} ({{ rep.check_count }})</h2>

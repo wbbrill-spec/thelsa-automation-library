@@ -670,6 +670,7 @@ table.chk td:first-child{width:110px}table.chk td:last-child{width:150px}
 details{margin:8px 0}summary{cursor:pointer;font-weight:600;padding:4px 0}
 input[type=text]{width:150px;padding:5px 7px;border:1px solid #b9c0ca;border-radius:5px;text-align:right;font:inherit}
 input[type=file]{font:inherit}button.go,.btn{background:var(--navy);color:#fff;border:0;border-radius:6px;padding:8px 14px;font:inherit;cursor:pointer;text-decoration:none;display:inline-block}
+#settings td{text-align:left;white-space:normal}#settings input[type=text]{width:calc(100% - 26px);max-width:260px;min-width:60px;box-sizing:border-box}#settings input[name*="_name_"]{text-align:left;width:100%}#settings td{white-space:nowrap}#settings td.l{white-space:normal}#settings td:last-child{width:45%}
 .btn.ghost{background:#fff;color:var(--navy);border:1px solid var(--navy)}.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
 .small{font-size:12px;color:var(--soft)}
 </style></head><body><div class="wrap">

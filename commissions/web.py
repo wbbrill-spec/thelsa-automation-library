@@ -33,6 +33,7 @@ import datetime as dt
 import functools
 import hashlib
 import io
+import json
 import os
 import re
 import secrets
@@ -229,7 +230,7 @@ def commissions_home(email):
     rep = _report(lines, s, mw) if lines else None
     months = sorted(s.budgets)
     runs = _runs()
-    pay_draft = SO.draft(rep, runs, s, R.NEW_FROM) if rep else None
+    pay_draft = _draft(lines, s, runs, rep) if rep else None
     resp = make_response(render_template_string(
         PAGE, rep=rep, sst=_settings_state(), ss=SS, runs=list(reversed(runs)), pay_draft=pay_draft, so=SO, my_roles=SO.roles_of(email),
         open_run=next((r for r in runs if r["state"] == SO.OPEN), None), meta=meta, error=error or mw["error"] or col["error"] or reg["error"], mw=mw, col=col["sources"], reg=reg, pmeta=pmeta, msg=session.pop("commission_msg", None), csrf=_csrf(),
@@ -526,16 +527,34 @@ def commissions_settings(email):
             return home
         store.put("settings", SS.to_doc(after), by=email)
     what = SS.changes(before, after)
-    hist, _ = store.get("settings_history", [])
-    hist = (hist or []) + [{"at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), "by": email,
-                            "changes": what or ["no change"]}]
-    store.put("settings_history", hist[-100:], by=email)
+    entry = {"at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), "by": email,
+             "changes": what or ["no change"]}
+    store.update("settings_history", lambda h: (((h or []) + [entry])[-100:], None), default=[], by=email)
     _say(f"Settings saved: {len(what)} change(s).", f"Configuración guardada: {len(what)} cambio(s).")
     return home
 
 
 def _runs() -> list:
     return store.get("pay_runs", [])[0] or []
+
+
+def _draft(lines, s: E.Settings, runs, rep=None) -> dict:
+    """The next pay run. Lines already paid are worked out again with the
+    settings of the run that paid them (signoff.draft)."""
+    rep = rep or _report(lines, s)
+    mine = json.dumps(SS.to_doc(s), sort_keys=True)
+    built, totals = {mine: rep}, {}
+    for r in runs:
+        if r.get("state") not in SO.COUNTED or not r.get("settings"):
+            continue
+        key = json.dumps(r["settings"], sort_keys=True)
+        if key not in built:
+            try:
+                built[key] = _report(lines, SS.from_doc(r["settings"]))
+            except (E.SettingsError, TypeError, ValueError):
+                continue
+        totals[r["id"]] = {(x["month"], x["job"]): x["total"] for x in built[key]["lines"]}
+    return SO.draft(rep, runs, s, R.NEW_FROM, totals)
 
 
 @commissions_bp.route("/commissions/signoff", methods=["POST"])
@@ -549,19 +568,23 @@ def commissions_signoff(email):
         _say("Upload Finance's margin report first.", "Primero suba el reporte de margen de Finanzas.", bad=True)
         return home
     s = settings()
-    runs = _runs()
-    current = SO.draft(_report(lines, s), runs, s, R.NEW_FROM)
     try:
         run_id = int(request.form.get("run") or 0)
     except ValueError:
         run_id = 0
-    try:
+
+    def step_once(runs):
+        runs = runs or []
+        current = _draft(lines, s, runs)
         run = SO.act(runs, step, email, s, current=current, run_id=run_id, note=request.form.get("note") or "",
-                     paid_on=request.form.get("paid_on") or "", expect=request.form.get("expect") or "")
+                     paid_on=request.form.get("paid_on") or "", expect=request.form.get("expect") or "",
+                     settings_doc=SS.to_doc(s))
+        return runs, run
+    try:                                   # read, act and write as one step: two people cannot undo each other
+        run = store.update("pay_runs", step_once, default=[], by=email)
     except SO.SignOffError as e:
         _say(str(e), e.es, bad=True)
         return home
-    store.put("pay_runs", runs, by=email)
     _say(f"Pay run {run['id']}: step '{step}' done; it is now {run['state']}.",
          f"Corrida {run['id']}: paso «{SO.STEP_ES[step]}» hecho; ahora está {SO.STATE_ES[run['state']]}.")
     return home
@@ -825,14 +848,14 @@ input[type=file]{font:inherit}button.go,.btn{background:var(--navy);color:#fff;b
 
 <div class="card" id="settings"><h2>{{ t('Settings', 'Configuración') }}</h2>
 <p class="small">{% if sst.bad %}<b>{{ t('The saved settings do not add up and are not in use; the defaults are used. Save them again.', 'La configuración guardada no cuadra y no se usa; se usan los valores por defecto. Guárdela de nuevo.') }}</b>{% elif sst.custom %}{{ t('In use: saved', 'En uso: guardada el') }} {{ sst.meta.at|cm_when }} {{ t('by', 'por') }} {{ sst.meta.by }}.{% else %}{{ t('In use: the defaults agreed with Lupita (3 %, 60/30/10, 16.50, 2026 budget).', 'En uso: los valores acordados con Lupita (3 %, 60/30/10, 16.50, presupuesto 2026).') }}{% endif %}
-{{ t('A change applies to every month on the page at once; pay runs already approved keep their amounts.', 'Un cambio se aplica a todos los meses de la página; las corridas ya aprobadas conservan sus importes.') }}
+{{ t('A change applies to every line not yet paid. A line already paid in an approved run keeps the settings it was paid with, so a change never pays again on it.', 'Un cambio se aplica a toda línea aún no pagada. Una línea ya pagada en una corrida aprobada conserva la configuración con que se pagó; un cambio nunca la vuelve a pagar.') }}
 {% if 'admin' not in my_roles %}{{ t('Only an administrator can change them.', 'Solo un administrador puede cambiarla.') }}{% endif %}</p>
 <details><summary>{{ t('Show settings', 'Ver configuración') }}</summary>
 <form method="post" action="/commissions/settings"><input type="hidden" name="csrf" value="{{ csrf }}">
 {% set dis = '' if 'admin' in my_roles else 'disabled' %}
 <div class="scroll"><table>
 {% for k, en, es in ss.PCT_FIELDS %}<tr><td class="l">{{ t(en, es) }}</td><td><input type="text" name="{{ k }}" value="{{ '%g'|format(s[k] * 100) }}" {{ dis }} size="8"> %</td></tr>{% endfor %}
-<tr><td class="l">{{ t('Dollar rate for sales (pesos per dollar)', 'Tipo de cambio para ventas (pesos por dólar)') }}</td><td><input type="text" name="usd_mxn" value="{{ '%.2f'|format(s.usd_mxn) }}" {{ dis }} size="8"></td></tr>
+<tr><td class="l">{{ t('Dollar rate for sales (pesos per dollar)', 'Tipo de cambio para ventas (pesos por dólar)') }}</td><td><input type="text" name="usd_mxn" value="{{ '%.2f'|format(s.usd_mxn) if (s.usd_mxn * 100)|round(6) == (s.usd_mxn * 100)|round(0) else '%g'|format(s.usd_mxn) }}" {{ dis }} size="8"></td></tr>
 </table></div>
 {% for group, people, label, label_es in (('sales', s.sales_people, 'Sales: people and share of the group', 'Ventas: personas y parte del grupo'), ('admin', s.admin_people, 'Adm, MC and Buyer: people and share of the group', 'Adm, MC y Compras: personas y parte del grupo')) %}
 <h3>{{ t(label, label_es) }}</h3><div class="scroll"><table>

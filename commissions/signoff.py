@@ -96,9 +96,26 @@ def paid_so_far(runs) -> dict:
     return out
 
 
-def draft(report: dict, runs, s: E.Settings, new_from: str) -> dict:
-    """What a run submitted now would pay. `report` = report.build(...)."""
+def last_paid_by(runs) -> dict:
+    """(month, job) -> id of the latest approved or paid run that paid on the line."""
+    out = {}
+    for r in runs or ():
+        if r.get("state") in COUNTED:
+            for ln in r.get("lines", ()):
+                out[(ln["month"], ln["job"])] = r["id"]
+    return out
+
+
+def draft(report: dict, runs, s: E.Settings, new_from: str, totals_by_run: dict | None = None) -> dict:
+    """What a run submitted now would pay. `report` = report.build(...) with
+    the settings in use. A line already paid keeps the settings it was paid
+    with: `totals_by_run` = {run id: {(month, job): line total under that
+    run's settings, on today's data}}. So a change of rate, weight or budget
+    applies to lines not paid yet, and never pays again on a line already
+    paid; a later cost or credit on a paid line still goes in the next run."""
     before = paid_so_far(runs)
+    basis = last_paid_by(runs)
+    totals_by_run = totals_by_run or {}
     lines, warnings = [], []
     seen = set()
     for r in report.get("lines", ()):
@@ -113,9 +130,12 @@ def draft(report: dict, runs, s: E.Settings, new_from: str) -> dict:
                                  "en": "paid in an earlier run, no longer marked Paid; nothing is taken back",
                                  "es": "pagada en una corrida anterior y ya no marcada como pagada; no se descuenta"})
             continue
-        due = float(r["total"]) - prior
+        total = float(r["total"])
+        if k in basis and k in totals_by_run.get(basis[k], {}):
+            total = float(totals_by_run[basis[k]][k])
+        due = total - prior
         if abs(due) >= 0.005:
-            lines.append({"month": r["month"], "job": r["job"], "total": float(r["total"]), "before": prior,
+            lines.append({"month": r["month"], "job": r["job"], "total": total, "before": prior,
                           "due": due, "adjust": abs(prior) >= 0.005})
     for k, prior in sorted(before.items()):
         if k not in seen and abs(prior) >= 0.005:
@@ -124,8 +144,9 @@ def draft(report: dict, runs, s: E.Settings, new_from: str) -> dict:
                              "es": "pagada en una corrida anterior y ya no está en el reporte; no se descuenta"})
     lines.sort(key=lambda x: (x["month"], x["job"]))
     total = sum(x["due"] for x in lines)
-    return {"lines": lines, "due": total, "people": split(total, s), "warnings": warnings,
-            "months": sorted({x["month"] for x in lines}), "fingerprint": fingerprint(lines)}
+    people = split(total, s)
+    return {"lines": lines, "due": total, "people": people, "warnings": warnings,
+            "months": sorted({x["month"] for x in lines}), "fingerprint": fingerprint(lines, people)}
 
 
 def split(total: float, s: E.Settings) -> list:
@@ -140,8 +161,10 @@ def control(run_or_draft) -> float:
     return float(sum(cents(p["amount"]) for p in run_or_draft["people"]) - cents(run_or_draft["due"]))
 
 
-def fingerprint(lines) -> str:
-    body = json.dumps([[x["month"], x["job"], round(x["due"], 2)] for x in lines], separators=(",", ":"))
+def fingerprint(lines, people=()) -> str:
+    """Changes when any line, any amount or anyone's share changes."""
+    body = json.dumps([[[x["month"], x["job"], round(x["due"], 2)] for x in lines],
+                       [[p["name"], p["amount"]] for p in people]], separators=(",", ":"))
     return hashlib.sha256(body.encode()).hexdigest()[:16]
 
 
@@ -161,8 +184,17 @@ def find(runs, run_id: int) -> dict:
     raise SignOffError("That pay run does not exist.", "Esa corrida de pago no existe.")
 
 
+def _self_check_off() -> bool:
+    """Only for a test copy of the app: lets one person take every step."""
+    return os.environ.get("COMMISSION_TEST_SELF_APPROVAL", "") == "1"
+
+
+def _who(run, step) -> str:
+    return next((e["by"] for e in reversed(run["log"]) if e["step"] == step), "")
+
+
 def act(runs: list, step: str, email: str, s: E.Settings, current: dict | None = None, run_id: int | None = None,
-        note: str = "", paid_on: str = "", expect: str = "") -> dict:
+        note: str = "", paid_on: str = "", expect: str = "", settings_doc: dict | None = None) -> dict:
     """Take one step. Changes `runs` in place and returns the run. `current` is
     the live draft (needed to submit, and to say at approval what changed)."""
     email = (email or "").lower()
@@ -175,7 +207,7 @@ def act(runs: list, step: str, email: str, s: E.Settings, current: dict | None =
             raise SignOffError("A pay run is already waiting for approval.", "Ya hay una corrida esperando aprobación.")
         if current is None or not current["lines"]:
             raise SignOffError("There is nothing new to pay.", "No hay nada nuevo por pagar.")
-        if expect and expect != current["fingerprint"]:
+        if not expect or expect != current["fingerprint"]:
             raise SignOffError("The figures changed while you were looking. Reload the page and review again.",
                                "Las cifras cambiaron mientras revisaba. Recargue la página y revise de nuevo.")
         if current["due"] <= 0:
@@ -183,7 +215,8 @@ def act(runs: list, step: str, email: str, s: E.Settings, current: dict | None =
                                "La corrida suma cero o menos; no hay nada que pagar.")
         run = {"id": max((r["id"] for r in runs), default=0) + 1, "state": OPEN, "created": _now(),
                "lines": current["lines"], "due": current["due"], "people": current["people"],
-               "months": current["months"], "fingerprint": current["fingerprint"], "log": []}
+               "months": current["months"], "fingerprint": current["fingerprint"], "log": [],
+               "settings": settings_doc}
         _log(run, "submit", email, note)
         runs.append(run)
         return run
@@ -192,6 +225,13 @@ def act(runs: list, step: str, email: str, s: E.Settings, current: dict | None =
     if run["state"] not in need[step]:
         raise SignOffError(f"Run {run['id']} is {run['state']}; it cannot be {step}d now.",
                            f"La corrida {run['id']} está {STATE_ES[run['state']]}; no se puede hacer ese paso ahora.")
+    if not _self_check_off():
+        if step == "approve" and email == _who(run, "submit"):
+            raise SignOffError("The person who submitted a run cannot approve it.",
+                               "Quien envió la corrida no puede aprobarla.")
+        if step == "pay" and email == _who(run, "approve"):
+            raise SignOffError("The person who approved a run cannot record its payment.",
+                               "Quien aprobó la corrida no puede registrar su pago.")
     if step == "return" and not note.strip():
         raise SignOffError("Say why the run is returned.", "Indique por qué se devuelve la corrida.")
     if step == "cancel" and not note.strip():

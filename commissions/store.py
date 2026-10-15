@@ -19,8 +19,10 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+import threading
 
-from sqlalchemy import Column, DateTime, MetaData, String, Table, Text, create_engine, insert, select, update
+from sqlalchemy import Column, DateTime, MetaData, String, Table, Text, create_engine, insert, select
+from sqlalchemy import update as update_
 
 _meta = MetaData()
 _docs = Table(
@@ -31,6 +33,7 @@ _docs = Table(
     Column("updated_by", String(320), nullable=False, default=""),
 )
 _engine = None
+_lock = threading.Lock()
 
 
 def _url() -> str:
@@ -81,7 +84,29 @@ def put(key: str, doc, by: str = "") -> None:
     body = json.dumps(doc, separators=(",", ":"), allow_nan=False)
     now = dt.datetime.now(dt.timezone.utc)
     with engine().begin() as c:
-        done = c.execute(update(_docs).where(_docs.c.key == key)
+        done = c.execute(update_(_docs).where(_docs.c.key == key)
                          .values(body=body, updated_at=now, updated_by=by)).rowcount
         if not done:
             c.execute(insert(_docs).values(key=key, body=body, updated_at=now, updated_by=by))
+
+
+def update(key: str, fn, default=None, by: str = ""):
+    """Read, change and write one document as a single step, so two people
+    acting at the same moment cannot undo each other's change. `fn(doc)`
+    returns (new_doc, result); new_doc None = write nothing. Returns result.
+    The row is locked for the read (Postgres); a process lock covers SQLite."""
+    with _lock, engine().begin() as c:
+        q = select(_docs.c.body).where(_docs.c.key == key)
+        if not _url().startswith("sqlite:"):
+            q = q.with_for_update()
+        row = c.execute(q).first()
+        doc = json.loads(row[0]) if row is not None else default
+        new, result = fn(doc)
+        if new is not None:
+            body = json.dumps(new, separators=(",", ":"), allow_nan=False)
+            now = dt.datetime.now(dt.timezone.utc)
+            if row is not None:
+                c.execute(update_(_docs).where(_docs.c.key == key).values(body=body, updated_at=now, updated_by=by))
+            else:
+                c.execute(insert(_docs).values(key=key, body=body, updated_at=now, updated_by=by))
+        return result

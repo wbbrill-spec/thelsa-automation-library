@@ -126,7 +126,12 @@ def parse(form, current: E.Settings | None = None) -> E.Settings:
             raise SettingsFormError(f"Budget {m}: type an amount in pesos, for example 3,554,054.80.",
                                     f"Presupuesto {m}: escriba un importe en pesos, por ejemplo 3,554,054.80.")
         budgets[m] = _keep(float(raw.replace(",", "")), cur.budgets.get(m), 0.005)
-    s = dataclasses.replace(defaults(), usd_mxn=float(fx), sales_people=people["sales"], admin_people=people["admin"],
+    for group, rows in people.items():          # equal thirds typed as 33.3333: the last share takes the 0.0001
+        total = sum(p for _, p in rows)
+        if 0 < abs(total - 1.0) < 1e-4:
+            rows = rows[:-1] + ((rows[-1][0], rows[-1][1] + 1.0 - total),)
+            people[group] = rows
+    s = dataclasses.replace(defaults(), usd_mxn=_keep(float(fx), cur.usd_mxn, 0.00005), sales_people=people["sales"], admin_people=people["admin"],
                             admin_share=cur.admin_share if vals["sales_share"] == cur.sales_share else 1.0 - vals["sales_share"],
                             budgets=budgets, **vals)
     try:

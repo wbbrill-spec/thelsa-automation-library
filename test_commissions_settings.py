@@ -79,3 +79,15 @@ def test_renamed_people_flow_into_the_distribution():
     s = SS.parse(form(sales_name_0="KAR 1 New Person"))
     assert s.sales_people[0] == ("KAR 1 New Person", 0.5)
     assert isinstance(s, E.Settings)
+
+
+def test_equal_thirds_are_accepted_and_the_dollar_rate_is_kept_exactly():
+    f = form()
+    for i in range(6):
+        f.pop(f"admin_name_{i}", None), f.pop(f"admin_share_{i}", None)
+    f.update({"admin_name_0": "A", "admin_share_0": "33.3333", "admin_name_1": "B", "admin_share_1": "33.3333",
+              "admin_name_2": "C", "admin_share_2": "33.3333"})
+    s = SS.parse(f)
+    assert sum(p for _, p in s.admin_people) == pytest.approx(1.0, abs=1e-12)
+    cur = SS.parse(form(usd_mxn="16.5025"))
+    assert SS.parse(form(usd_mxn="16.5025", rate="4"), cur).usd_mxn == 16.5025

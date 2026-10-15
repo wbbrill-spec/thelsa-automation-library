@@ -117,16 +117,14 @@ def clean_bookings(bookings) -> dict:
 
 
 def month_rates(lines, s: E.Settings) -> tuple:
-    """Pesos per dollar for showing the report in dollars.
+    """Pesos per dollar "as booked": for the "USD books" view (Bill, 15 Oct).
 
-    With dollar sales at the internal rate, that rate is used for every month,
-    so a dollar invoice shows as the dollars it was invoiced for. With dollar
-    sales at the day's rate, each month uses the middle rate of its dollar
-    invoices in Finance's own report (the middle one, so a mistyped rate does
-    not move it). Returns ({month: rate}, rate for any other month, whether the
-    rates were taken from the report)."""
-    if s.sales_fx == "internal":
-        return {}, s.usd_mxn, False
+    Each month uses the middle rate of its dollar invoices in Finance's own
+    report (the middle one, so a mistyped rate does not move it); a month with
+    no dollar invoice uses the middle of the year. Display only: the commission
+    itself is always calculated in pesos with dollar sales at 16.50 (D30).
+    Returns ({month: rate}, rate for any other month, whether the rates were
+    taken from the report)."""
     by = defaultdict(list)
     for ln in lines:
         if (ln.is_sale and ln.date and ln.currency == "USD" and ln.currency_source == "stated" and ln.fx

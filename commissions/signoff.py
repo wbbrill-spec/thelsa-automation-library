@@ -70,6 +70,15 @@ def is_admin(email: str) -> bool:
     return (email or "").lower() in (_emails(os.environ.get("COMMISSION_ADMINS", "")) or set(ADMINS))
 
 
+def may_edit_settings(email: str) -> bool:
+    """Lupita and Rogelio do the day-to-day work and change the settings, as do
+    admins (Bill, 15 Oct). COMMISSION_SETTINGS_EDITORS in Render overrides."""
+    email = (email or "").lower()
+    listed = _emails(os.environ.get("COMMISSION_SETTINGS_EDITORS", ""))
+    default = set(ROLE_DEFAULTS["review"]) | set(ROLE_DEFAULTS["finance"])
+    return is_admin(email) or email in (listed or default)
+
+
 def roles_of(email: str) -> list:
     email = (email or "").lower()
     return [r for r in ROLE_ENV if email in role_members(r)] + (["admin"] if is_admin(email) else [])

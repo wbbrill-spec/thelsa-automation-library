@@ -42,14 +42,21 @@ def test_anything_not_plainly_typed_or_not_adding_up_is_refused(over):
     assert e.value.es
 
 
-def test_only_an_admin_saves_and_the_report_uses_it(client, tmp_path):
+def test_lupita_rogelio_and_admins_save_others_cannot_and_the_report_uses_it(client, tmp_path):
     login(client)
     upload(client, xlsx(tmp_path))
     before = _lines_of(client)["total_all"]["total"]
+    login(client, "mariotorres@thelsa.com")
     page = client.get("/commissions").data.decode()
-    assert 'id="settings"' in page and "Save settings" not in page          # Lupita sees, cannot save
+    assert 'id="settings"' in page and "Save settings" not in page          # Mario sees, cannot save
     client.post("/commissions/settings", data=form(rate="4"))
     assert store.get("settings")[0] is None
+    for who in (LUPITA, "rogeliofranco@thelsa.com"):
+        login(client, who)
+        assert "Save settings" in client.get("/commissions").data.decode()
+        client.post("/commissions/settings", data=form(rate="3.5"))
+        assert W.settings().rate == pytest.approx(0.035) and store.get("settings_history")[0][-1]["by"] == who
+        client.post("/commissions/settings", data={"csrf": "tok", "action": "reset"})
     login(client, BILL)
     assert "Save settings" in client.get("/commissions").data.decode()
     assert client.post("/commissions/settings", data=form(rate="4", csrf="bad")).status_code == 400
@@ -57,7 +64,7 @@ def test_only_an_admin_saves_and_the_report_uses_it(client, tmp_path):
     assert W.settings().rate == pytest.approx(0.04)
     assert _lines_of(client)["total_all"]["total"] == pytest.approx(before * 4 / 3)
     hist = store.get("settings_history")[0]
-    assert hist[-1]["by"] == BILL and hist[-1]["changes"] == ["rate: 0.03 -> 0.04"]
+    assert hist[-1]["by"] == BILL and hist[-1]["changes"] == ["rate: 0.03 -> 0.04"] and len(hist) == 5
     client.post("/commissions/settings", data=form(w_margin="40"))          # refused: weights add to 110
     assert W.settings().rate == pytest.approx(0.04) and "Not saved" in client.get("/commissions").data.decode()
     client.post("/commissions/settings", data={"csrf": "tok", "action": "reset"})

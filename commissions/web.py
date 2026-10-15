@@ -10,7 +10,7 @@ web.py — the /commissions pages.
     /commissions/upload-removals, /commissions/upload-costing
                             the two Moveware reports that hold each file's booked quote (POST)
     /commissions/workbook   the same report as an Excel workbook, one sheet per month in Finance's own layout
-    /commissions/settings   rate, weights, people and shares, budgets per month; admins only (POST)
+    /commissions/settings   rate, weights, people and shares, budgets per month; Lupita, Rogelio, admins (POST)
     /commissions/signoff    a step of a pay run: submit (Lupita), approve or return (Mario), paid (Rogelio) (POST)
     /commissions/signoff/<n>/instruction   the payment instruction of pay run n, as Excel
 
@@ -232,7 +232,7 @@ def commissions_home(email):
     runs = _runs()
     pay_draft = _draft(lines, s, runs, rep) if rep else None
     resp = make_response(render_template_string(
-        PAGE, rep=rep, sst=_settings_state(), ss=SS, runs=list(reversed(runs)), pay_draft=pay_draft, so=SO, my_roles=SO.roles_of(email),
+        PAGE, rep=rep, sst=_settings_state(), ss=SS, can_settings=SO.may_edit_settings(email), fxd=_fx_display(), runs=list(reversed(runs)), pay_draft=pay_draft, so=SO, my_roles=SO.roles_of(email),
         open_run=next((r for r in runs if r["state"] == SO.OPEN), None), meta=meta, error=error or mw["error"] or col["error"] or reg["error"], mw=mw, col=col["sources"], reg=reg, pmeta=pmeta, msg=session.pop("commission_msg", None), csrf=_csrf(),
         s=s, bookings=R.clean_bookings(bookings), bmeta=bmeta, months=months, month_label=_month_label,
         month_label_es=_month_label_es, durable=store.durable(), new_from=_month_label(R.NEW_FROM),
@@ -512,8 +512,8 @@ def commissions_workbook(email):
 def commissions_settings(email):
     _check_csrf()
     home = redirect(url_for("commissions.commissions_home") + "#settings")
-    if not SO.is_admin(email):
-        _say("Only an administrator can change the settings.", "Solo un administrador puede cambiar la configuración.", bad=True)
+    if not SO.may_edit_settings(email):
+        _say("You cannot change the settings.", "Usted no puede cambiar la configuración.", bad=True)
         return home
     before = settings()
     if request.form.get("action") == "reset":
@@ -532,6 +532,25 @@ def commissions_settings(email):
     store.update("settings_history", lambda h: (((h or []) + [entry])[-100:], None), default=[], by=email)
     _say(f"Settings saved: {len(what)} change(s).", f"Configuración guardada: {len(what)} cambio(s).")
     return home
+
+
+def _fx_display() -> dict:
+    """The dollar rates for the USD views, from the same place as the TMS
+    executive dashboard (fx.py): plan = the rate the 2026 budget was struck at;
+    spot = the month-end rate of the latest completed month (Banxico FIX, else
+    ECB). Display only: the commission is calculated in pesos (D30)."""
+    import fx
+    out = {"plan": fx.PLAN_MXN_PER_USD, "spot": None, "spot_month": "", "spot_as_of": "", "spot_source": "",
+           "spot_stale": True}
+    try:
+        out["plan"] = fx.plan_rate()
+        sp = fx.month_end_spot()
+        out.update(spot=float(sp["rate"]), spot_month=sp.get("month") or "", spot_as_of=sp.get("asOf") or "",
+                   spot_source=sp.get("source") or "", spot_stale=bool(sp.get("stale")))
+    except Exception:                       # noqa: BLE001  a failed fetch must never take the page down
+        out["spot"] = fx.FALLBACK_PER_USD["MXN"]
+        out["spot_source"] = "fallback"
+    return out
 
 
 def _runs() -> list:
@@ -642,7 +661,7 @@ PAGE = r"""<!doctype html>
 --ok:#1d5c3a;--okbg:#e8f4ec;--bad:#8c1d18;--badbg:#fbe9e7;--hl:#fff8d6}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 -apple-system,Segoe UI,Roboto,Arial,sans-serif}
 .src{font-size:10px;color:#667;border:1px solid #ccd;border-radius:3px;padding:0 3px;white-space:nowrap}span.es{display:none}body.es span.en{display:none}body.es span.es{display:inline}
-.usdnote{display:none}body.usd .usdnote{display:block}
+.usdnote{display:none}body.usd .usdnote{display:block}.fxn{display:none}body.b-plan .fxn[data-b=plan],body.b-books .fxn[data-b=books],body.b-spot .fxn[data-b=spot]{display:inline}
 .wrap{max-width:1240px;margin:0 auto;padding:20px 16px 60px}
 h1{font-size:22px;margin:0 0 2px}h2{font-size:16px;margin:0 0 10px}.sub{color:var(--soft);margin:0 0 16px}
 a{color:var(--navy)}.top{display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px}
@@ -678,7 +697,7 @@ input[type=file]{font:inherit}button.go,.btn{background:var(--navy);color:#fff;b
 <p class="sub">{{ t('Corporate accounts and Private customers. US Embassy and agent business are not included.',
 'Cuentas corporativas y clientes particulares. No incluye la Embajada de EE. UU. ni el negocio de agentes.') }}</p></div>
 <div><div class="ctl">
-<div class="seg" id="ccySeg" title="MXN / USD"><button type="button" data-c="mxn">MXN</button><button type="button" data-c="usd">USD</button></div>
+<div class="seg" id="ccySeg" title="MXN / USD"><button type="button" data-c="mxn">MXN</button><button type="button" data-c="plan">{{ t('USD plan', 'USD plan') }}</button><button type="button" data-c="books">{{ t('USD books', 'USD libros') }}</button><button type="button" data-c="spot">USD spot</button></div>
 <div class="seg" id="langSeg" title="English / Español"><button type="button" data-l="en">EN</button><button type="button" data-l="es">ES</button></div>
 </div><div class="small" style="text-align:right;margin-top:6px">{{ email }} · <a href="/">{{ t('Automation Library', 'Biblioteca de automatizaciones') }}</a></div></div></div>
 
@@ -688,12 +707,17 @@ input[type=file]{font:inherit}button.go,.btn{background:var(--navy);color:#fff;b
 'Este servicio no tiene una base de datos conectada, así que el reporte subido se pierde cuando el servicio se reconstruye.') }}</div>{% endif %}
 
 {% if rep %}
-<div class="note info usdnote">{% if rep.rates.from_report %}{{ t('Shown in US dollars: the pesos of each month divided by the middle exchange rate of that month\'s dollar invoices in Finance\'s report',
-'Se muestra en dólares: los pesos de cada mes entre el tipo de cambio central de las facturas en dólares de ese mes en el reporte de Finanzas') }}
-({% for r in rep.months %}{{ mon(r.month) }} {{ '%.2f'|format(r.rate) }}{% if not loop.last %} · {% endif %}{% endfor %}).{% else %}{{ t('Shown in US dollars at the internal rate of ' ~ '%.2f'|format(rep.rates.other) ~ ' pesos per dollar, the rate the commission uses for dollar invoices.',
-'Se muestra en dólares al tipo de cambio interno de ' ~ '%.2f'|format(rep.rates.other) ~ ' pesos por dólar, el que usa la comisión para las facturas en dólares.') }}{% endif %}
-{{ t('The commission is calculated in pesos; percentages do not change with the currency shown. The check list and the bookings table stay in pesos.',
-'La comisión se calcula en pesos; los porcentajes no cambian con la moneda mostrada. La lista de puntos por revisar y la tabla de ventas contratadas siguen en pesos.') }}</div>
+<div class="note info usdnote">
+<span class="fxn" data-b="plan">{{ t('US dollars at the plan rate of ' ~ '%.4f'|format(fxd.plan) ~ ' pesos per dollar, the rate the 2026 budget was struck at (same rate as the TMS executive dashboard).',
+'Dólares al tipo de cambio del plan, ' ~ '%.4f'|format(fxd.plan) ~ ' pesos por dólar, con el que se hizo el presupuesto 2026 (el mismo del tablero ejecutivo TMS).') }}</span>
+<span class="fxn" data-b="books">{{ t('US dollars as booked: the pesos of each month divided by the middle exchange rate of that month\'s dollar invoices in Finance\'s report',
+'Dólares según libros: los pesos de cada mes entre el tipo de cambio central de las facturas en dólares de ese mes en el reporte de Finanzas') }}
+({% for r in rep.months %}{{ mon(r.month) }} {{ '%.2f'|format(r.rate) }}{% if not loop.last %} · {% endif %}{% endfor %}).</span>
+<span class="fxn" data-b="spot">{% if fxd.spot_stale %}{{ t('US dollars at ' ~ '%.4f'|format(fxd.spot) ~ ' (the latest month-end rate could not be fetched; this is the most recent rate available).',
+'Dólares a ' ~ '%.4f'|format(fxd.spot) ~ ' (no se pudo obtener el tipo de cierre de mes; es el más reciente disponible).') }}{% else %}{{ t('US dollars at the month-end rate of ' ~ '%.4f'|format(fxd.spot) ~ ' for ' ~ fxd.spot_month ~ ', the latest completed month (' ~ fxd.spot_source ~ '), the same rate as the TMS executive dashboard. It updates itself when each month closes.',
+'Dólares al tipo de cierre de mes de ' ~ '%.4f'|format(fxd.spot) ~ ' de ' ~ fxd.spot_month ~ ', el último mes cerrado (' ~ fxd.spot_source ~ '), el mismo del tablero ejecutivo TMS. Se actualiza solo al cerrar cada mes.') }}{% endif %}</span>
+{{ t('Shown in dollars only: the commission is calculated and paid in pesos, with dollar invoices at 16.50. Percentages do not change. The check list, the bookings table and the pay runs stay in pesos.',
+'Solo se muestra en dólares: la comisión se calcula y se paga en pesos, con las facturas en dólares a 16.50. Los porcentajes no cambian. La lista de puntos por revisar, la tabla de ventas contratadas y las corridas de pago siguen en pesos.') }}</div>
 
 <div class="note warn"><b>{{ t('Trial. Not for payment.', 'Prueba. No usar para pago.') }}</b>
 <ul>
@@ -760,7 +784,7 @@ input[type=file]{font:inherit}button.go,.btn{background:var(--navy);color:#fff;b
 <h3>{{ t('Run ' ~ r.id ~ ' is waiting for approval', 'La corrida ' ~ r.id ~ ' espera aprobación') }}: {{ r.due|cm_money(2) }}</h3>
 <p class="small">{{ t('Submitted by', 'Enviada por') }} {{ r.log[0].by }} · {{ r.log[0].at[:16].replace('T', ' ') }} UTC{% if r.log[0].note %} · “{{ r.log[0].note }}”{% endif %} · {{ r.lines|length }} {{ t('lines', 'líneas') }} · {{ t('invoice months', 'meses de factura') }} {{ r.months|join(', ') }}</p>
 <div class="scroll"><table><tr><th>{{ t('Person', 'Persona') }}</th><th class="l">{{ t('Group', 'Grupo') }}</th><th>{{ t('Amount', 'Importe') }}</th></tr>
-{% for p in r.people %}<tr><td>{{ p.name }}</td><td class="l">{{ p.group }}</td><td>{{ p.amount|cm_money(2) }}</td></tr>{% endfor %}</table></div>
+{% for p in r.people %}<tr><td>{{ p.name }}</td><td class="l">{{ t(p.group, {'Sales': 'Ventas'}.get(p.group, 'Adm, MC y Compras')) }}</td><td>{{ p.amount|cm_money(2) }}</td></tr>{% endfor %}</table></div>
 <p><a class="btn ghost" href="/commissions/signoff/{{ r.id }}/instruction">{{ t('Download the run (Excel)', 'Descargar la corrida (Excel)') }}</a></p>
 {% if so.may(email, 'approve') %}<form method="post" action="/commissions/signoff" class="row"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="run" value="{{ r.id }}">
 <input type="text" name="note" placeholder="{{ 'Note (required to return) / Nota (obligatoria para devolver)' }}" style="min-width:320px">
@@ -774,7 +798,7 @@ input[type=file]{font:inherit}button.go,.btn{background:var(--navy);color:#fff;b
 <details><summary>{{ t('Lines in this run', 'Líneas de esta corrida') }}</summary><div class="scroll"><table><tr><th>{{ t('Month', 'Mes') }}</th><th>{{ t('File', 'Expediente') }}</th><th>{{ t('Line commission', 'Comisión de la línea') }}</th><th>{{ t('Paid before', 'Pagado antes') }}</th><th>{{ t('In this run', 'En esta corrida') }}</th></tr>
 {% for x in pay_draft.lines %}<tr><td>{{ x.month }}</td><td>{{ x.job }}</td><td>{{ x.total|cm_money(2) }}</td><td>{{ x.before|cm_money(2) }}</td><td>{{ x.due|cm_money(2) }}</td></tr>{% endfor %}</table></div></details>
 <div class="scroll"><table><tr><th>{{ t('Person', 'Persona') }}</th><th class="l">{{ t('Group', 'Grupo') }}</th><th>{{ t('Amount', 'Importe') }}</th></tr>
-{% for p in pay_draft.people %}<tr><td>{{ p.name }}</td><td class="l">{{ p.group }}</td><td>{{ p.amount|cm_money(2) }}</td></tr>{% endfor %}</table></div>
+{% for p in pay_draft.people %}<tr><td>{{ p.name }}</td><td class="l">{{ t(p.group, {'Sales': 'Ventas'}.get(p.group, 'Adm, MC y Compras')) }}</td><td>{{ p.amount|cm_money(2) }}</td></tr>{% endfor %}</table></div>
 {% if so.may(email, 'submit') %}<form method="post" action="/commissions/signoff" class="row"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="expect" value="{{ pay_draft.fingerprint }}">
 <input type="text" name="note" placeholder="{{ 'Note for Mario (optional) / Nota para Mario (opcional)' }}" style="min-width:320px">
 <button type="submit" name="step" value="submit" class="go">{{ t('Reviewed: send to Mario for approval', 'Revisado: enviar a Mario para aprobación') }}</button></form>{% endif %}
@@ -850,10 +874,10 @@ input[type=file]{font:inherit}button.go,.btn{background:var(--navy);color:#fff;b
 <div class="card" id="settings"><h2>{{ t('Settings', 'Configuración') }}</h2>
 <p class="small">{% if sst.bad %}<b>{{ t('The saved settings do not add up and are not in use; the defaults are used. Save them again.', 'La configuración guardada no cuadra y no se usa; se usan los valores por defecto. Guárdela de nuevo.') }}</b>{% elif sst.custom %}{{ t('In use: saved', 'En uso: guardada el') }} {{ sst.meta.at|cm_when }} {{ t('by', 'por') }} {{ sst.meta.by }}.{% else %}{{ t('In use: the defaults agreed with Lupita (3 %, 60/30/10, 16.50, 2026 budget).', 'En uso: los valores acordados con Lupita (3 %, 60/30/10, 16.50, presupuesto 2026).') }}{% endif %}
 {{ t('A change applies to every line not yet paid. A line already paid in an approved run keeps the settings it was paid with, so a change never pays again on it.', 'Un cambio se aplica a toda línea aún no pagada. Una línea ya pagada en una corrida aprobada conserva la configuración con que se pagó; un cambio nunca la vuelve a pagar.') }}
-{% if 'admin' not in my_roles %}{{ t('Only an administrator can change them.', 'Solo un administrador puede cambiarla.') }}{% endif %}</p>
+{% if not can_settings %}{{ t('Only Lupita, Rogelio or an administrator can change them.', 'Solo Lupita, Rogelio o un administrador pueden cambiarla.') }}{% endif %}</p>
 <details><summary>{{ t('Show settings', 'Ver configuración') }}</summary>
 <form method="post" action="/commissions/settings"><input type="hidden" name="csrf" value="{{ csrf }}">
-{% set dis = '' if 'admin' in my_roles else 'disabled' %}
+{% set dis = '' if can_settings else 'disabled' %}
 <div class="scroll"><table>
 {% for k, en, es in ss.PCT_FIELDS %}<tr><td class="l">{{ t(en, es) }}</td><td><input type="text" name="{{ k }}" value="{{ '%g'|format(s[k] * 100) }}" {{ dis }} size="8"> %</td></tr>{% endfor %}
 <tr><td class="l">{{ t('Dollar rate for sales (pesos per dollar)', 'Tipo de cambio para ventas (pesos por dólar)') }}</td><td><input type="text" name="usd_mxn" value="{{ '%.2f'|format(s.usd_mxn) if (s.usd_mxn * 100)|round(6) == (s.usd_mxn * 100)|round(0) else '%g'|format(s.usd_mxn) }}" {{ dis }} size="8"></td></tr>
@@ -865,7 +889,7 @@ input[type=file]{font:inherit}button.go,.btn{background:var(--navy);color:#fff;b
 <h3>{{ t('Booking budget per month, Corporate + Private (MXN)', 'Presupuesto de ventas contratadas por mes, Corporativo + Privado (MXN)') }}</h3>
 <p class="small">{{ t('A month with no budget is not calculated.', 'Un mes sin presupuesto no se calcula.') }}</p>
 <div class="scroll"><table>{% for m in ss.budget_months({'budgets': s.budgets}) %}<tr><td class="l">{{ mon(m) }}</td><td><input type="text" name="bud_{{ m }}" inputmode="decimal" value="{{ '{:,.2f}'.format(s.budgets[m]) if m in s.budgets else '' }}" {{ dis }}></td></tr>{% endfor %}</table></div>
-{% if 'admin' in my_roles %}<p class="row"><button type="submit" class="go">{{ t('Save settings', 'Guardar configuración') }}</button>
+{% if can_settings %}<p class="row"><button type="submit" class="go">{{ t('Save settings', 'Guardar configuración') }}</button>
 <button type="submit" name="action" value="reset" class="btn ghost" onclick="return confirm('Back to the defaults? / ¿Volver a los valores por defecto?')">{{ t('Back to the defaults', 'Volver a los valores por defecto') }}</button></p>{% endif %}
 </form>
 {% if sst.history %}<h3>{{ t('Last changes', 'Últimos cambios') }}</h3><ul class="small">{% for h in sst.history %}<li>{{ h.at[:16].replace('T', ' ') }} UTC · {{ h.by }}: {{ h.changes|join('; ') }}</li>{% endfor %}</ul>{% endif %}
@@ -908,9 +932,11 @@ input[type=file]{font:inherit}button.go,.btn{background:var(--navy);color:#fff;b
   function get(k, d){ try { return localStorage.getItem(k) || d; } catch(e){ return d; } }
   function put(k, v){ try { localStorage.setItem(k, v); } catch(e){} }
   var dl = (navigator.language || '').toLowerCase().indexOf('es') === 0 ? 'es' : 'en';
+  var FX = {plan: {{ '%.6f'|format(fxd.plan) if fxd else 0 }}, spot: {{ '%.6f'|format(fxd.spot) if fxd and fxd.spot else 0 }}};
   var S = {lang: get('audit.lang', dl), ccy: get('commission.ccy', 'mxn')};
   if (['en','es'].indexOf(S.lang) < 0) S.lang = 'en';
-  if (['mxn','usd'].indexOf(S.ccy) < 0) S.ccy = 'mxn';
+  if (S.ccy === 'usd') S.ccy = 'books';
+  if (['mxn','plan','books','spot'].indexOf(S.ccy) < 0) S.ccy = 'mxn';
   function fmt(v, d){
     if (Math.abs(v) < 0.5 * Math.pow(10, -d)) return '–';
     var s = Math.abs(v).toLocaleString('en-US', {minimumFractionDigits: d, maximumFractionDigits: d});
@@ -918,14 +944,18 @@ input[type=file]{font:inherit}button.go,.btn{background:var(--navy);color:#fff;b
   }
   function render(){
     document.body.classList.toggle('es', S.lang === 'es');
-    document.body.classList.toggle('usd', S.ccy === 'usd');
+    var usd = S.ccy !== 'mxn';
+    document.body.classList.toggle('usd', usd);
+    ['plan','books','spot'].forEach(function(b){ document.body.classList.toggle('b-' + b, S.ccy === b); });
     document.documentElement.lang = S.lang;
     document.querySelectorAll('.m').forEach(function(el){
-      var a = el.getAttribute(S.ccy === 'usd' ? 'data-u' : 'data-x');
-      if (a === null || a === '') a = el.getAttribute('data-x');
-      el.textContent = fmt(+a, +el.getAttribute('data-d') || 0);
+      var x = +el.getAttribute('data-x'), u = el.getAttribute('data-u'), v = x;
+      if (S.ccy === 'books') v = (u === null || u === '') ? x : +u;
+      else if (S.ccy === 'plan' && FX.plan > 0) v = x / FX.plan;
+      else if (S.ccy === 'spot' && FX.spot > 0) v = x / FX.spot;
+      el.textContent = fmt(v, +el.getAttribute('data-d') || 0);
     });
-    document.querySelectorAll('.cur').forEach(function(el){ el.textContent = S.ccy === 'usd' ? 'USD' : 'MXN'; });
+    document.querySelectorAll('.cur').forEach(function(el){ el.textContent = usd ? 'USD' : 'MXN'; });
     document.querySelectorAll('#ccySeg button').forEach(function(b){ b.classList.toggle('on', b.getAttribute('data-c') === S.ccy); });
     document.querySelectorAll('#langSeg button').forEach(function(b){ b.classList.toggle('on', b.getAttribute('data-l') === S.lang); });
   }

@@ -16,6 +16,8 @@ from commissions import web as W
 from test_commissions_finance import ROWS, book, cost, row
 
 LUPITA, OUTSIDER = "maria.gonzalez@thelsa.com", "someone.else@thelsa.com"
+FXD = {"plan": 17.4479, "spot": 18.25, "spot_month": "2026-09", "spot_as_of": "2026-09-30",
+       "spot_source": "Banxico FIX (DOF)", "spot_stale": False}
 NAMES = ("Acme", "Jane Roe", "Big Co", "Mary Major", "EMBAJADA", "Marcel", "MARCEL", "Supplier", "RECLASIF")
 
 
@@ -23,6 +25,7 @@ NAMES = ("Acme", "Jane Roe", "Big Co", "Mary Major", "EMBAJADA", "Marcel", "MARC
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("COMMISSION_DATABASE_URL", f"sqlite:///{tmp_path}/c.db")
     monkeypatch.delenv("COMMISSION_USERS", raising=False)
+    monkeypatch.setattr(W, "_fx_display", lambda: dict(FXD))        # no internet in tests
     store.reset_for_tests()
     app = Flask(__name__)
     app.secret_key = "test"
@@ -281,7 +284,11 @@ def test_page_carries_both_languages_and_both_currencies(client, tmp_path):
     login(client)
     upload(client, xlsx(tmp_path))
     page = client.get("/commissions").data.decode()
-    assert 'id="ccySeg"' in page and 'data-c="usd"' in page and 'id="langSeg"' in page and 'data-l="es"' in page
+    assert 'id="ccySeg"' in page and 'id="langSeg"' in page and 'data-l="es"' in page
+    assert all(f'data-c="{b}"' in page for b in ("mxn", "plan", "books", "spot"))
+    assert "var FX = {plan: 17.447900, spot: 18.250000}" in page
+    assert "month-end rate of 18.2500 for 2026-09" in page and "plan rate of 17.4479" in page
+    assert "Dólares según libros" in page
     for es in ("Reporte de comisiones TMS", "Prueba. No usar para pago.", "Facturado", "Costo real", "Margen bruto",
                "Alcance de ventas", "Por mes de factura", "Puntos por revisar",
                "Ventas contratadas por mes", "Subir reporte", "Descargar en Excel", "Cálculo nuevo",
@@ -296,25 +303,25 @@ def test_page_carries_both_languages_and_both_currencies(client, tmp_path):
     new = rep["total_new"]
     assert (round(new["total"], 2), round(new["usd"]["total"], 2)) in pairs
     may = rep["months"][0]
-    assert may["month"] == "2026-05" and may["rate"] == 16.5                      # the commission's own rate
-    assert (round(may["billed"], 2), round(may["billed"] / 16.5, 2)) in pairs
-    assert "internal rate of 16.50 pesos per dollar" in page and "tipo de cambio interno de 16.50" in page
+    assert may["month"] == "2026-05"                                  # "USD books": Finance's own rate of the month
+    assert (round(may["billed"], 2), round(may["billed"] / may["rate"], 2)) in pairs
     # without the script the page still reads in pesos
     assert f">{new['total']:,.2f}<" in page
 
 
-def test_dollar_view_at_the_internal_rate_shows_the_dollars_invoiced():
+def test_usd_books_uses_finances_rate_and_the_commission_stays_at_16_50():
     from test_commissions_finance import USD
     import tempfile, pathlib
     lines = F.load_base(book(pathlib.Path(tempfile.mkdtemp()) / "r.xlsx",
                              [row("110001", 175000, usd=10000, ccy=USD, fx=17.5), row("110002", 33000, folio=2)]))
     rep = R.build(lines, W.settings())
     assert W.settings().sales_fx == "internal"
-    assert rep["rates"] == {"by_month": {"2026-05": 16.5}, "other": 16.5, "from_report": False}
+    assert rep["rates"] == {"by_month": {"2026-05": 17.5}, "other": 17.5, "from_report": True}
     by = {x["job"]: x for x in rep["lines"]}
-    assert by["110001"]["billed"] == pytest.approx(165000) and by["110001"]["usd"]["billed"] == pytest.approx(10000)
-    assert by["110002"]["usd"]["billed"] == pytest.approx(2000)
-    assert rep["total_all"]["usd"]["total"] == pytest.approx(rep["total_all"]["total"] / 16.5)
+    assert by["110001"]["billed"] == pytest.approx(165000)               # the commission: 10,000 x 16.50
+    assert by["110001"]["usd"]["billed"] == pytest.approx(165000 / 17.5)  # shown at the books rate
+    assert by["110002"]["usd"]["billed"] == pytest.approx(33000 / 17.5)
+    assert rep["total_all"]["usd"]["total"] == pytest.approx(rep["total_all"]["total"] / 17.5)
 
 
 def test_dollar_view_with_spot_uses_each_months_own_rate_and_adds_up():
@@ -647,3 +654,18 @@ def test_invoice_register_upload_needs_the_token_and_refuses_other_files(client,
     client.get("/logout", follow_redirects=False)
     login(client, OUTSIDER)
     assert _send(client, "/commissions/upload-invoices", b"x").status_code == 404
+
+
+def test_dollar_rates_come_from_the_executive_dashboards_source_and_never_break_the_page(monkeypatch):
+    import fx
+    monkeypatch.setattr(fx, "plan_rate", lambda: 17.4479)
+    monkeypatch.setattr(fx, "month_end_spot", lambda today=None: {"rate": 18.1, "month": "2026-09", "asOf": "2026-09-30",
+                                                                 "source": "Banxico FIX (DOF)", "stale": False})
+    got = W._fx_display()
+    assert got["plan"] == 17.4479 and got["spot"] == 18.1 and got["spot_month"] == "2026-09" and not got["spot_stale"]
+
+    def down(today=None):
+        raise OSError("no network")
+    monkeypatch.setattr(fx, "month_end_spot", down)
+    got = W._fx_display()
+    assert got["spot"] == fx.FALLBACK_PER_USD["MXN"] and got["spot_stale"]

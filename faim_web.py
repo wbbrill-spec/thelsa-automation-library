@@ -366,6 +366,60 @@ def _sit():
         return {}, {"loaded": False, "loading": False, "error": str(e)[:200]}
 
 
+# ── 24/7 keeper ─────────────────────────────────────────────────────────────────
+# The file book and the SIT plan are otherwise only (re)started when someone opens
+# /audit or /faim. The keeper starts both at boot and checks on them every
+# FAIM_KEEPER_MINUTES (default 30): it restarts the auditor if its thread has died
+# and re-reads the Plan de Viajes once it is older than 6 h. One per host (file lock),
+# off when FAIM_KEEPER=0 and under pytest.
+_KEEPER = None
+_KEEPER_LOCK_FH = None
+
+
+def _keeper_tick():
+    try:
+        mw_live.ensure_auditor()
+    except Exception:
+        pass
+    try:
+        import sit_milestones as sm
+        sm.ensure_built()
+    except Exception:
+        pass
+
+
+def _keeper_loop(every_s: float):
+    import time
+    while True:
+        _keeper_tick()
+        time.sleep(every_s)
+
+
+def start_keeper():
+    """Start the keeper thread once per host. Safe to call more than once."""
+    global _KEEPER, _KEEPER_LOCK_FH
+    import sys
+    if os.environ.get("FAIM_KEEPER", "1") != "1" or "pytest" in sys.modules:
+        return None
+    if _KEEPER is not None and _KEEPER.is_alive():
+        return _KEEPER
+    try:
+        import fcntl
+        _KEEPER_LOCK_FH = open("/tmp/thelsa_faim_keeper.lock", "w")
+        fcntl.flock(_KEEPER_LOCK_FH, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except Exception:
+        return None  # another worker on this host owns it
+    import threading
+    try:
+        every = max(5.0, float(os.environ.get("FAIM_KEEPER_MINUTES", "30"))) * 60
+    except ValueError:
+        every = 1800.0
+    _KEEPER = threading.Thread(target=_keeper_loop, args=(every,), daemon=True,
+                               name="faim-keeper")
+    _KEEPER.start()
+    return _KEEPER
+
+
 # ── Routes ──────────────────────────────────────────────────────────────────────
 @faim_bp.route("/faim")
 @_login_required

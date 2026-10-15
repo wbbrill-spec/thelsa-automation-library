@@ -584,6 +584,12 @@ try:
 except Exception as _asst_exc:  # never block the library from booting
     logger.warning("AI Assistant scheduler not started: %s", _asst_exc)
 
+try:
+    from faim_web import start_keeper as _faim_start_keeper
+    _faim_start_keeper()
+except Exception as _faim_exc:  # never block the library from booting
+    logger.warning("FAIM keeper not started: %s", _faim_exc)
+
 
 # ── Entry point ─────────────────────────────────────────────────────────────────
 if __name__ == "__main__":

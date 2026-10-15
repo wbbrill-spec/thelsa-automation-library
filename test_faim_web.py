@@ -532,3 +532,29 @@ def test_agent_type_codes_are_configurable(monkeypatch):
     monkeypatch.setattr(faim_web, "AGENT_EXPORT_TYPES", {"EXA", "EXT"})
     out = snap([_full("1", "EXT", delivery=None)])
     assert out["metrics"]["breaches"] == []
+
+
+# ── 24/7 keeper ────────────────────────────────────────────────────────────────
+def test_keeper_tick_starts_auditor_and_sit(monkeypatch):
+    import faim_web, sit_milestones
+    calls = []
+    monkeypatch.setattr(faim_web.mw_live, "ensure_auditor", lambda: calls.append("book"))
+    monkeypatch.setattr(sit_milestones, "ensure_built", lambda *a, **k: calls.append("sit"))
+    faim_web._keeper_tick()
+    assert calls == ["book", "sit"]
+
+
+def test_keeper_tick_survives_errors(monkeypatch):
+    import faim_web, sit_milestones
+    def boom(*a, **k):
+        raise RuntimeError("down")
+    monkeypatch.setattr(faim_web.mw_live, "ensure_auditor", boom)
+    monkeypatch.setattr(sit_milestones, "ensure_built", boom)
+    faim_web._keeper_tick()  # must not raise
+
+
+def test_keeper_off_under_pytest_and_when_disabled(monkeypatch):
+    import faim_web
+    assert faim_web.start_keeper() is None
+    monkeypatch.setenv("FAIM_KEEPER", "0")
+    assert faim_web.start_keeper() is None

@@ -482,8 +482,22 @@ def index():
     name = session.get("user_name", "")
     email = session.get("user_email", "")
     html = _commission_tile(html, email)
+    html = _tim_exec_tile(html, email)
     html = html.replace("{{USER_NAME}}", name).replace("{{USER_EMAIL}}", email)
     return html
+
+
+def _tim_exec_tile(html, email):
+    """Keep the TIM Executive Dashboard tile only for the people who may open it.
+    If the module is not available, nobody sees the tile."""
+    try:
+        from tim_exec import home_tile
+        return home_tile(html, email)
+    except Exception:
+        head, found, rest = html.partition("<!-- TIM_EXEC_TILE_START")
+        if not found:
+            return html
+        return head + rest.partition("<!-- TIM_EXEC_TILE_END -->")[2]
 
 
 def _commission_tile(html, email):
@@ -566,6 +580,9 @@ app.register_blueprint(faim_bp)
 # Cross-Border Shipment Dashboard (TIM/ClickUp + TMS/Moveware, unified)
 from crossborder.web import crossborder_bp
 app.register_blueprint(crossborder_bp)
+# TIM Executive Dashboard (financial P&L by business unit, from Finance's monthly close)
+from tim_exec import tim_exec_bp
+app.register_blueprint(tim_exec_bp)
 # AI Assistant — multi-tenant, per-user dashboard (mail + Moveware + WhatsApp),
 # refreshed 5x/day (06/09/12/15/18 Mexico City). Replaces the Phase-1 on-demand page.
 from assistant.web import bp as assistant_bp

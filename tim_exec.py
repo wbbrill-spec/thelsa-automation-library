@@ -7,11 +7,18 @@ tiles, segmented controls, EN/ES.
 
 Data is embedded (one close at a time). To publish a new month, replace CLOSE
 below with the new statements; test_tim_exec.py checks every line ties out.
+
+Who may open it: only the addresses in TIM_EXEC_USERS (comma separated, set in
+Render). Without that setting it is DEFAULT_USERS below (Bill, 2026-10-15).
+Anyone else who is signed in to the library gets "not found", and the home page
+tile is cut out for them (same pattern as the Commission Report).
 """
 import functools
 import json
+import os
+import re
 
-from flask import Blueprint, redirect, request, session, url_for
+from flask import Blueprint, abort, redirect, request, session, url_for
 
 tim_exec_bp = Blueprint("tim_exec", __name__)
 
@@ -122,11 +129,46 @@ def with_total(close=CLOSE):
     return units
 
 
-def _login_required(f):
+# Gustavo, Ericka, Diana, Fernanda Mora, Rogelio, Sergio Garza Cantú, Bill.
+DEFAULT_USERS = (
+    "gustavogonzalez@thelsa.com",
+    "erickamartinez@thelsa.com",
+    "dianaaguirre@thelsa.com",
+    "fernandamora@thelsa.com",
+    "rogeliofranco@thelsa.com",
+    "sergiogarza@thelsa.com",
+    "bbrill@thelsa.com",
+    "bill.brill@inflectionpointnow.com",
+)
+
+
+def allowed_users() -> set:
+    raw = os.environ.get("TIM_EXEC_USERS", "")
+    listed = {e.strip().lower() for e in raw.replace(";", ",").split(",") if e.strip()}
+    return listed or set(DEFAULT_USERS)
+
+
+def may_view(email) -> bool:
+    return (email or "").strip().lower() in allowed_users()
+
+
+_TILE = re.compile(r"<!-- TIM_EXEC_TILE_START.*?<!-- TIM_EXEC_TILE_END -->\n?", re.S)
+
+
+def home_tile(html: str, email) -> str:
+    """The library home page with the TIM Executive tile left in only for someone
+    who may open the dashboard. For anyone else the tile is cut out."""
+    return html if may_view(email) else _TILE.sub("", html)
+
+
+def _restricted(f):
     @functools.wraps(f)
     def wrapped(*args, **kwargs):
-        if not session.get("user_email"):
+        email = session.get("user_email")
+        if not email:
             return redirect(url_for("login", next=request.url))
+        if not may_view(email):
+            abort(404)
         return f(*args, **kwargs)
     return wrapped
 
@@ -142,7 +184,7 @@ def render_page(close=CLOSE):
 
 
 @tim_exec_bp.route("/tim-exec")
-@_login_required
+@_restricted
 def tim_exec():
     return render_page()
 

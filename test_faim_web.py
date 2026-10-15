@@ -255,8 +255,15 @@ def test_moveware_coordinator_is_read_from_the_role_entity(monkeypatch):
         "coordinator": _role("Itzel", "Urbina", "itzel@thelsa.com"),
         "moveManager": _role("Other", "Person")}})
     assert m["mw_coordinator"] == "Itzel Urbina"
-    # the fields the audit page and its alerts use are left exactly as they were
-    assert m["coordinator"] == "" and m["coordinator_email"] == ""
+    # alerts group by that name too when the older fields were blank; no email is
+    # guessed, so mail still goes only to a known address (else the fallback inbox)
+    assert m["coordinator"] == "Itzel Urbina" and m["coordinator_email"] == ""
+
+
+def test_alert_name_from_older_fields_is_kept(monkeypatch):
+    m = _map(monkeypatch, {"id": 6, "status": "W", "roles": {
+        "coordinator": dict(_role("Itzel", "Urbina"), firstName="Old", lastName="Name")}})
+    assert m["coordinator"] == "Old Name" and m["mw_coordinator"] == "Itzel Urbina"
 
 
 def test_move_manager_is_used_when_no_coordinator(monkeypatch):

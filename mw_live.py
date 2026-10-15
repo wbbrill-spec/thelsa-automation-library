@@ -723,6 +723,11 @@ def _map_job(job: dict, prefetched: dict | None = None) -> dict | None:
             break
     if mw_coordinator and client and mw_coordinator.lower() == client.strip().lower():
         mw_coordinator = ""
+    # Alerts group by `coordinator`. When the older role fields left it blank (most
+    # V2 files), use Moveware's own coordinator so the file isn't "Unassigned".
+    # Mail still goes only to an address known for that name (else the fallback inbox).
+    if not coordinator and mw_coordinator:
+        coordinator = mw_coordinator
 
     # Options → accepted-option sell + sell charge lines (quote scope). Only the
     # charge-line sub-calls are gated by AUDIT_DEEP_LINES (they add calls/file);

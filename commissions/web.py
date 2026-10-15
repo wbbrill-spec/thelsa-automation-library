@@ -10,6 +10,8 @@ web.py — the /commissions pages.
     /commissions/upload-removals, /commissions/upload-costing
                             the two Moveware reports that hold each file's booked quote (POST)
     /commissions/workbook   the same report as an Excel workbook, one sheet per month in Finance's own layout
+    /commissions/signoff    a step of a pay run: submit (Lupita), approve or return (Mario), paid (Rogelio) (POST)
+    /commissions/signoff/<n>/instruction   the payment instruction of pay run n, as Excel
 
 Who may open it: only the addresses in COMMISSION_USERS (comma separated, set in
 Render). Without that setting it is Lupita, Mario, Rogelio and Bill. Anyone else
@@ -43,6 +45,7 @@ from . import invoices as I
 from . import payments as P
 from . import quotes as Q
 from . import report as R
+from . import signoff as SO
 from . import store
 
 commissions_bp = Blueprint("commissions", __name__)
@@ -205,8 +208,11 @@ def commissions_home(email):
     reg = _register()
     rep = _report(lines, s, mw) if lines else None
     months = sorted(s.budgets)
+    runs = _runs()
+    pay_draft = SO.draft(rep, runs, s, R.NEW_FROM) if rep else None
     resp = make_response(render_template_string(
-        PAGE, rep=rep, meta=meta, error=error or mw["error"] or col["error"] or reg["error"], mw=mw, col=col["sources"], reg=reg, pmeta=pmeta, msg=session.pop("commission_msg", None), csrf=_csrf(),
+        PAGE, rep=rep, runs=list(reversed(runs)), pay_draft=pay_draft, so=SO, my_roles=SO.roles_of(email),
+        open_run=next((r for r in runs if r["state"] == SO.OPEN), None), meta=meta, error=error or mw["error"] or col["error"] or reg["error"], mw=mw, col=col["sources"], reg=reg, pmeta=pmeta, msg=session.pop("commission_msg", None), csrf=_csrf(),
         s=s, bookings=R.clean_bookings(bookings), bmeta=bmeta, months=months, month_label=_month_label,
         month_label_es=_month_label_es, durable=store.durable(), new_from=_month_label(R.NEW_FROM),
         new_from_es=_month_label_es(R.NEW_FROM), email=email))
@@ -480,6 +486,55 @@ def commissions_workbook(email):
     return resp
 
 
+def _runs() -> list:
+    return store.get("pay_runs", [])[0] or []
+
+
+@commissions_bp.route("/commissions/signoff", methods=["POST"])
+@_restricted
+def commissions_signoff(email):
+    _check_csrf()
+    home = redirect(url_for("commissions.commissions_home") + "#payruns")
+    step = request.form.get("step") or ""
+    lines, _meta, _error = _current()
+    if not lines:
+        _say("Upload Finance's margin report first.", "Primero suba el reporte de margen de Finanzas.", bad=True)
+        return home
+    s = settings()
+    runs = _runs()
+    current = SO.draft(_report(lines, s), runs, s, R.NEW_FROM)
+    try:
+        run_id = int(request.form.get("run") or 0)
+    except ValueError:
+        run_id = 0
+    try:
+        run = SO.act(runs, step, email, s, current=current, run_id=run_id, note=request.form.get("note") or "",
+                     paid_on=request.form.get("paid_on") or "", expect=request.form.get("expect") or "")
+    except SO.SignOffError as e:
+        _say(str(e), e.es, bad=True)
+        return home
+    store.put("pay_runs", runs, by=email)
+    _say(f"Pay run {run['id']}: step '{step}' done; it is now {run['state']}.",
+         f"Corrida {run['id']}: paso «{SO.STEP_ES[step]}» hecho; ahora está {SO.STATE_ES[run['state']]}.")
+    return home
+
+
+@commissions_bp.route("/commissions/signoff/<int:run_id>/instruction")
+@_restricted
+def commissions_instruction(email, run_id):
+    try:
+        run = SO.find(_runs(), run_id)
+    except SO.SignOffError:
+        abort(404)
+    buf = io.BytesIO()
+    SO.instruction_book(run, buf)
+    buf.seek(0)
+    resp = send_file(buf, as_attachment=True, download_name=f"Commission pay run {run_id} ({run['state']}).xlsx",
+                     mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
 # ── formatting ───────────────────────────────────────────────────────────────
 @commissions_bp.app_template_filter("cm_money")
 def _money(v, decimals=0):
@@ -624,6 +679,46 @@ input[type=file]{font:inherit}button.go,.btn{background:var(--navy);color:#fff;b
 'La descarga de Excel tiene el mismo estado en la hoja "By person". Los importes no se redondean: aún no hay regla de redondeo.') }}</p>{% endif %}
 <p class="small">{{ t('Sales two thirds, Adm, MC and Buyer one third. Control (total paid out minus total calculated):',
 'Ventas dos tercios; Adm, MC y Compras un tercio. Control (total repartido menos total calculado):') }} {{ rep.control|cm_money(2) }}.</p></div>
+
+{% if rep %}<div class="card" id="payruns"><h2>{{ t('Pay runs: review, approval and payment', 'Corridas de pago: revisión, aprobación y pago') }} (MXN)</h2>
+<p class="small">{{ t('Lupita reviews and submits a run, Mario approves it (or returns it with a note), Rogelio records that it was paid. A run pays every collected line of the new calculation, less what earlier approved runs already paid on it, so nothing is paid twice and late collections or late margin parts go in the next run.',
+'Lupita revisa y envía la corrida, Mario la aprueba (o la devuelve con una nota), Rogelio registra que se pagó. Una corrida paga cada línea cobrada del cálculo nuevo, menos lo ya pagado en corridas aprobadas anteriores; nada se paga dos veces y los cobros o márgenes tardíos entran en la siguiente corrida.') }}
+{{ t('Your role:', 'Su papel:') }} <b>{% for r in my_roles %}{{ {'review': t('reviewer', 'revisión'), 'approve': t('approver', 'aprobación'), 'finance': t('Finance', 'Finanzas'), 'admin': 'admin'}[r] }}{% if not loop.last %}, {% endif %}{% else %}{{ t('view only', 'solo consulta') }}{% endfor %}</b>.</p>
+{% if open_run %}{% set r = open_run %}
+<h3>{{ t('Run ' ~ r.id ~ ' is waiting for approval', 'La corrida ' ~ r.id ~ ' espera aprobación') }}: {{ r.due|cm_money(2) }}</h3>
+<p class="small">{{ t('Submitted by', 'Enviada por') }} {{ r.log[0].by }} · {{ r.log[0].at[:16].replace('T', ' ') }} UTC{% if r.log[0].note %} · “{{ r.log[0].note }}”{% endif %} · {{ r.lines|length }} {{ t('lines', 'líneas') }} · {{ t('invoice months', 'meses de factura') }} {{ r.months|join(', ') }}</p>
+<div class="scroll"><table><tr><th>{{ t('Person', 'Persona') }}</th><th class="l">{{ t('Group', 'Grupo') }}</th><th>{{ t('Amount', 'Importe') }}</th></tr>
+{% for p in r.people %}<tr><td>{{ p.name }}</td><td class="l">{{ p.group }}</td><td>{{ p.amount|cm_money(2) }}</td></tr>{% endfor %}</table></div>
+<p><a class="btn ghost" href="/commissions/signoff/{{ r.id }}/instruction">{{ t('Download the run (Excel)', 'Descargar la corrida (Excel)') }}</a></p>
+{% if so.may(email, 'approve') %}<form method="post" action="/commissions/signoff" class="row"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="run" value="{{ r.id }}">
+<input type="text" name="note" placeholder="{{ 'Note (required to return) / Nota (obligatoria para devolver)' }}" style="min-width:320px">
+<button type="submit" name="step" value="approve" class="go">{{ t('Approve run ' ~ r.id, 'Aprobar corrida ' ~ r.id) }}</button>
+<button type="submit" name="step" value="return" class="btn ghost">{{ t('Return with note', 'Devolver con nota') }}</button></form>{% endif %}
+{% if so.may(email, 'withdraw') %}<form method="post" action="/commissions/signoff" class="row"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="run" value="{{ r.id }}">
+<button type="submit" name="step" value="withdraw" class="btn ghost">{{ t('Withdraw (before approval)', 'Retirar (antes de aprobar)') }}</button></form>{% endif %}
+{% elif pay_draft %}
+<h3>{{ t('Next run (draft, worked out now)', 'Siguiente corrida (borrador, calculado ahora)') }}: {{ pay_draft.due|cm_money(2) }}</h3>
+{% if pay_draft.lines %}<p class="small">{{ pay_draft.lines|length }} {{ t('lines', 'líneas') }} · {{ t('invoice months', 'meses de factura') }} {{ pay_draft.months|join(', ') }}{% set adj = pay_draft.lines|selectattr('adjust')|list %}{% if adj %} · {{ adj|length }} {{ t('adjustments to lines paid before', 'ajustes a líneas pagadas antes') }}{% endif %}</p>
+<details><summary>{{ t('Lines in this run', 'Líneas de esta corrida') }}</summary><div class="scroll"><table><tr><th>{{ t('Month', 'Mes') }}</th><th>{{ t('File', 'Expediente') }}</th><th>{{ t('Line commission', 'Comisión de la línea') }}</th><th>{{ t('Paid before', 'Pagado antes') }}</th><th>{{ t('In this run', 'En esta corrida') }}</th></tr>
+{% for x in pay_draft.lines %}<tr><td>{{ x.month }}</td><td>{{ x.job }}</td><td>{{ x.total|cm_money(2) }}</td><td>{{ x.before|cm_money(2) }}</td><td>{{ x.due|cm_money(2) }}</td></tr>{% endfor %}</table></div></details>
+<div class="scroll"><table><tr><th>{{ t('Person', 'Persona') }}</th><th class="l">{{ t('Group', 'Grupo') }}</th><th>{{ t('Amount', 'Importe') }}</th></tr>
+{% for p in pay_draft.people %}<tr><td>{{ p.name }}</td><td class="l">{{ p.group }}</td><td>{{ p.amount|cm_money(2) }}</td></tr>{% endfor %}</table></div>
+{% if so.may(email, 'submit') %}<form method="post" action="/commissions/signoff" class="row"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="expect" value="{{ pay_draft.fingerprint }}">
+<input type="text" name="note" placeholder="{{ 'Note for Mario (optional) / Nota para Mario (opcional)' }}" style="min-width:320px">
+<button type="submit" name="step" value="submit" class="go">{{ t('Reviewed: send to Mario for approval', 'Revisado: enviar a Mario para aprobación') }}</button></form>{% endif %}
+{% else %}<p>{{ t('Nothing new to pay: no collected line of the new calculation is left unpaid.', 'Nada nuevo por pagar: no queda ninguna línea cobrada del cálculo nuevo sin pagar.') }}</p>{% endif %}
+{% for w in pay_draft.warnings %}<p class="note warn">{{ w.month }} · {{ w.job }}: {{ t(w.en, w.es) }} ({{ w.paid|cm_money(2) }}).</p>{% endfor %}
+{% endif %}
+{% if runs %}<h3>{{ t('All runs', 'Todas las corridas') }}</h3><div class="scroll"><table><tr><th>#</th><th class="l">{{ t('State', 'Estado') }}</th><th>{{ t('Total', 'Total') }}</th><th class="l">{{ t('Months', 'Meses') }}</th><th class="l">{{ t('History', 'Historial') }}</th><th></th></tr>
+{% for r in runs %}<tr><td>{{ r.id }}</td><td class="l">{{ t(r.state, so.STATE_ES[r.state]) }}{% if r.paid_on %} {{ r.paid_on }}{% endif %}</td><td>{{ r.due|cm_money(2) }}</td><td class="l">{{ r.months|join(', ') }}</td>
+<td class="l wrapc">{% for e in r.log %}{{ t(e.step, so.STEP_ES[e.step]) }}: {{ e.by }}{% if e.as_admin %} (admin){% endif %}, {{ e.at[:16].replace('T', ' ') }}{% if e.note %} “{{ e.note }}”{% endif %}{% if not loop.last %}<br>{% endif %}{% endfor %}
+{% if r.changed_at_approval %}<br><span class="small">{{ t('At approval the live figures differed by', 'Al aprobar, las cifras vivas diferían en') }} {{ (r.changed_at_approval.on_these_lines + r.changed_at_approval.new_lines)|cm_money(2) }}; {{ t('the difference goes to the next run.', 'la diferencia pasa a la siguiente corrida.') }}</span>{% endif %}</td>
+<td><a href="/commissions/signoff/{{ r.id }}/instruction">Excel</a>
+{% if r.state == 'approved' and so.may(email, 'pay') %}<form method="post" action="/commissions/signoff" class="row"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="run" value="{{ r.id }}">
+<input type="date" name="paid_on"><button type="submit" name="step" value="pay" class="go">{{ t('Mark paid', 'Marcar pagada') }}</button></form>{% endif %}
+{% if r.state == 'approved' and so.may(email, 'cancel') and 'admin' in my_roles %}<form method="post" action="/commissions/signoff" class="row"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="run" value="{{ r.id }}">
+<input type="text" name="note" placeholder="Reason / Motivo"><button type="submit" name="step" value="cancel" class="btn ghost">{{ t('Cancel (admin)', 'Cancelar (admin)') }}</button></form>{% endif %}</td></tr>{% endfor %}</table></div>{% endif %}
+<p class="small">{{ t('Amounts per person are rounded to the cent (half up); any cent left over shows as the rounding difference in the Excel file.', 'Los importes por persona se redondean al centavo (medio hacia arriba); cualquier centavo sobrante aparece como diferencia por redondeo en el Excel.') }}</p></div>{% endif %}
 
 <div class="card" id="checks"><h2>{{ t('Points to look at', 'Puntos por revisar') }} ({{ rep.check_count }})</h2>
 <p class="small">{{ t('From Finance\'s report and from the Moveware reports. File numbers, document numbers and amounts only. Unless a Moveware report is named, row numbers are rows of the sheet "Base". Amounts here are always in pesos.',

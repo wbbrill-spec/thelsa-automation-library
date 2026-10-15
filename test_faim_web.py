@@ -45,11 +45,12 @@ def test_a_move_is_a_file_collected_inside_the_last_12_months():
 def test_lost_and_cancelled_files_are_left_out_and_counted():
     out = snap([
         rec("1", "W", pack=dt.date(2026, 5, 1)),
-        rec("2", "P", pack=dt.date(2026, 5, 1)),
+        rec("2", "P", pack=dt.date(2026, 5, 1), invoiced=True),
         rec("3", "L", pack=dt.date(2026, 5, 1)),
         rec("4", "C", pack=dt.date(2026, 5, 1)),
     ])
-    assert out["metrics"]["tiles"] == {"moves": 4, "lost": 2, "audited": 2, "booked": 1,
+    assert out["metrics"]["tiles"] == {"moves": 4, "lost": 2, "notBookedUnproven": 0,
+                                       "audited": 2, "booked": 1,
                                        "pending": 1, "missingSurvey": 2}
     assert [b["file"] for b in out["metrics"]["breaches"]] == ["1", "2"]
     assert out["selection"]["moves_by_status"] == {"W": 1, "P": 1, "L": 1, "C": 1}
@@ -59,7 +60,7 @@ def test_lost_statuses_are_configurable(monkeypatch):
     monkeypatch.setattr(faim_web, "LOST_STATUSES", {"L", "C", "P"})
     t = snap([rec("1", "W", pack=dt.date(2026, 5, 1)),
               rec("2", "P", pack=dt.date(2026, 5, 1))])["metrics"]["tiles"]
-    assert (t["lost"], t["audited"]) == (1, 1)
+    assert (t["lost"], t["audited"], t["notBookedUnproven"]) == (1, 1, 0)
 
 
 def test_a_sequel_is_its_own_move_but_the_same_file():
@@ -131,7 +132,7 @@ def test_a_file_whose_survey_was_not_read_yet_is_not_called_missing():
 
 
 def test_gap_list_is_worst_first_booked_first_and_capped():
-    files = [rec(str(i), "P", pack=dt.date(2026, 5, 1)) for i in range(20)]
+    files = [rec(str(i), "P", pack=dt.date(2026, 5, 1), invoiced=True) for i in range(20)]
     files.append(rec("B", "W", pack=dt.date(2026, 5, 1)))
     files.append(rec("X", "W", pack=dt.date(2026, 5, 1), coordinator=""))
     m = snap(files)["metrics"]
@@ -436,7 +437,7 @@ def test_sit_days_keeps_done_and_scheduled_and_drops_unconfirmed():
         "110002a": _sit_job(delivery=("2026-11-02", "scheduled")),
         "110003": _sit_job(pack=("2026-09-03", "unconfirmed")),
     })
-    assert days == {"110001": {"pack": dt.date(2026, 9, 1)},
+    assert days == {"110001": {"pack": dt.date(2026, 9, 1), "done": True},
                     "110002A": {"delivery": dt.date(2026, 11, 2)}}
 
 
@@ -565,3 +566,31 @@ def test_keeper_off_under_pytest_and_when_disabled(monkeypatch):
     assert faim_web.start_keeper() is None
     monkeypatch.setenv("FAIM_KEEPER", "0")
     assert faim_web.start_keeper() is None
+
+
+
+# ── Not marked booked: only with proof it moved (Bill, 15 Oct) ──────────────────
+def test_pending_file_with_a_past_date_but_no_proof_is_left_out_and_counted():
+    out = snap([rec("1", "W", pack=dt.date(2026, 5, 1)),
+                rec("2", "P", pack=dt.date(2026, 5, 1))])
+    t, sel = out["metrics"]["tiles"], out["selection"]
+    assert (t["moves"], t["audited"], t["notBookedUnproven"], t["pending"]) == (2, 1, 1, 0)
+    assert sel["not_booked_unproven_by_status"] == {"P": 1}
+    assert [b["file"] for b in out["metrics"]["breaches"]] == ["1"]
+
+
+def test_pending_file_that_was_invoiced_is_audited():
+    t = snap([rec("2", "P", pack=dt.date(2026, 5, 1), invoiced=True)])["metrics"]["tiles"]
+    assert (t["audited"], t["pending"], t["notBookedUnproven"]) == (1, 1, 0)
+
+
+def test_pending_file_a_truck_carried_is_audited_but_a_scheduled_one_is_not():
+    sit = faim_web.sit_days({
+        "2": {"moved": {"status": "done", "date": "2026-05-03"}},
+        "3": {"moved": {"status": "scheduled", "date": "2026-05-03"}}})
+    out = faim_web.faim_snapshot([rec("2", "P", pack=dt.date(2026, 5, 1)),
+                                  rec("3", "P", pack=dt.date(2026, 5, 1))],
+                                 today=TODAY, sit=sit)
+    t = out["metrics"]["tiles"]
+    assert (t["audited"], t["notBookedUnproven"]) == (1, 1)
+    assert out["selection"]["not_booked_kept_with_proof"] == 1

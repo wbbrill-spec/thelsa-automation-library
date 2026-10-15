@@ -93,7 +93,7 @@ WINDOW_MONTHS = int(os.environ.get("FAIM_WINDOW_MONTHS", "12"))
 PASS_BAR = 80
 _MAX_GAP_ROWS = 15
 
-_EMPTY_TILES = {"moves": 0, "lost": 0, "audited": 0, "booked": 0, "pending": 0,
+_EMPTY_TILES = {"moves": 0, "lost": 0, "notBookedUnproven": 0, "audited": 0, "booked": 0, "pending": 0,
                 "missingSurvey": 0}
 
 # Shown only when Moveware credentials are not set on the host.
@@ -162,6 +162,11 @@ def sit_days(jobs):
                 day = _as_date(ms.get("date"))
                 if day:
                     days[kind] = day
+        # did a truck actually carry it? (a "done" day, not just a scheduled one)
+        if days and isinstance(j, dict) and any(
+                isinstance(j.get(k), dict) and j[k].get("status") == "done"
+                for k in ("pack", "delivery", "moved")):
+            days["done"] = True
         if days:
             out[str(num).strip().upper()] = days
     return out
@@ -216,6 +221,9 @@ def faim_snapshot(files, today=None, sit=None):
             "delivery_due": job_type not in AGENT_EXPORT_TYPES,   # agent export: ends at origin
             "sit_pack": sit_pack if (sit_pack and sit_pack <= today) else None,
             "type": job_type,
+            # proof it really moved, for a file not marked booked (Bill, 15 Oct):
+            # it was invoiced, or SIT's plan shows a truck carried it
+            "proven": bool(f.get("invoiced")) or bool(from_sit.get("done")),
         }
         if collect is None:
             no_date.append(row)
@@ -228,7 +236,12 @@ def faim_snapshot(files, today=None, sit=None):
             by_key[key_src] += 1
 
     lost = [r for r in moves if r["status"] in LOST_STATUSES]
-    audited = [r for r in moves if r["status"] not in LOST_STATUSES]
+    # Not marked booked and no proof it moved (no invoice, no truck in the plan):
+    # a quote whose date lapsed, not a move. Left out and counted.
+    unproven = [r for r in moves if r["status"] not in LOST_STATUSES
+                and r["status"] != BOOKED_STATUS and not r["proven"]]
+    audited = [r for r in moves if r["status"] not in LOST_STATUSES
+               and (r["status"] == BOOKED_STATUS or r["proven"])]
     booked = [r for r in audited if r["status"] == BOOKED_STATUS]
     n = len(audited)
 
@@ -299,6 +312,7 @@ def faim_snapshot(files, today=None, sit=None):
             "tiles": {
                 "moves": len(moves),
                 "lost": len(lost),
+                "notBookedUnproven": len(unproven),
                 "audited": n,
                 "booked": len(booked),
                 "pending": n - len(booked),
@@ -324,6 +338,10 @@ def faim_snapshot(files, today=None, sit=None):
             "agent_export_types": sorted(AGENT_EXPORT_TYPES),
             "agent_import_types": sorted(AGENT_IMPORT_TYPES),
             "lost_or_cancelled": len(lost),
+            "not_booked_unproven": len(unproven),
+            "not_booked_unproven_by_status": _by_status(unproven),
+            "not_booked_kept_with_proof": sum(1 for r in audited
+                                              if r["status"] != BOOKED_STATUS),
             "audited": n,
             "booked": len(booked),
             "no_key_date": len(no_date),
@@ -587,7 +605,7 @@ h1{font-size:22px;margin:0 0 2px}
 .card{background:var(--surface-1);border:1px solid var(--border);border-radius:12px;padding:18px 20px;margin-top:18px}
 .card h2{font-size:14px;margin:0 0 2px}
 .card .note{font-size:12px;color:var(--muted);margin:0 0 16px}
-.tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-top:18px}
+.tiles{display:grid;grid-template-columns:repeat(5,1fr);gap:14px;margin-top:18px}
 .tile{background:var(--surface-1);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
 .tile .label{font-size:12px;color:var(--text-secondary);margin:0}
 .tile .val{font-size:30px;font-weight:650;margin:6px 0 0;letter-spacing:-.01em}
@@ -613,6 +631,7 @@ td.num{font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
 .pill.crit{color:var(--critical);background:color-mix(in srgb,var(--critical) 14%,transparent)}
 .pill.warn{color:var(--serious);background:color-mix(in srgb,var(--serious) 16%,transparent)}
 .cols2{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+@media (max-width:1100px){.tiles{grid-template-columns:repeat(3,1fr)}}
 @media (max-width:820px){.tiles{grid-template-columns:repeat(2,1fr)}.cols2{grid-template-columns:1fr}.row{grid-template-columns:120px 1fr 64px}}
 .foot{color:var(--muted);font-size:11.5px;margin-top:22px}
 </style>
@@ -688,7 +707,8 @@ const t=d.tiles||{};
 document.getElementById('tiles').innerHTML=`
 <div class="tile"><p class="label">Moves in the window</p><p class="val">${t.moves}</p><p class="sub2">packed or delivered in the last 12 months, any status</p></div>
 <div class="tile"><p class="label">Lost or cancelled</p><p class="val">${t.lost}</p><p class="sub2">left out of the audit</p></div>
-<div class="tile"><p class="label">Files audited</p><p class="val">${t.audited}</p><p class="sub2">${t.booked} booked · ${t.pending} not marked booked</p></div>
+<div class="tile"><p class="label">Not booked, no proof it moved</p><p class="val">${t.notBookedUnproven||0}</p><p class="sub2">no invoice, no truck in the plan &mdash; left out</p></div>
+<div class="tile"><p class="label">Files audited</p><p class="val">${t.audited}</p><p class="sub2">${t.booked} booked · ${t.pending} not marked booked but invoiced or moved</p></div>
 <div class="tile"><p class="label">Missing survey</p><p class="val">${t.missingSurvey}</p><p class="sub2">of audited files</p></div>`;
 bars(document.getElementById('byCoord'),d.byCoordinator||[]);
 bars(document.getElementById('byCrit'),d.byCriterion||[]);

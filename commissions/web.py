@@ -10,6 +10,7 @@ web.py — the /commissions pages.
     /commissions/upload-removals, /commissions/upload-costing
                             the two Moveware reports that hold each file's booked quote (POST)
     /commissions/workbook   the same report as an Excel workbook, one sheet per month in Finance's own layout
+    /commissions/settings   rate, weights, people and shares, budgets per month; admins only (POST)
     /commissions/signoff    a step of a pay run: submit (Lupita), approve or return (Mario), paid (Rogelio) (POST)
     /commissions/signoff/<n>/instruction   the payment instruction of pay run n, as Excel
 
@@ -45,6 +46,7 @@ from . import invoices as I
 from . import payments as P
 from . import quotes as Q
 from . import report as R
+from . import settings_store as SS
 from . import signoff as SO
 from . import store
 
@@ -104,7 +106,25 @@ def _say(en: str, es: str, bad: bool = False) -> None:
 
 
 def settings() -> E.Settings:
-    return E.Settings(budgets=dict(E.BUDGET_2026)).check()
+    """The settings in use: those saved on the page, or the defaults. Stored
+    settings that no longer add up are not used (the page says so)."""
+    doc, _ = store.get("settings")
+    try:
+        return SS.from_doc(doc)
+    except (E.SettingsError, TypeError, ValueError, AttributeError):
+        return SS.defaults().check()
+
+
+def _settings_state() -> dict:
+    doc, meta = store.get("settings")
+    bad = False
+    if doc:
+        try:
+            SS.from_doc(doc)
+        except (E.SettingsError, TypeError, ValueError, AttributeError):
+            bad = True
+    return {"custom": bool(doc) and not bad, "bad": bad, "meta": meta,
+            "history": list(reversed(store.get("settings_history", [])[0] or []))[:10]}
 
 
 def _current():
@@ -211,7 +231,7 @@ def commissions_home(email):
     runs = _runs()
     pay_draft = SO.draft(rep, runs, s, R.NEW_FROM) if rep else None
     resp = make_response(render_template_string(
-        PAGE, rep=rep, runs=list(reversed(runs)), pay_draft=pay_draft, so=SO, my_roles=SO.roles_of(email),
+        PAGE, rep=rep, sst=_settings_state(), ss=SS, runs=list(reversed(runs)), pay_draft=pay_draft, so=SO, my_roles=SO.roles_of(email),
         open_run=next((r for r in runs if r["state"] == SO.OPEN), None), meta=meta, error=error or mw["error"] or col["error"] or reg["error"], mw=mw, col=col["sources"], reg=reg, pmeta=pmeta, msg=session.pop("commission_msg", None), csrf=_csrf(),
         s=s, bookings=R.clean_bookings(bookings), bmeta=bmeta, months=months, month_label=_month_label,
         month_label_es=_month_label_es, durable=store.durable(), new_from=_month_label(R.NEW_FROM),
@@ -484,6 +504,34 @@ def commissions_workbook(email):
                      mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     resp.headers["Cache-Control"] = "no-store"
     return resp
+
+
+@commissions_bp.route("/commissions/settings", methods=["POST"])
+@_restricted
+def commissions_settings(email):
+    _check_csrf()
+    home = redirect(url_for("commissions.commissions_home") + "#settings")
+    if not SO.is_admin(email):
+        _say("Only an administrator can change the settings.", "Solo un administrador puede cambiar la configuración.", bad=True)
+        return home
+    before = settings()
+    if request.form.get("action") == "reset":
+        after = SS.defaults().check()
+        store.put("settings", {}, by=email)
+    else:
+        try:
+            after = SS.parse(request.form, before)
+        except SS.SettingsFormError as e:
+            _say(str(e), e.es, bad=True)
+            return home
+        store.put("settings", SS.to_doc(after), by=email)
+    what = SS.changes(before, after)
+    hist, _ = store.get("settings_history", [])
+    hist = (hist or []) + [{"at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), "by": email,
+                            "changes": what or ["no change"]}]
+    store.put("settings_history", hist[-100:], by=email)
+    _say(f"Settings saved: {len(what)} change(s).", f"Configuración guardada: {len(what)} cambio(s).")
+    return home
 
 
 def _runs() -> list:
@@ -774,6 +822,30 @@ input[type=file]{font:inherit}button.go,.btn{background:var(--navy);color:#fff;b
 <td class="l wrapc">{{ r.quote.missing|join(', ') if r.quote.missing else '–' }}</td></tr>{% endfor %}</table></div>
 <p class="small">{{ t('A file\'s booked quote is counted once, in the month the file is first invoiced. A month uses its booked quotes as bookings when every file first invoiced in it has one; otherwise it keeps the budget as a placeholder, unless a figure is typed below. Dollar quotes at ' ~ '%.2f'|format(s.usd_mxn) ~ '.',
 'La cotización de un expediente se cuenta una vez, en el mes en que se factura por primera vez. Un mes usa sus cotizaciones como ventas contratadas cuando todos los expedientes facturados por primera vez en él tienen cotización; si no, conserva el presupuesto como valor provisional, salvo que se capture una cifra abajo. Cotizaciones en dólares a ' ~ '%.2f'|format(s.usd_mxn) ~ '.') }}</p>{% endif %}</div>
+
+<div class="card" id="settings"><h2>{{ t('Settings', 'Configuración') }}</h2>
+<p class="small">{% if sst.bad %}<b>{{ t('The saved settings do not add up and are not in use; the defaults are used. Save them again.', 'La configuración guardada no cuadra y no se usa; se usan los valores por defecto. Guárdela de nuevo.') }}</b>{% elif sst.custom %}{{ t('In use: saved', 'En uso: guardada el') }} {{ sst.meta.at|cm_when }} {{ t('by', 'por') }} {{ sst.meta.by }}.{% else %}{{ t('In use: the defaults agreed with Lupita (3 %, 60/30/10, 16.50, 2026 budget).', 'En uso: los valores acordados con Lupita (3 %, 60/30/10, 16.50, presupuesto 2026).') }}{% endif %}
+{{ t('A change applies to every month on the page at once; pay runs already approved keep their amounts.', 'Un cambio se aplica a todos los meses de la página; las corridas ya aprobadas conservan sus importes.') }}
+{% if 'admin' not in my_roles %}{{ t('Only an administrator can change them.', 'Solo un administrador puede cambiarla.') }}{% endif %}</p>
+<details><summary>{{ t('Show settings', 'Ver configuración') }}</summary>
+<form method="post" action="/commissions/settings"><input type="hidden" name="csrf" value="{{ csrf }}">
+{% set dis = '' if 'admin' in my_roles else 'disabled' %}
+<div class="scroll"><table>
+{% for k, en, es in ss.PCT_FIELDS %}<tr><td class="l">{{ t(en, es) }}</td><td><input type="text" name="{{ k }}" value="{{ '%g'|format(s[k] * 100) }}" {{ dis }} size="8"> %</td></tr>{% endfor %}
+<tr><td class="l">{{ t('Dollar rate for sales (pesos per dollar)', 'Tipo de cambio para ventas (pesos por dólar)') }}</td><td><input type="text" name="usd_mxn" value="{{ '%.2f'|format(s.usd_mxn) }}" {{ dis }} size="8"></td></tr>
+</table></div>
+{% for group, people, label, label_es in (('sales', s.sales_people, 'Sales: people and share of the group', 'Ventas: personas y parte del grupo'), ('admin', s.admin_people, 'Adm, MC and Buyer: people and share of the group', 'Adm, MC y Compras: personas y parte del grupo')) %}
+<h3>{{ t(label, label_es) }}</h3><div class="scroll"><table>
+{% for i in range(ss.MAX_PEOPLE) %}{% set p = people[i] if i < people|length else none %}<tr><td><input type="text" name="{{ group }}_name_{{ i }}" value="{{ p[0] if p else '' }}" {{ dis }} size="34"></td><td><input type="text" name="{{ group }}_share_{{ i }}" value="{{ '%g'|format(p[1] * 100) if p else '' }}" {{ dis }} size="6"> %</td></tr>{% endfor %}
+</table></div>{% endfor %}
+<h3>{{ t('Booking budget per month, Corporate + Private (MXN)', 'Presupuesto de ventas contratadas por mes, Corporativo + Privado (MXN)') }}</h3>
+<p class="small">{{ t('A month with no budget is not calculated.', 'Un mes sin presupuesto no se calcula.') }}</p>
+<div class="scroll"><table>{% for m in ss.budget_months({'budgets': s.budgets}) %}<tr><td class="l">{{ mon(m) }}</td><td><input type="text" name="bud_{{ m }}" inputmode="decimal" value="{{ '{:,.2f}'.format(s.budgets[m]) if m in s.budgets else '' }}" {{ dis }}></td></tr>{% endfor %}</table></div>
+{% if 'admin' in my_roles %}<p class="row"><button type="submit" class="go">{{ t('Save settings', 'Guardar configuración') }}</button>
+<button type="submit" name="action" value="reset" class="btn ghost" onclick="return confirm('Back to the defaults? / ¿Volver a los valores por defecto?')">{{ t('Back to the defaults', 'Volver a los valores por defecto') }}</button></p>{% endif %}
+</form>
+{% if sst.history %}<h3>{{ t('Last changes', 'Últimos cambios') }}</h3><ul class="small">{% for h in sst.history %}<li>{{ h.at[:16].replace('T', ' ') }} UTC · {{ h.by }}: {{ h.changes|join('; ') }}</li>{% endfor %}</ul>{% endif %}
+</details></div>
 
 <div class="card" id="bookings"><h2>{{ t('Bookings per month', 'Ventas contratadas por mes') }} (MXN)</h2>
 <p class="small">{{ t('Bookings normally come from the booked quotes above. A figure typed here replaces them for that month. Sales reach = bookings ÷ budget × ' ~ (s.w_invoicing*100)|round|int ~ ' %. Leave a month blank to use the booked quotes.',

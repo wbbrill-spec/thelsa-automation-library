@@ -118,9 +118,43 @@ def _base(job):
     return s
 
 
-def build(files, finance: dict, today: dt.date | None = None) -> dict:
+TYPO_BEFORE = dt.date(2025, 1, 1)   # a move date earlier than this on a 2026 file is a typing slip
+
+
+def overlay_plan_dates(files, sit_jobs: dict | None, today: dt.date | None = None) -> list:
+    """Copies of the files with pack / delivery filled from SIT's Plan de Viajes
+    where MoveWare has none (or a date that is clearly mistyped, before 2025).
+    Only dates the plan shows as DONE (the day passed and the move stayed in the
+    plan) are used; the copy is marked pack_src / delivery_src = 'plan'."""
+    if not sit_jobs:
+        return files
+    today = today or dt.date.today()
+    out = []
+    for f in files:
+        j = sit_jobs.get(str(f.get("job") or "").upper()) or sit_jobs.get(_base(f.get("job")))
+        if not j:
+            out.append(f)
+            continue
+        g = dict(f)
+        for key in ("pack", "delivery"):
+            m = j.get(key) or {}
+            mine = _d(f.get(key))
+            if m.get("status") != "done" or not m.get("date"):
+                continue
+            if mine is None or mine < TYPO_BEFORE:
+                day = _d(m["date"])
+                if day and day <= today:
+                    g[key] = day.isoformat()
+                    g[key + "_src"] = "plan"
+        out.append(g)
+    return out
+
+
+def build(files, finance: dict, today: dt.date | None = None, costing: dict | None = None) -> dict:
     """All executive metrics, for both periods. `files` = the auditor's raw
-    in-window records (NOT the display-currency copies)."""
+    in-window records (NOT the display-currency copies). `costing` = the Move
+    Costing Sheet per base file (costing_sheet.costs()): the interim cost for
+    files Finance has invoiced but not costed yet."""
     today = today or dt.date.today()
     P = periods(today)
     spot = fx.month_end_spot(today)
@@ -134,6 +168,24 @@ def build(files, finance: dict, today: dt.date | None = None) -> dict:
     def ftype(job):
         b = _base(job)
         return ((fin_files.get(b) or {}).get("type") or (ledger.get(b) or {}).get("type") or "")
+
+    costing = costing or {}
+    mw_ccy = {}
+    for f in files:
+        mw_ccy.setdefault(_base(f.get("job")), (f.get("currency") or "", f.get("branch") or ""))
+
+    def sheet_cost_mxn(job, e):
+        """Interim cost in pesos from the costing sheet, or None."""
+        c = costing.get(_base(job))
+        if not c or c.get("cost_best") is None:
+            return None
+        import costing_sheet as CS
+        cur, br = mw_ccy.get(_base(job), ("", ""))
+        ccy = CS.file_currency(job, cur, br)
+        if not ccy:
+            orig = (e.get("inv_orig") or {})
+            ccy = next(iter(orig)) if len(orig) == 1 else ""
+        return CS.to_mxn(c["cost_best"], ccy, e, plan)
 
     out = {"periods": {}, "fx": {"plan": plan, "spot": spot}, "as_of": today.isoformat()}
     stale = sum(1 for f in files if "inv_list" not in f)
@@ -184,6 +236,7 @@ def build(files, finance: dict, today: dt.date | None = None) -> dict:
                    "coordinator": f.get("coordinator") or "",
                    "pack": pack.isoformat() if pack else None,
                    "delivery": deliv.isoformat() if deliv else None,
+                   "pack_src": f.get("pack_src"), "delivery_src": f.get("delivery_src"),
                    "status": st, "embassy": emb, "value": _r(q),
                    "ccy": fx.normalize(f.get("currency"), None) or "",
                    "value_mxn": round(to_mxn(q, s_rate))}
@@ -200,7 +253,7 @@ def build(files, finance: dict, today: dt.date | None = None) -> dict:
 
         # Finance actuals — a file counts in the period of its first invoice.
         sales, sales_mxn, cost, cost_mxn = [0.0, 0.0], 0.0, 0.0, 0.0
-        pend_n = costed_n = neg_n = 0
+        pend_n = costed_n = neg_n = sheet_n = 0
         all_sales = [0.0, 0.0]
         last_inv = None
         for job, e in ledger.items():
@@ -220,6 +273,11 @@ def build(files, finance: dict, today: dt.date | None = None) -> dict:
                 f_sales, f_cost, f_pair = wb["net_sales"], wb.get("total_cost") or 0, [wb["net_sales"], 0.0]
             elif (e.get("cost_mxn") or 0) > 0:
                 f_sales, f_cost, f_pair = e["inv_mxn"], e["cost_mxn"], s_pair
+            elif (sc := sheet_cost_mxn(job, e)):
+                # Not costed by Finance yet: the costing sheet's loaded actual cost
+                # plus the quoted cost of lines still waiting for their invoice.
+                f_sales, f_cost, f_pair = e["inv_mxn"], sc, s_pair
+                sheet_n += 1
             else:
                 pend_n += 1
                 continue
@@ -244,6 +302,7 @@ def build(files, finance: dict, today: dt.date | None = None) -> dict:
             "fin_sales": _r(sales), "fin_margin": _r(margin), "fin_cost_mxn": round(cost_mxn, 2),
             "fin_margin_pct": round(margin_mxn / sales_mxn * 100, 1) if sales_mxn else None,
             "fin_costed_n": costed_n, "fin_pending_n": pend_n, "fin_neg_n": neg_n,
+            "fin_sheet_n": sheet_n,
             "fin_last_invoice": last_inv,
             "ready": ready, "ready_n": len(ready), "ready_val": _r(ready_val),
             "checks": checks, "checks_n": len(checks),

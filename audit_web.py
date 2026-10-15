@@ -1019,7 +1019,20 @@ def audit():
     import exec_dash
     import mw_live
     raw = mw_live.audited_in_window()
-    ex = exec_dash.build(raw, _load_finance_cost())
+    # Pack / delivery dates MoveWare lacks come from SIT's Plan de Viajes (done
+    # moves only), so files don't wait on coordinators to type them.
+    try:
+        import sit_milestones as sm
+        sm.ensure_built()
+        raw_dated = exec_dash.overlay_plan_dates(raw, sm.state().get("jobs"))
+    except Exception:
+        raw_dated = raw
+    try:
+        import costing_sheet
+        costing = costing_sheet.costs()
+    except Exception:
+        costing = {}
+    ex = exec_dash.build(raw_dated, _load_finance_cost(), costing=costing)
     # Self-heal: records cached before the per-invoice mapping existed are re-read
     # in the background so revenue/currency fill in without waiting for a full scan.
     if ex["stale_records"] and not mw_live.remap_status().get("running"):
@@ -1029,6 +1042,10 @@ def audit():
             pass
     ex["remap"] = mw_live.remap_status()
     ex["query_sheet"] = os.environ.get("AUDIT_QUERY_SHEET_URL", QUERY_SHEET_URL)
+    try:
+        ex["pc"] = _supplier_checks_view(raw_dated)
+    except Exception:
+        ex["pc"] = None
     try:
         import supplier_costs
         supplier_costs.ensure_scanner()
@@ -1169,6 +1186,120 @@ def audit_supplier_costs_status():
     d = request.get_json(silent=True) or request.form
     ok = supplier_costs.set_status(str(d.get("id") or ""), str(d.get("status") or ""))
     return jsonify({"ok": ok}), (200 if ok else 400)
+
+
+def _supplier_checks_view(files) -> dict:
+    """Findings from the Move Costing Sheet for the dashboard's checks tab."""
+    import costing_sheet as cs
+    doc = cs.load()
+    delivered = {}
+    for f in files or []:
+        d = f.get("delivery")
+        if d:
+            delivered[cs.base(f.get("job"))] = str(d)[:10]
+    rows = cs.supplier_checks(doc, delivered)
+    order = {"po_on_two_files": 0, "over_quote": 1, "invoice_missing": 2, "no_approval": 3}
+    rows.sort(key=lambda r: (order.get(r["check"], 9), -(r.get("difference") or 0), r["job"]))
+    counts = {}
+    for r in rows:
+        counts[r["check"]] = counts.get(r["check"], 0) + 1
+    return {"period": doc.get("period") or {}, "loaded_at": doc.get("loaded_at") or "",
+            "source": doc.get("source") or "", "rows": rows, "counts": counts,
+            "labels": cs.CHECK_LABELS}
+
+
+@audit_bp.route("/audit/upload-costing", methods=["POST"])
+@_login_required
+def audit_upload_costing():
+    """Load a new MoveWare Move Costing Sheet (.xlsx). Read in memory, kept
+    without customer names."""
+    from flask import jsonify, request
+    import costing_sheet as cs
+    up = request.files.get("file")
+    if not up or not (up.filename or "").lower().endswith(".xlsx"):
+        return jsonify({"ok": False, "error": "Choose the Move Costing Sheet .xlsx file."}), 400
+    try:
+        parsed = cs.parse(up.read())
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"ok": False, "error": str(e)[:300]}), 400
+    cs.save(parsed, by=session.get("user_email") or "")
+    if request.args.get("json") == "1":
+        return jsonify({"ok": True, "files": len(parsed["files"]), "period": parsed["period"]})
+    return redirect(url_for("audit.audit") + "#checks")
+
+
+@audit_bp.route("/audit/supplier-checks")
+@_login_required
+def audit_supplier_checks():
+    """JSON: supplier cost findings from the Move Costing Sheet."""
+    from flask import jsonify
+    import mw_live
+    try:
+        files = mw_live.audited_in_window() or []
+    except Exception:
+        files = []
+    return jsonify(_supplier_checks_view(files))
+
+
+_MS_PLAN = {"steps": [], "summary": {}, "built_at": None, "running": False, "error": None, "skipped": []}
+
+
+def _build_milestone_plan():
+    """Dry run: compare each Plan de Viajes milestone with the file's MoveWare
+    diary and list what WOULD be created / updated / reviewed. Writes nothing."""
+    import time
+    import mw_live
+    import milestone_plan as mp
+    import sit_milestones as sm
+    _MS_PLAN["running"] = True
+    try:
+        jobs = sm.state().get("jobs") or {}
+        steps, skipped = [], []
+        for job, j in sorted(jobs.items()):
+            jid = job
+            if not job.isdigit():
+                try:
+                    import mw_lots
+                    found = mw_lots.find(job)
+                    jid = str((found.get("job") or {}).get("id") or "") if found.get("status") == "found" else ""
+                except Exception:
+                    jid = ""
+            if not jid:
+                skipped.append(job)
+                continue
+            try:
+                body = mw_live._get_timed(f"/jobs/{jid}/activities", 15) or {}
+                acts = body.get("activities") or []
+            except Exception:
+                skipped.append(job)
+                continue
+            for st in mp.plan_for_job(job, j, acts):
+                st["coordinator"] = j.get("coordinator") or ""
+                steps.append(st)
+        _MS_PLAN.update(steps=steps, summary=mp.summarize(steps), skipped=skipped,
+                        built_at=time.time(), error=None)
+    except Exception as e:  # noqa: BLE001
+        _MS_PLAN["error"] = f"{type(e).__name__}: {e}"[:300]
+    finally:
+        _MS_PLAN["running"] = False
+
+
+@audit_bp.route("/audit/milestone-plan")
+@_login_required
+def audit_milestone_plan():
+    """DRY RUN of the Plan de Viajes → MoveWare diary write-back. Lists the
+    activities the automation would create or update (and the ones a person
+    should review). Nothing is written. ?build=1 rebuilds."""
+    import threading
+    import time
+    from flask import jsonify, request
+    import sit_milestones as sm
+    sm.ensure_built()
+    stale = not _MS_PLAN["built_at"] or time.time() - _MS_PLAN["built_at"] > 3600
+    if (request.args.get("build") == "1" or stale) and not _MS_PLAN["running"] and sm.state().get("jobs"):
+        threading.Thread(target=_build_milestone_plan, daemon=True, name="milestone-plan").start()
+    return jsonify({"dry_run": True, "writes_enabled": False, **{k: _MS_PLAN[k] for k in
+                    ("summary", "built_at", "running", "error", "skipped", "steps")}})
 
 
 @audit_bp.route("/audit/sit-milestones")

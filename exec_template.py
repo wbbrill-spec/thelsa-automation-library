@@ -90,6 +90,7 @@ EXEC_TEMPLATE = r"""<!DOCTYPE html>
   <nav class="tabs">
     <a class="tab-btn" data-tab="overview" href="#overview">{{ t('Overview', 'Resumen') }}</a>
     <a class="tab-btn" data-tab="underbilling" href="#underbilling">{{ t('Under-billing', 'Facturación incompleta') }}</a>
+    {% if ex.pc %}<a class="tab-btn" data-tab="checks" href="#checks">{{ t('Supplier cost checks', 'Revisión de costos') }}{% if ex.pc.rows %} ({{ ex.pc.rows|length }}){% endif %}</a>{% endif %}
     {% if ex.sc %}<a class="tab-btn" data-tab="costs" href="#costs">{{ t('Supplier costs', 'Costos de proveedores') }}{% if ex.sc.n_open %} ({{ ex.sc.n_open }}){% endif %}</a>{% endif %}
   </nav>
 
@@ -108,7 +109,7 @@ EXEC_TEMPLATE = r"""<!DOCTYPE html>
         <div class="sub">{{ t("Finance's ledger, net of credit notes · files first invoiced in the period", 'Libro de Finanzas, neto de notas de crédito · expedientes con primera factura en el periodo') }}{% if P.fin_last_invoice %} · {{ t('ledger through', 'datos hasta') }} {{ P.fin_last_invoice }}{% endif %}</div></div>
       <div class="tile"><div class="label">{{ t('Gross margin — Finance actuals', 'Margen bruto — real de Finanzas') }}</div>
         <div class="value {{ 'good' if (P.fin_margin_pct or 0) >= 0 else 'bad' }}">{{ M(P.fin_margin) }}</div>
-        <div class="sub">{% if P.fin_margin_pct is not none %}<b>{{ P.fin_margin_pct }}%</b> {{ t('on', 'sobre') }} {{ N(P.fin_costed_n) }} {{ t('costed files', 'expedientes con costo') }}{% if P.fin_neg_n %} · <span class="bad">{{ P.fin_neg_n }} {{ t('below cost', 'bajo costo') }}</span>{% endif %}{% else %}{{ t('no costed files in this period yet', 'aún no hay expedientes con costo en este periodo') }}{% endif %}</div></div>
+        <div class="sub">{% if P.fin_margin_pct is not none %}<b>{{ P.fin_margin_pct }}%</b> {{ t('on', 'sobre') }} {{ N(P.fin_costed_n) }} {{ t('costed files', 'expedientes con costo') }}{% if P.fin_neg_n %} · <span class="bad">{{ P.fin_neg_n }} {{ t('below cost', 'bajo costo') }}</span>{% endif %}{% if P.fin_sheet_n %} · {{ P.fin_sheet_n }} {{ t('costed from the MoveWare costing sheet until Finance posts them', 'con costo de la hoja de costeo de MoveWare hasta que Finanzas los registre') }}{% endif %}{% else %}{{ t('no costed files in this period yet', 'aún no hay expedientes con costo en este periodo') }}{% endif %}</div></div>
       <div class="tile"><div class="label">{{ t('Cost pending', 'Costo pendiente') }}</div>
         <div class="value warn">{{ N(P.fin_pending_n) }}</div>
         <div class="sub">{{ t('invoiced files with no cost posted yet — left out of the margin, never shown as 100%', 'expedientes facturados sin costo registrado — fuera del margen, nunca como 100%') }}</div></div>
@@ -143,7 +144,7 @@ EXEC_TEMPLATE = r"""<!DOCTYPE html>
     <h2>{{ t('Ready to invoice — by value', 'Listos para facturar — por valor') }}</h2>
     <div class="tbl"><table><tr><th>{{ t('File', 'Expediente') }}</th><th>{{ t('Client', 'Cliente') }}</th><th>{{ t('Coordinator', 'Coordinador') }}</th><th>{{ t('Packed', 'Empaque') }}</th><th>{{ t('Delivered', 'Entrega') }}</th><th class="r">{{ t('Quote', 'Cotización') }}</th></tr>
     {% for r in P.ready[:40] %}<tr><td class="num">{{ r.job }}{% if r.embassy %} <span class="pill">EMB</span>{% endif %}</td>
-      <td class="wrap">{{ r.client }}</td><td>{{ r.coordinator or '—' }}</td><td>{{ r.pack or '—' }}</td><td>{{ r.delivery or '—' }}</td>
+      <td class="wrap">{{ r.client }}</td><td>{{ r.coordinator or '—' }}</td><td>{{ r.pack or '—' }}{% if r.pack_src %} <span class="pill" title="{{ t('Date from SIT Plan de Viajes; not yet in MoveWare', 'Fecha del Plan de Viajes de SIT; aún no en MoveWare') }}">SIT</span>{% endif %}</td><td>{{ r.delivery or '—' }}{% if r.delivery_src %} <span class="pill" title="{{ t('Date from SIT Plan de Viajes; not yet in MoveWare', 'Fecha del Plan de Viajes de SIT; aún no en MoveWare') }}">SIT</span>{% endif %}</td>
       <td class="r num">{{ M(r.value) }}{% if r.ccy %}<span class="ccy">· {{ t('quoted in', 'cotizado en') }} {{ r.ccy }}</span>{% endif %}</td></tr>{% endfor %}</table></div>
     {% if P.ready|length > 40 %}<p class="meta">{{ t('Showing top 40 of', 'Se muestran 40 de') }} {{ P.ready|length }}.</p>{% endif %}
     {% endif %}
@@ -212,6 +213,27 @@ EXEC_TEMPLATE = r"""<!DOCTYPE html>
       <td class="r num">{{ r.currency or '' }} {{ '{:,.2f}'.format(r.amount or 0) }}</td><td><span class="pill">{{ r.status }}</span></td></tr>{% endfor %}</table></div>
     {% else %}<p class="meta good">{{ t('Nothing waiting to be posted.', 'Nada pendiente por registrar.') }}</p>{% endif %}
     {% endif %}
+  </section>
+  {% endif %}
+
+  {% if ex.pc %}{% set C = ex.pc %}
+  <section class="tab" data-tab="checks">
+    <h2>{{ t('Supplier cost checks — MoveWare Move Costing Sheet', 'Revisión de costos de proveedores — Move Costing Sheet de MoveWare') }}</h2>
+    <p class="meta">{{ t('Cost options with status W only. Sheet in use:', 'Solo opciones de costo con estatus W. Hoja en uso:') }} {{ C.period.won_from or '?' }} → {{ C.period.won_to or '?' }}{% if C.loaded_at %} · {{ t('loaded', 'cargada') }} {{ C.loaded_at[:10] }}{% endif %}{% if C.source %} · {{ C.source }}{% endif %}.
+      {{ t('Until MoveWare returns cost through its API, this sheet is also the interim cost for files Finance has not costed yet.', 'Hasta que MoveWare entregue costos por su API, esta hoja también es el costo provisional de los expedientes que Finanzas aún no costea.') }}</p>
+    <div class="grid">
+      {% for k, lab in C.labels.items() %}<div class="tile"><div class="label">{{ t(lab[0], lab[1]) }}</div><div class="value {{ 'warn' if C.counts.get(k) else 'good' }}">{{ N(C.counts.get(k, 0)) }}</div></div>{% endfor %}
+    </div>
+    {% if C.rows %}
+    <div class="tbl"><table><tr><th>{{ t('File', 'Expediente') }}</th><th>{{ t('Check', 'Revisión') }}</th><th>{{ t('Line', 'Concepto') }}</th><th>{{ t('Supplier', 'Proveedor') }}</th><th>{{ t('Approval no.', 'No. aprobación') }}</th><th class="r">{{ t('Quoted', 'Cotizado') }}</th><th class="r">{{ t('Actual', 'Real') }}</th><th>{{ t('Note', 'Nota') }}</th></tr>
+    {% for r in C.rows[:200] %}<tr><td class="num">{{ r.job }}</td><td>{{ t(C.labels[r.check][0], C.labels[r.check][1]) }}</td><td class="wrap">{{ r.line }}</td><td class="wrap">{{ r.creditor or '—' }}</td><td class="num">{{ r.po or '—' }}</td>
+      <td class="r num">{{ '{:,.2f}'.format(r.quoted) if r.quoted is not none else '—' }}</td><td class="r num">{{ '{:,.2f}'.format(r.actual) if r.actual is not none else '—' }}</td>
+      <td class="wrap">{% if r.pct %}+{{ r.pct }}%{% elif r.other_files %}{{ t('also on', 'también en') }} {{ r.other_files|join(', ') }}{% elif r.days %}{{ r.days }} {{ t('days since delivery', 'días desde la entrega') }}{% endif %}</td></tr>{% endfor %}</table></div>
+    {% else %}<p class="meta good">{{ t('No findings.', 'Sin hallazgos.') }}</p>{% endif %}
+    <h2>{{ t('Load a new Move Costing Sheet', 'Cargar un Move Costing Sheet nuevo') }}</h2>
+    <form method="post" action="/audit/upload-costing" enctype="multipart/form-data" class="row">
+      <input type="file" name="file" accept=".xlsx" required> <button type="submit">{{ t('Upload', 'Subir') }}</button></form>
+    <p class="meta">{{ t('The workbook is read and not kept; customer names are never stored.', 'El archivo se lee y no se guarda; los nombres de clientes nunca se almacenan.') }}</p>
   </section>
   {% endif %}
 

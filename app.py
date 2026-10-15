@@ -566,6 +566,9 @@ app.register_blueprint(faim_bp)
 # Cross-Border Shipment Dashboard (TIM/ClickUp + TMS/Moveware, unified)
 from crossborder.web import crossborder_bp
 app.register_blueprint(crossborder_bp)
+# TIM Executive Dashboard (financial P&L by business unit, from Finance's monthly close)
+from tim_exec import tim_exec_bp
+app.register_blueprint(tim_exec_bp)
 # AI Assistant — multi-tenant, per-user dashboard (mail + Moveware + WhatsApp),
 # refreshed 5x/day (06/09/12/15/18 Mexico City). Replaces the Phase-1 on-demand page.
 from assistant.web import bp as assistant_bp

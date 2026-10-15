@@ -14,3 +14,7 @@ venv/
 # OS
 .DS_Store
 data/flask_session/
+
+# Local runtime files written by the app / test runs
+data/flask_session/
+data/commissions.db

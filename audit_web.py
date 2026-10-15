@@ -1203,9 +1203,21 @@ def _supplier_checks_view(files) -> dict:
     counts = {}
     for r in rows:
         counts[r["check"]] = counts.get(r["check"], 0) + 1
+    cur = {}
+    for f in files or []:
+        cur.setdefault(cs.base(f.get("job")), (f.get("currency") or "", f.get("branch") or ""))
+    recon = cs.compare_finance(cs.summarize(doc), _load_finance_cost(), cur)
+    rc = {}
+    for r in recon:
+        rc[r["finding"]] = rc.get(r["finding"], 0) + 1
+    order2 = ["higher", "lower", "lines_not_loaded", "no_actual_in_moveware", "none_in_finance",
+              "not_in_finance", "currency_unknown"]
+    recon_rows = sorted((r for r in recon if r["finding"] in order2),
+                        key=lambda r: (order2.index(r["finding"]), -abs(r.get("difference_mxn") or 0)))
     return {"period": doc.get("period") or {}, "loaded_at": doc.get("loaded_at") or "",
             "source": doc.get("source") or "", "rows": rows, "counts": counts,
-            "labels": cs.CHECK_LABELS}
+            "labels": cs.CHECK_LABELS, "recon_counts": rc, "recon_rows": recon_rows,
+            "recon_labels": cs.FINDING_LABELS}
 
 
 @audit_bp.route("/audit/upload-costing", methods=["POST"])

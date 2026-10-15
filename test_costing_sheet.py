@@ -151,3 +151,11 @@ def test_plan_dates_fill_gaps_only_when_done():
     assert out["110492"]["delivery"] == "2026-09-17" and "delivery_src" not in out["110492"]
     assert out["111147"]["pack"] is None                              # future: never used
     assert files[0]["delivery"] is None                               # originals untouched
+
+
+def test_compare_with_finance(parsed):
+    s = cs.summarize(parsed)
+    fin = {"files": {"110578": {"total_cost": 300000.0}, "110579": {"total_cost": 1760.0}}, "ledger": {}}
+    rows = {r["job"]: r for r in cs.compare_finance(s, fin, {"110578": ("MXN", "MEM"), "110579": ("MXN", "MEM")})}
+    assert rows["110579"]["finding"] == "match"
+    assert rows["110578"]["finding"] == "higher" and rows["110578"]["difference_mxn"] > 0

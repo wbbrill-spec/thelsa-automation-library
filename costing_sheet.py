@@ -292,3 +292,61 @@ CHECK_LABELS = {
     "invoice_missing": ("Quoted cost with no supplier invoice 60+ days after delivery",
                         "Costo cotizado sin factura de proveedor 60+ días después de la entrega"),
 }
+
+
+# ── costing sheet vs Finance's margin report ─────────────────────────────────
+MATCH_TOLERANCE = 0.05
+
+
+def compare_finance(summary: dict, finance: dict, currencies: dict | None = None,
+                    plan_rate: float = 17.4479) -> list:
+    """File by file: actual cost loaded in MoveWare (costing sheet) against the
+    total cost in Finance's margin report (supplier + intercompany, MXN).
+    `currencies` = {base_job: (mw_currency, branch)}. One row per file with a
+    finding: match / lower: lines not loaded / higher / lower / none in Finance /
+    no actual cost yet / not in Finance."""
+    currencies = currencies or {}
+    fin_files = (finance or {}).get("files") or {}
+    ledger = (finance or {}).get("ledger") or {}
+    rows = []
+    for job, e in sorted(summary.items()):
+        cur, br = currencies.get(job, ("", ""))
+        ccy = file_currency(job, cur, br)
+        L = ledger.get(job) or {}
+        act_mxn = to_mxn(e["act"], ccy, L, plan_rate) if ccy else None
+        F = fin_files.get(job)
+        fin = (F or {}).get("total_cost")
+        row = {"job": job, "currency": ccy, "lines": f'{e["lines_with_act"]} of {e["lines"]}',
+               "act": e["act"], "act_mxn": act_mxn, "finance_cost_mxn": fin, "difference_mxn": None}
+        if not ccy or (e["lines_with_act"] and act_mxn is None):
+            row["finding"] = "currency_unknown"
+        elif F is None:
+            row["finding"] = "not_in_finance" if e["lines_with_act"] else "no_cost_yet"
+        elif not e["lines_with_act"]:
+            row["finding"] = "no_actual_in_moveware" if fin else "no_cost_yet"
+        elif not fin:
+            row["finding"] = "none_in_finance"
+        else:
+            d = (act_mxn - fin) / fin
+            row["difference_mxn"] = round(act_mxn - fin, 2)
+            if abs(d) <= MATCH_TOLERANCE:
+                row["finding"] = "match"
+            elif d < 0 and e["lines_pending"]:
+                row["finding"] = "lines_not_loaded"
+            else:
+                row["finding"] = "higher" if d > 0 else "lower"
+        rows.append(row)
+    return rows
+
+
+FINDING_LABELS = {
+    "match": ("Matches Finance (within 5%)", "Coincide con Finanzas (±5%)"),
+    "lines_not_loaded": ("Lower in MoveWare: cost lines not loaded", "Menor en MoveWare: faltan líneas de costo"),
+    "no_actual_in_moveware": ("No actual cost in MoveWare yet", "Sin costo real en MoveWare"),
+    "higher": ("Higher in MoveWare than Finance", "Mayor en MoveWare que en Finanzas"),
+    "lower": ("Lower in MoveWare than Finance", "Menor en MoveWare que en Finanzas"),
+    "none_in_finance": ("Cost in MoveWare, none in Finance", "Costo en MoveWare, sin costo en Finanzas"),
+    "not_in_finance": ("Not in Finance's margin report", "No está en el reporte de margen de Finanzas"),
+    "no_cost_yet": ("No cost on either side yet", "Sin costo en ningún lado"),
+    "currency_unknown": ("Currency unknown", "Moneda desconocida"),
+}

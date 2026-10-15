@@ -230,6 +230,15 @@ EXEC_TEMPLATE = r"""<!DOCTYPE html>
       <td class="r num">{{ '{:,.2f}'.format(r.quoted) if r.quoted is not none else '—' }}</td><td class="r num">{{ '{:,.2f}'.format(r.actual) if r.actual is not none else '—' }}</td>
       <td class="wrap">{% if r.pct %}+{{ r.pct }}%{% elif r.other_files %}{{ t('also on', 'también en') }} {{ r.other_files|join(', ') }}{% elif r.days %}{{ r.days }} {{ t('days since delivery', 'días desde la entrega') }}{% endif %}</td></tr>{% endfor %}</table></div>
     {% else %}<p class="meta good">{{ t('No findings.', 'Sin hallazgos.') }}</p>{% endif %}
+    <h2>{{ t('Costing sheet vs Finance — cost per file', 'Hoja de costeo vs Finanzas — costo por expediente') }}</h2>
+    <p class="meta">{{ t('Actual cost loaded in MoveWare against the total cost (supplier + intercompany) in Finance\'s margin report, in pesos. Dollar files at the rate Finance booked on the file\'s invoices.', 'Costo real cargado en MoveWare contra el costo total (proveedor + intercompañía) del reporte de margen de Finanzas, en pesos. Expedientes en dólares al tipo de cambio de sus facturas.') }}</p>
+    <div class="grid">{% for k, lab in C.recon_labels.items() %}{% if C.recon_counts.get(k) %}<div class="tile"><div class="label">{{ t(lab[0], lab[1]) }}</div><div class="value {{ 'good' if k == 'match' else 'warn' }}">{{ N(C.recon_counts.get(k)) }}</div></div>{% endif %}{% endfor %}</div>
+    {% if C.recon_rows %}
+    <div class="tbl"><table><tr><th>{{ t('File', 'Expediente') }}</th><th>{{ t('Finding', 'Hallazgo') }}</th><th>{{ t('Cost lines loaded', 'Líneas con costo') }}</th><th class="r">{{ t('MoveWare (MXN)', 'MoveWare (MXN)') }}</th><th class="r">{{ t('Finance (MXN)', 'Finanzas (MXN)') }}</th><th class="r">{{ t('Difference', 'Diferencia') }}</th></tr>
+    {% for r in C.recon_rows %}<tr><td class="num">{{ r.job }}</td><td>{{ t(C.recon_labels[r.finding][0], C.recon_labels[r.finding][1]) }}</td><td>{{ r.lines }}</td>
+      <td class="r num">{{ '{:,.0f}'.format(r.act_mxn) if r.act_mxn is not none else '—' }}</td><td class="r num">{{ '{:,.0f}'.format(r.finance_cost_mxn) if r.finance_cost_mxn is not none else '—' }}</td>
+      <td class="r num">{{ '{:,.0f}'.format(r.difference_mxn) if r.difference_mxn is not none else '—' }}</td></tr>{% endfor %}</table></div>
+    {% endif %}
     <h2>{{ t('Load a new Move Costing Sheet', 'Cargar un Move Costing Sheet nuevo') }}</h2>
     <form method="post" action="/audit/upload-costing" enctype="multipart/form-data" class="row">
       <input type="file" name="file" accept=".xlsx" required> <button type="submit">{{ t('Upload', 'Subir') }}</button></form>

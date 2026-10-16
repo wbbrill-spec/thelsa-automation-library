@@ -221,6 +221,8 @@ def faim_snapshot(files, today=None, sit=None):
             "delivery_due": job_type not in AGENT_EXPORT_TYPES,   # agent export: ends at origin
             "sit_pack": sit_pack if (sit_pack and sit_pack <= today) else None,
             "type": job_type,
+            "coord_email": str(f.get("coordinator_email") or "").strip(),
+            "booked": _as_date(f.get("booked")),
             # proof it really moved, for a file not marked booked (Bill, 15 Oct):
             # it was invoiced, or SIT's plan shows a truck carried it
             "proven": bool(f.get("invoiced")) or bool(from_sit.get("done")),
@@ -298,6 +300,29 @@ def faim_snapshot(files, today=None, sit=None):
     for b in gaps_rows:
         b.pop("_k", None)
 
+    # Key dates missing in Moveware, every file (Bill, 16 Oct 2026: "the team
+    # needs to enter the dates, zero exceptions"): pack and delivery on the audited
+    # files as above, plus booked files carrying no key date at all whose Date Won
+    # falls in the window: the worst gap, invisible to the audit itself.
+    date_gaps = []
+    for r in audited:
+        miss = [k for k, due, have in (("pack", r["pack_due"], r["pack"]),
+                                       ("delivery", r["delivery_due"], r["delivery"])) if due and not have]
+        if miss:
+            date_gaps.append({"file": r["number"], "status": r["status"], "type": r["type"],
+                              "coord": r["coord"], "coord_email": r["coord_email"], "missing": miss,
+                              "sit_pack": r["sit_pack"].isoformat() if r["sit_pack"] else "",
+                              "sit_delivery": r["sit_delivery"].isoformat() if r["sit_delivery"] else "",
+                              "key_date": r["collect"].isoformat() if r["collect"] else ""})
+    for r in no_date:
+        if r["status"] == BOOKED_STATUS and r["booked"] and start <= r["booked"] <= today:
+            miss = [k for k, due in (("pack", r["pack_due"]), ("delivery", r["delivery_due"])) if due]
+            date_gaps.append({"file": r["number"], "status": r["status"], "type": r["type"],
+                              "coord": r["coord"], "coord_email": r["coord_email"], "missing": miss,
+                              "sit_pack": "", "sit_delivery": "", "key_date": "", "no_dates": True,
+                              "booked": r["booked"].isoformat()})
+    date_gaps.sort(key=lambda g: (g["coord"].lower(), g["file"]))
+
     def _by(rows, field="status"):
         out = {}
         for r in rows:
@@ -323,6 +348,7 @@ def faim_snapshot(files, today=None, sit=None):
             "breaches": gaps_rows[:_MAX_GAP_ROWS],
             "gapFiles": len(gaps_rows),
         },
+        "date_gaps": date_gaps,
         "selection": {
             "window_start": start.isoformat(),
             "window_end": today.isoformat(),
@@ -394,9 +420,26 @@ _KEEPER = None
 _KEEPER_LOCK_FH = None
 
 
+def _date_gaps_now():
+    """(date_gaps, live, complete) from the shared file book and SIT plan."""
+    if not _HAVE_MW or not mw_live.have_creds():
+        return [], False, False
+    files, prog = _book()
+    sit, _info = _sit()
+    complete = bool(prog.get("window_complete") or prog.get("complete"))
+    return faim_snapshot(files, sit=sit)["date_gaps"], True, complete
+
+
 def _keeper_tick():
     try:
         mw_live.ensure_auditor()
+    except Exception:
+        pass
+    try:
+        import date_gap_alerts as dga
+        if dga.due_now():
+            gaps, live, complete = _date_gaps_now()
+            dga.dispatch(gaps, live=live, complete=complete)
     except Exception:
         pass
     try:
@@ -503,6 +546,52 @@ def faim_metrics():
         "gapFiles": m["gapFiles"],
         "viewer": viewer,
     })
+
+
+_DATE_ALERT_ADMINS = ("bbrill@thelsa.com", "bill.brill@inflectionpointnow.com", "maria.gonzalez@thelsa.com",
+                      "sarareyes@thelsa.com")
+
+
+@faim_bp.route("/faim/date-gaps")
+@_login_required
+def faim_date_gaps():
+    """Files missing a key date in Moveware, by coordinator (file numbers only),
+    and what today's alert run would send. ?format=csv gives the list."""
+    import date_gap_alerts as dga
+    gaps, live, complete = _date_gaps_now()
+    if request.args.get("format") == "csv":
+        import csv
+        import io
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(["coordinator", "file", "type", "missing", "sit_pack", "sit_delivery", "no_dates", "booked"])
+        for g in gaps:
+            w.writerow([g["coord"], g["file"], g["type"], "+".join(g["missing"]), g["sit_pack"],
+                        g["sit_delivery"], "yes" if g.get("no_dates") else "", g.get("booked", "")])
+        return buf.getvalue(), 200, {"Content-Type": "text/csv; charset=utf-8",
+                                     "Content-Disposition": "attachment; filename=moveware-missing-dates.csv"}
+    plan = dga.build(gaps)
+    by = [{"coordinator": a["coordinator"], "files": a["files"], "email_on_file": a["resolved"]}
+          for a in plan["coordinators"]]
+    return jsonify({"live": live, "complete": complete, "files": len(gaps),
+                    "no_dates_at_all": sum(1 for g in gaps if g.get("no_dates")),
+                    "pack_missing": sum(1 for g in gaps if "pack" in g["missing"]),
+                    "delivery_missing": sum(1 for g in gaps if "delivery" in g["missing"]),
+                    "by_coordinator": sorted(by, key=lambda x: -x["files"]),
+                    "alerts": {"enabled": dga.enabled(), "send": dga.send_enabled(),
+                               "auto_daily": os.environ.get("DATE_ALERTS_AUTO") == "1"}})
+
+
+@faim_bp.route("/faim/date-alerts", methods=["POST"])
+@_login_required
+def faim_date_alerts():
+    """Run today's missing-date alerts now (drafts unless DATE_ALERTS_SEND=1).
+    Bill, Lupita and Sara only; once per coordinator per day."""
+    import date_gap_alerts as dga
+    if (session.get("user_email") or "").strip().lower() not in _DATE_ALERT_ADMINS:
+        return jsonify({"error": "not allowed"}), 403
+    gaps, live, complete = _date_gaps_now()
+    return jsonify(dga.dispatch(gaps, live=live, complete=complete))
 
 
 @faim_bp.route("/faim/raw")

@@ -159,3 +159,14 @@ def test_compare_with_finance(parsed):
     rows = {r["job"]: r for r in cs.compare_finance(s, fin, {"110578": ("MXN", "MEM"), "110579": ("MXN", "MEM")})}
     assert rows["110579"]["finding"] == "match"
     assert rows["110578"]["finding"] == "higher" and rows["110578"]["difference_mxn"] > 0
+
+
+def test_finance_files_from_commission_lines():
+    from types import SimpleNamespace as NS
+    import audit_web
+    lines = [NS(file="110578", type="PRIV", net_sales_mxn=100.0, supplier_cost_mxn=50.0, interco_cost_mxn=10.0),
+             NS(file="110578", type="PRIV", net_sales_mxn=-20.0, supplier_cost_mxn=0.0, interco_cost_mxn=0.0),
+             NS(file="?ROW9", type="?", net_sales_mxn=5.0, supplier_cost_mxn=0.0, interco_cost_mxn=0.0)]
+    f = audit_web.finance_files_from_lines(lines)
+    assert list(f) == ["110578"]
+    assert f["110578"]["net_sales"] == 80.0 and f["110578"]["total_cost"] == 60.0 and f["110578"]["has_cost"]

@@ -135,13 +135,64 @@ def _load_finance_cost():
             with open(path) as fh:
                 d = json.load(fh)
             _FIN_CACHE.clear()
-            _FIN_CACHE.update(mtime=mt, files=d.get("files") or {},
+            _FIN_CACHE.update(mtime=mt, _report_checked=0, files=d.get("files") or {},
                               ledger=d.get("ledger") or {},
                               currency=d.get("currency") or "MXN", source=d.get("source"),
                               path=path)
     except Exception:
         return {"files": {}, "ledger": {}, "currency": "MXN", "source": None}
+    _overlay_finance_report(_FIN_CACHE)
     return _FIN_CACHE
+
+
+def finance_files_from_lines(lines) -> dict:
+    """Per base file, from the lines of Finance's margin report as the commission
+    page stores them: net sales and cost in pesos, the same shape as the
+    "files" of finance_cost.json."""
+    out = {}
+    for ln in lines:
+        f = str(ln.file or "")
+        if not f.isdigit():
+            continue
+        e = out.setdefault(f, {"type": ln.type if ln.type != "?" else "", "net_sales": 0.0,
+                               "supplier_cost": 0.0, "intercompany_cost": 0.0})
+        e["net_sales"] += ln.net_sales_mxn
+        e["supplier_cost"] += ln.supplier_cost_mxn
+        e["intercompany_cost"] += ln.interco_cost_mxn
+        if not e["type"] and ln.type != "?":
+            e["type"] = ln.type
+    for e in out.values():
+        for k in ("net_sales", "supplier_cost", "intercompany_cost"):
+            e[k] = round(e[k], 2)
+        e["total_cost"] = round(e["supplier_cost"] + e["intercompany_cost"], 2)
+        e["gross_margin"] = round(e["net_sales"] - e["total_cost"], 2)
+        e["has_cost"] = e["total_cost"] > 0
+    return out
+
+
+def _overlay_finance_report(cache: dict) -> None:
+    """When Finance's margin report has been uploaded on the commission page
+    (the monthly report, e.g. Lupita's corrected 9 Oct version), its per-file
+    figures replace the older finance_cost.json "files". Checked every 10 min."""
+    import time
+    if cache.get("_report_checked") and time.time() - cache["_report_checked"] < 600:
+        return
+    cache["_report_checked"] = time.time()
+    try:
+        from commissions import finance as F
+        from commissions import store
+        doc, meta = store.get("finance_report")
+        if not doc or not doc.get("records"):
+            return
+        files = finance_files_from_lines(F.from_records(doc["records"]))
+        if files:
+            cache.setdefault("_json_files", cache.get("files") or {})
+            cache["files"] = files
+            at = (meta or {}).get("at")
+            cache["files_source"] = ("Finance margin report uploaded on the commission page"
+                                     + (f" {at:%Y-%m-%d}" if hasattr(at, "strftime") else ""))
+    except Exception:
+        return
 
 
 def _base_file(job):
@@ -1047,6 +1098,17 @@ def audit():
     except Exception:
         ex["pc"] = None
     try:
+        import threading as _th
+        import time as _time
+        import sit_milestones as _sm
+        if (not _MS_PLAN["built_at"] or _time.time() - _MS_PLAN["built_at"] > 3600) \
+                and not _MS_PLAN["running"] and _sm.state().get("jobs"):
+            _th.Thread(target=_build_milestone_plan, daemon=True, name="milestone-plan").start()
+        if ex.get("pc") is not None:
+            ex["pc"]["ms"] = {k: _MS_PLAN[k] for k in ("steps", "summary", "built_at")}
+    except Exception:
+        pass
+    try:
         import supplier_costs
         supplier_costs.ensure_scanner()
         ex["sc"] = supplier_costs.get_state()
@@ -1206,7 +1268,8 @@ def _supplier_checks_view(files) -> dict:
     cur = {}
     for f in files or []:
         cur.setdefault(cs.base(f.get("job")), (f.get("currency") or "", f.get("branch") or ""))
-    recon = cs.compare_finance(cs.summarize(doc), _load_finance_cost(), cur)
+    fin = _load_finance_cost()
+    recon = cs.compare_finance(cs.summarize(doc), fin, cur)
     rc = {}
     for r in recon:
         rc[r["finding"]] = rc.get(r["finding"], 0) + 1
@@ -1217,7 +1280,8 @@ def _supplier_checks_view(files) -> dict:
     return {"period": doc.get("period") or {}, "loaded_at": doc.get("loaded_at") or "",
             "source": doc.get("source") or "", "rows": rows, "counts": counts,
             "labels": cs.CHECK_LABELS, "recon_counts": rc, "recon_rows": recon_rows,
-            "recon_labels": cs.FINDING_LABELS}
+            "recon_labels": cs.FINDING_LABELS,
+            "finance_source": fin.get("files_source") or "finance_cost.json (Finance workbooks of 7 Oct 2026)"}
 
 
 @audit_bp.route("/audit/upload-costing", methods=["POST"])

@@ -31,8 +31,19 @@ def test_never_for_future_or_unconfirmed():
 
 
 def test_update_open_action():
-    s = mp.plan_for_job("111041", _sit(pack=("2026-08-17", "done")), [act("Pack", "2026-08-19")], T)
+    s = mp.plan_for_job("111041", _sit(pack=("2026-08-17", "done")), [act("Uplift", "2026-08-19")], T)
     assert s[0]["action"] == "update" and s[0]["body"]["date"] == "2026-08-17"
+
+
+def test_load_counts_not_pack():
+    # A Pack reminder alone is not the load: the Load (Uplift) action is created.
+    s = mp.plan_for_job("111041", _sit(pack=("2026-08-17", "done")), [act("Pack", "2026-08-16")], T)
+    assert s[0]["action"] == "create" and s[0]["body"]["type"] == "Uplift" and s[0]["body"]["comment"] == "Load"
+    # Variants of Load are matched, not duplicated.
+    s = mp.plan_for_job("1", _sit(pack=("2026-08-17", "done")),
+                        [{"type": "Uplift O/S", "keyaction": "Uplift", "date": "2026-08-17T00:00:00",
+                          "completed": "Y", "completedby": "SR2", "id": 4}], T)
+    assert s == []
 
 
 def test_fix_mistyped_year():
@@ -54,6 +65,6 @@ def test_matching_completed_needs_nothing():
 
 def test_future_completed_is_flagged():
     s = mp.plan_for_job("111147", _sit(pack=("2026-12-07", "scheduled")),
-                        [act("Pack", "2026-12-07", "Y", "EH1")], T)
+                        [act("Uplift", "2026-12-07", "Y", "EH1")], T)
     assert [x["action"] for x in s] == ["review"] and "future" in s[0]["why"]
     assert mp.summarize(s) == {"create": 0, "update": 0, "review": 1, "files": 1}

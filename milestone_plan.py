@@ -27,10 +27,11 @@ Rules — chosen to never overwrite a person's work by mistake:
   * completed with a FUTURE date → REVIEW: should be reopened until it happens.
   * job type decides what is due (job_rules, training 16 Oct 2026): no Delivery
     on an agent export (EXA), no Pack on an agent import (IMA);
-  * actions are matched by KEY ACTION, not code: MoveWare has several Pack
-    actions (Pack, Pack2 …, some children of Uplift at −1/−2/−3 days) that all
-    carry key action Pack. The one with the plain code is preferred, so a
-    calculated reminder date is never mistaken for the move itself.
+  * actions are matched by KEY ACTION, not code. The load date counts (Bill,
+    16 Oct): the plan's pack milestone goes to the Load action (key action
+    Uplift: Uplift, "Uplift O/S", UpliftandReturntoWH). The Pack actions are
+    reminders hung off Load at −1/−2/−3 days and are left alone. The completed
+    action is preferred, then the plain code, so a variant is never duplicated.
 """
 from __future__ import annotations
 
@@ -39,8 +40,13 @@ import os
 
 import job_rules
 
-CODES = {"pack": "Pack", "delivery": "Delivery"}
-LABELS = {"pack": "Pack", "delivery": "Delivery"}
+# Bill, 16 Oct 2026: the LOAD date is the one that counts. SIT's "pack" milestone
+# is the first day a truck loads at the customer's end, so it is written to the
+# Load action (key action Uplift, code "Uplift", shown as "Load"), not to Pack.
+# Dave Pile: updating an Uplift activity also moves the job-header load date.
+CODES = {"pack": "Uplift", "delivery": "Delivery"}
+LABELS = {"pack": "Load", "delivery": "Delivery"}
+MATCH = {"pack": "load", "delivery": "delivery"}       # job_rules key action per milestone
 TYPO_BEFORE = dt.date(2025, 1, 1)
 # Dave Pile (MOS-51412, 15 Oct 2026): writes are signed by a dedicated MoveWare
 # user whose code is three characters. Create that user in the MoveWare app, then
@@ -68,7 +74,7 @@ def plan_for_job(job: str, sit_job: dict, activities: list, today: dt.date | Non
         if not job_rules.expected(key, job_type):
             continue                                   # e.g. Delivery on an EXA: not ours
         m = (sit_job or {}).get(key) or {}
-        mine = [a for a in activities or [] if job_rules.is_milestone(a, key)]
+        mine = [a for a in activities or [] if job_rules.is_milestone(a, MATCH[key])]
         plan_day = _d(m.get("date"))
         done = m.get("status") == "done" and plan_day and plan_day <= today
         base = {"job": job, "milestone": key, "code": code, "plan_date": m.get("date"),

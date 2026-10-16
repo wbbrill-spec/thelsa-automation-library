@@ -1375,7 +1375,9 @@ def _mark_confirmed(ex, files):
             if not c:
                 r["confirm"] = None                    # not read yet
                 continue
-            pk = bool(r.get("pack_src") or c.get("pack") or c.get("load"))
+            # The LOAD date counts (Bill, 16 Oct). A completed Pack only stands in
+            # when the file has no Load action at all.
+            pk = bool(r.get("pack_src") or c.get("load") or (c.get("pack") and not c.get("has_load")))
             dl = bool(r.get("delivery_src") or c.get("delivery"))
             r["pack_planned"] = bool(r.get("pack")) and not pk
             r["delivery_planned"] = bool(r.get("delivery")) and not dl

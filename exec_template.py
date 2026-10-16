@@ -142,7 +142,7 @@ EXEC_TEMPLATE = r"""<!DOCTYPE html>
 
     {% if P.ready %}
     <h2>{{ t('Ready to invoice — by value', 'Listos para facturar — por valor') }}</h2>
-    <div class="tbl"><table><tr><th>{{ t('File', 'Expediente') }}</th><th>{{ t('Client', 'Cliente') }}</th><th>{{ t('Coordinator', 'Coordinador') }}</th><th>{{ t('Packed', 'Empaque') }}</th><th>{{ t('Delivered', 'Entrega') }}</th><th class="r">{{ t('Quote', 'Cotización') }}</th></tr>
+    <div class="tbl"><table><tr><th>{{ t('File', 'Expediente') }}</th><th>{{ t('Client', 'Cliente') }}</th><th>{{ t('Coordinator', 'Coordinador') }}</th><th>{{ t('Loaded', 'Carga') }}</th><th>{{ t('Delivered', 'Entrega') }}</th><th class="r">{{ t('Quote', 'Cotización') }}</th></tr>
     {% for r in P.ready[:40] %}<tr><td class="num">{{ r.job }}{% if r.embassy %} <span class="pill">EMB</span>{% endif %}</td>
       <td class="wrap">{{ r.client }}</td><td>{{ r.coordinator or '—' }}</td><td>{% if r.pack_na and not r.pack %}<span class="meta">{{ t('n/a', 'n/a') }} ({{ r.job_type }})</span>{% else %}{{ r.pack or '—' }}{% endif %}{% if r.pack_src %} <span class="pill" title="Date from SIT Plan de Viajes; not yet in MoveWare / Fecha del Plan de Viajes de SIT; aún no en MoveWare">SIT</span>{% elif r.pack_planned %} <span class="pill" title="Planned date only: not marked completed in MoveWare / Solo fecha planeada: no marcada como completada en MoveWare">{{ t('planned', 'planeada') }}</span>{% endif %}</td><td>{% if r.delivery_na and not r.delivery %}<span class="meta">{{ t('n/a', 'n/a') }} ({{ r.job_type }})</span>{% else %}{{ r.delivery or '—' }}{% endif %}{% if r.delivery_src %} <span class="pill" title="Date from SIT Plan de Viajes; not yet in MoveWare / Fecha del Plan de Viajes de SIT; aún no en MoveWare">SIT</span>{% elif r.delivery_planned %} <span class="pill" title="Planned date only: not marked completed in MoveWare / Solo fecha planeada: no marcada como completada en MoveWare">{{ t('planned', 'planeada') }}</span>{% endif %}</td>
       <td class="r num">{{ M(r.value) }}{% if r.ccy %}<span class="ccy">· {{ t('quoted in', 'cotizado en') }} {{ r.ccy }}</span>{% endif %}</td></tr>{% endfor %}</table></div>
@@ -155,14 +155,14 @@ EXEC_TEMPLATE = r"""<!DOCTYPE html>
     {% if P.checks %}
     <h2>{{ t('Quotes to check before billing', 'Cotizaciones a revisar antes de facturar') }}</h2>
     <p class="meta" style="margin-top:-4px">{{ t('The accepted quote on these files is larger than any normal move (over MXN', 'La cotización aceptada es mayor que cualquier mudanza normal (más de MXN') }} {{ '{:,.0f}'.format(ex.quote_check_mxn) }}) — {{ t('likely keyed in the wrong currency or with a typo. Kept out of the totals above.', 'probablemente capturada en otra moneda o con error. Excluidas de los totales.') }}</p>
-    <div class="tbl"><table><tr><th>{{ t('File', 'Expediente') }}</th><th>{{ t('Client', 'Cliente') }}</th><th>{{ t('Coordinator', 'Coordinador') }}</th><th>{{ t('Status', 'Estatus') }}</th><th>{{ t('Packed', 'Empaque') }}</th><th class="r">{{ t('Quote in MoveWare', 'Cotización en MoveWare') }}</th></tr>
+    <div class="tbl"><table><tr><th>{{ t('File', 'Expediente') }}</th><th>{{ t('Client', 'Cliente') }}</th><th>{{ t('Coordinator', 'Coordinador') }}</th><th>{{ t('Status', 'Estatus') }}</th><th>{{ t('Loaded', 'Carga') }}</th><th class="r">{{ t('Quote in MoveWare', 'Cotización en MoveWare') }}</th></tr>
     {% for r in P.checks %}<tr><td class="num">{{ r.job }}{% if r.embassy %} <span class="pill">EMB</span>{% endif %}</td><td class="wrap">{{ r.client }}</td><td>{{ r.coordinator or '—' }}</td><td>{{ r.status or '—' }}</td><td>{{ r.pack or '—' }}</td>
       <td class="r num bad">{{ M(r.value) }}{% if r.ccy %}<span class="ccy">· {{ t('quoted in', 'cotizado en') }} {{ r.ccy }}</span>{% else %}<span class="ccy">{{ t('no currency', 'sin moneda') }}</span>{% endif %}</td></tr>{% endfor %}</table></div>
     {% endif %}
 
     {% if P.emb %}
     <h2>{{ t('Embassy files in transit', 'Expedientes de embajada en tránsito') }}</h2>
-    <div class="tbl"><table><tr><th>{{ t('File', 'Expediente') }}</th><th>{{ t('Client', 'Cliente') }}</th><th>{{ t('Packed', 'Empaque') }}</th><th class="r">{{ t('Quote', 'Cotización') }}</th></tr>
+    <div class="tbl"><table><tr><th>{{ t('File', 'Expediente') }}</th><th>{{ t('Client', 'Cliente') }}</th><th>{{ t('Loaded', 'Carga') }}</th><th class="r">{{ t('Quote', 'Cotización') }}</th></tr>
     {% for r in P.emb %}<tr><td class="num">{{ r.job }}</td><td class="wrap">{{ r.client }}</td><td>{{ r.pack or '—' }}</td><td class="r num">{{ M(r.value) }}</td></tr>{% endfor %}</table></div>
     {% endif %}
   </div>

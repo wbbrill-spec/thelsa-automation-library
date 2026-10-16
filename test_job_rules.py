@@ -25,7 +25,10 @@ def test_keyaction_matching():
 def test_confirmed_dates_only_completed():
     acts = [{"type": "Pack", "keyaction": "Pack", "date": "2026-10-20T00:00:00", "completed": "N"},
             {"type": "Delivery", "keyaction": "Delivery", "date": "2026-09-30T00:00:00", "completed": "Y"}]
-    assert jr.confirmed_dates(acts) == {"pack": None, "delivery": "2026-09-30", "load": None}
+    assert jr.confirmed_dates(acts) == {"pack": None, "delivery": "2026-09-30", "load": None, "has_load": False}
+    acts.append({"type": "Uplift O/S", "date": "2026-09-28", "completed": "Y"})
+    c = jr.confirmed_dates(acts)
+    assert c["load"] == "2026-09-28" and c["has_load"]
 
 
 def test_plan_skips_delivery_on_exa_and_pack_on_ima():
@@ -38,8 +41,9 @@ def test_plan_skips_delivery_on_exa_and_pack_on_ima():
 
 def test_plan_uses_keyaction_and_prefers_plain_code():
     sit = {"pack": {"date": "2026-09-01", "status": "done"}}
-    acts = [{"type": "Pack2", "keyaction": "Pack", "date": "2026-08-30T00:00:00", "completed": "N", "id": 7},
-            {"type": "Pack", "keyaction": "Pack", "date": "2026-08-31T00:00:00", "completed": "N", "id": 8}]
+    acts = [{"type": "UpliftandReturntoWH", "keyaction": "Uplift", "date": "2026-08-30T00:00:00", "completed": "N", "id": 7},
+            {"type": "Uplift", "keyaction": "Uplift", "date": "2026-08-31T00:00:00", "completed": "N", "id": 8},
+            {"type": "Pack", "keyaction": "Pack", "date": "2026-08-30T00:00:00", "completed": "N", "id": 9}]
     s = mp.plan_for_job("3", sit, acts, T, job_type="XP")
     assert len(s) == 1 and s[0]["action"] == "update" and s[0]["activity_id"] == 8
 

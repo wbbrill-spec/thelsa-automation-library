@@ -64,12 +64,14 @@ def is_milestone(activity: dict, milestone: str) -> bool:
     if ka:
         return ka == want
     code = str(activity.get("type") or "").strip().upper()
-    return code == want or (milestone == "pack" and code.startswith("PACK") and code[4:].isdigit())
+    return code == want or (milestone == "pack" and code.startswith("PACK") and code[4:].isdigit()) \
+        or (milestone == "load" and code.startswith("UPLIFT"))
 
 
 def confirmed_dates(activities) -> dict:
-    """{'pack': 'YYYY-MM-DD' | None, 'delivery': …, 'load': …} from activities
-    marked COMPLETED only. A date that is merely planned is not a fact."""
+    """{'pack': 'YYYY-MM-DD' | None, 'delivery': …, 'load': …, 'has_load': bool}
+    from activities marked COMPLETED only. A date that is merely planned is not
+    a fact. The LOAD date is the one that counts (Bill, 16 Oct 2026)."""
     out = {"pack": None, "delivery": None, "load": None}
     for m in out:
         days = sorted(str(a.get("date") or "")[:10] for a in activities or []
@@ -77,4 +79,5 @@ def confirmed_dates(activities) -> dict:
                       and a.get("date"))
         if days:
             out[m] = days[0] if m in ("pack", "load") else days[-1]
+    out["has_load"] = any(is_milestone(a, "load") for a in activities or [])
     return out

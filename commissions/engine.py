@@ -34,6 +34,7 @@ Money is kept at full precision and rounded only for display, as Excel does.
 from __future__ import annotations
 
 import math
+import re
 import unicodedata
 from dataclasses import dataclass, field
 
@@ -56,6 +57,13 @@ def currency_code(label) -> str:
 
 def _finite(*values) -> bool:
     return all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) for v in values)
+
+
+MOVE_KINDS = ("agent", "tms", "mixed", "unused")
+
+
+def agent_types(s) -> set:
+    return {c for c, k in getattr(s, "move_types", ()) if k == "agent"}
 
 
 class SettingsError(ValueError):
@@ -99,6 +107,14 @@ class Settings:
     )
     # month ("2026-05") -> booking budget in MXN
     budgets: dict = field(default_factory=dict)
+    # Moveware move types and what each one is for the commission (Bill, 16 Oct
+    # 2026: one list, kept by Lupita, so a new type is never classed by guess):
+    #   agent   agent business: never Corporate or Private (IMA, EXA; Lupita 12 Oct)
+    #   tms     TMS booking: Corporate or Private by the customer type
+    #   mixed   either: Finance's type decides file by file (DIN, storage)
+    #   unused  should not appear; a file with it is listed
+    move_types: tuple = (("IMP", "tms"), ("EXP", "tms"), ("EXT", "tms"), ("IMA", "agent"), ("EXA", "agent"),
+                         ("DIN", "mixed"), ("STG", "mixed"))
     # The margin part is paid on actual cost, so a file with no cost posted yet
     # has no margin part to pay (Bill, 7 Oct 2026). Off = calculate regardless.
     margin_waits_for_cost: bool = True
@@ -137,6 +153,11 @@ class Settings:
         people = list(self.sales_people) + list(self.admin_people)
         if any(p < 0 for _, p in people):
             raise SettingsError("a person's share cannot be negative")
+        codes = [c for c, _ in self.move_types]
+        if any(not re.fullmatch(r"[A-Z0-9]{2,6}", str(c)) for c in codes) or len(set(codes)) != len(codes):
+            raise SettingsError("each move type needs its own code of 2 to 6 capital letters or digits")
+        if any(k not in MOVE_KINDS for _, k in self.move_types):
+            raise SettingsError("a move type must be agent, tms, mixed or unused")
         names = [str(n).strip().lower() for n, _ in people]
         if any(not n for n in names):
             raise SettingsError("every person in the distribution needs a name")

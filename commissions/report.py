@@ -40,6 +40,7 @@ LABELS = {
     "quote_branch_currency": "Moveware branch and currency do not agree",
     "quote_total_off": "Moveware costing: option total is not the sum of its lines",
     "costing_duplicate": "Moveware costing: the same cost line entered more than once",
+    "move_type_unlisted": "Moveware move type not in the settings list",
     "quote_no_date": "Moveware: date won not readable",
     "quote_missing": "Invoiced file with no booked quote in Moveware",
     "quote_no_cost": "Booked quote with no quoted cost",
@@ -72,6 +73,7 @@ LABELS_ES = {
     "quote_branch_currency": "Sucursal y moneda de Moveware no coinciden",
     "quote_total_off": "Costeo de Moveware: el total de la opción no es la suma de sus líneas",
     "costing_duplicate": "Costeo de Moveware: la misma línea de costo capturada más de una vez",
+    "move_type_unlisted": "Tipo de mudanza de Moveware que no está en la configuración",
     "quote_no_date": "Moveware: fecha de ganado ilegible",
     "quote_missing": "Expediente facturado sin cotización en Moveware",
     "quote_no_cost": "Cotización sin costo cotizado",
@@ -376,11 +378,21 @@ def _quote_months(by_month, quotes) -> tuple:
     return first, per
 
 
-def _quote_problems(by_month, first, quotes) -> list:
+def _quote_problems(by_month, first, quotes, s: E.Settings | None = None) -> list:
     """Points about the quotes of the files in the report."""
     out = []
+    s = s or E.Settings()
+    agent = E.agent_types(s)
+    kinds = dict(s.move_types)
     for job, m in sorted(first.items()):
         q = quotes.get(job)
+        mt = (q or {}).get("move_type") or "?"
+        if q and mt != "?" and kinds.get(mt) in (None, "unused"):
+            out.append({"kind": "move_type_unlisted", "job": job,
+                        "detail": f"move type {mt} is {'marked not in use' if mt in kinds else 'not in the list'} "
+                                  "in the settings: say what it is (agent, TMS booking, mixed)",
+                        "detail_es": f"el tipo de mudanza {mt} {'está marcado sin uso' if mt in kinds else 'no está en la lista'} "
+                                     "de la configuración: indique qué es (agente, reserva TMS, mixto)"})
         if not q or q["sale"] is None:
             out.append({"kind": "quote_missing", "job": job,
                         "detail": f"first invoiced in {m}: no booked quote in the Moveware reports loaded",
@@ -397,7 +409,7 @@ def _quote_problems(by_month, first, quotes) -> list:
                         "detail": "sale price found, but no cost option with status W in the Move Costing Sheet",
                         "detail_es": "hay precio de venta, pero ninguna opción de costo con estatus W en el Move Costing Sheet",
                         "amount_mxn": round(q["sale"], 2)})
-        if q["move_type"] in Q.AGENT_MOVE_TYPES or q["customer_type"] in ("Diplomatic", "Agent"):
+        if q["move_type"] in agent or q["customer_type"] in ("Diplomatic", "Agent"):
             out.append({"kind": "moveware_type_differs", "job": job,
                         "detail": f"Corporate or Private in Finance's report, but move type {q['move_type']} and "
                                   f"customer type {q['customer_type']} in Moveware",
@@ -451,8 +463,8 @@ def build(lines, s: E.Settings, bookings=None, quotes=None, quote_problems=(), p
     if quotes is not None:
         first, qmonths = _quote_months(by_month, quotes)
         in_scope = {job for (job, t) in F.jobs(lines, s) if t == F.IN_SCOPE}
-        won = Q.won_by_month(quotes, also=in_scope)
-        problems = problems + list(quote_problems) + _quote_problems(by_month, first, quotes)
+        won = Q.won_by_month(quotes, also=in_scope, agent=E.agent_types(s))
+        problems = problems + list(quote_problems) + _quote_problems(by_month, first, quotes, s)
     flagged = {}
     for p in problems:
         if p["kind"] not in ROUTINE:

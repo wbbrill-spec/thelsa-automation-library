@@ -98,3 +98,20 @@ def test_equal_thirds_are_accepted_and_the_dollar_rate_is_kept_exactly():
     assert sum(p for _, p in s.admin_people) == pytest.approx(1.0, abs=1e-12)
     cur = SS.parse(form(usd_mxn="16.5025"))
     assert SS.parse(form(usd_mxn="16.5025", rate="4"), cur).usd_mxn == 16.5025
+
+
+def test_move_types_are_kept_by_lupita_on_the_settings_screen():
+    d = SS.defaults()
+    assert dict(d.move_types)["IMA"] == "agent" and dict(d.move_types)["IMP"] == "tms" and E.agent_types(d) == {"IMA", "EXA"}
+    f = form()
+    for i, (c, k) in enumerate(list(d.move_types) + [("XUSA", "tms"), ("TA1", "unused")]):
+        f[f"mt_code_{i}"], f[f"mt_kind_{i}"] = c, k
+    s = SS.parse(f, d)
+    assert dict(s.move_types)["XUSA"] == "tms" and dict(s.move_types)["TA1"] == "unused"
+    assert any(c.startswith("move_types:") for c in SS.changes(d, s))
+    assert SS.from_doc(SS.to_doc(s)) == s
+    for bad in ({"mt_code_0": "ex p"}, {"mt_code_1": "IMP"}, {"mt_kind_0": "maybe"}):
+        g = dict(f, **bad)
+        with pytest.raises(SS.SettingsFormError):
+            SS.parse(g, d)
+    assert SS.parse(form(), d).move_types == d.move_types            # no rows sent: the list is kept

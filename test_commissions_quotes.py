@@ -120,7 +120,7 @@ def test_removals_summary_reports_its_own_totals_when_they_differ(tmp_path):
     (lambda r: r.__setitem__(5, r[5][:17] + ["about 5000"] + r[5][18:]), "row 6: the value excluding tax is not a number"),
     (lambda r: r.__setitem__(5, r[5][:17] + [-5.0] + r[5][18:]), "row 6: a negative value"),
     (lambda r: r.__setitem__(5, r[5][:10] + ["QRU"] + r[5][11:]), "row 6: the branch of the job does not match"),
-    (lambda r: r.__setitem__(5, r[5][:1] + ["IMPORT"] + r[5][2:]), "row 6: the move type is not a three-letter code"),
+    (lambda r: r.__setitem__(5, r[5][:1] + ["IM-PORT"] + r[5][2:]), "row 6: the move type is not a Moveware code"),
     (lambda r: r.__setitem__(5, r[5][:14] + ["Won"] + r[5][15:]), "row 6: the status is not a single letter"),
     (lambda r: r.insert(6, list(r[5])), "rows 6 and 7: job 110001 is listed twice"),
     (lambda r: r.__setitem__(0, ["Branch: Jane Secret Branch"] + r[0][1:]), "row 1: the branch is not a short code"),
@@ -376,3 +376,19 @@ def test_a_cost_line_entered_twice_on_the_valid_option_is_listed_without_its_tex
     assert back == got and "Supplier" not in str(Q.costing_to_records(got, {}))
     probs = [p for p in Q.problems(costings=got) if p["kind"] == "costing_duplicate"]
     assert [p["job"] for p in probs] == ["110001", "110001"] and "aparece 2 veces" in probs[0]["detail_es"]
+
+
+def test_a_move_type_not_on_the_settings_list_is_listed(load, tmp_path):
+    import dataclasses
+    lines = _finance(load)
+    jobs = [J("110001", typ="XUSA"), J("110002", typ="IMP")]
+    rem, control, cst = _reports(tmp_path, jobs, [("110002", "IMP", "Private", [O()])])
+    s = E.Settings(budgets=dict(E.BUDGET_2026))
+    quotes, qp = R.book_quotes(lines, rem, control, cst, s)
+    rep = R.build(lines, s, {}, quotes=quotes, quote_problems=qp)
+    flagged = {i["job"] for c in rep["checks"] if c["kind"] == "move_type_unlisted" for i in c["items"]}
+    assert "110001" in flagged and "110002" not in flagged
+    s2 = dataclasses.replace(s, move_types=s.move_types + (("XUSA", "tms"),))
+    quotes, qp = R.book_quotes(lines, rem, control, cst, s2)
+    rep = R.build(lines, s2, {}, quotes=quotes, quote_problems=qp)
+    assert not any(c["kind"] == "move_type_unlisted" for c in rep["checks"])

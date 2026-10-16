@@ -31,6 +31,11 @@ PCT_FIELDS = (("rate", "Commission rate", "Tasa de comisión"),
               ("target_margin", "Target gross margin", "Margen bruto objetivo"),
               ("sales_share", "Sales group share (Admin gets the rest)", "Parte del grupo Ventas (Adm recibe el resto)"))
 MAX_PEOPLE = 10
+MAX_MOVE_TYPES = 20
+MOVE_KIND_LABELS = (("tms", "TMS booking: Corporate / Private", "Reserva TMS: Corporativo / Particular"),
+                    ("agent", "Agent: never commission", "Agente: nunca comisiona"),
+                    ("mixed", "Mixed: Finance's type decides", "Mixto: decide el tipo de Finanzas"),
+                    ("unused", "Not in use", "Sin uso"))
 
 
 class SettingsFormError(ValueError):
@@ -54,7 +59,7 @@ def to_doc(s: E.Settings) -> dict:
     return {"rate": s.rate, "w_invoicing": s.w_invoicing, "w_margin": s.w_margin, "w_discipline": s.w_discipline,
             "target_margin": s.target_margin, "usd_mxn": s.usd_mxn, "sales_share": s.sales_share, "admin_share": s.admin_share,
             "sales_people": [[n, p] for n, p in s.sales_people], "admin_people": [[n, p] for n, p in s.admin_people],
-            "budgets": dict(sorted(s.budgets.items()))}
+            "budgets": dict(sorted(s.budgets.items())), "move_types": [[c, k] for c, k in s.move_types]}
 
 
 def from_doc(doc: dict | None) -> E.Settings:
@@ -71,7 +76,8 @@ def from_doc(doc: dict | None) -> E.Settings:
         sales_share=share, admin_share=float(doc.get("admin_share", 1.0 - share)),
         sales_people=tuple((str(n), float(p)) for n, p in doc.get("sales_people", base.sales_people)),
         admin_people=tuple((str(n), float(p)) for n, p in doc.get("admin_people", base.admin_people)),
-        budgets={str(k): float(v) for k, v in (doc.get("budgets") or base.budgets).items()})
+        budgets={str(k): float(v) for k, v in (doc.get("budgets") or base.budgets).items()},
+        move_types=tuple((str(c), str(k)) for c, k in doc.get("move_types", base.move_types)))
     return s.check()
 
 
@@ -131,7 +137,22 @@ def parse(form, current: E.Settings | None = None) -> E.Settings:
         if 0 < abs(total - 1.0) < 1e-4:
             rows = rows[:-1] + ((rows[-1][0], rows[-1][1] + 1.0 - total),)
             people[group] = rows
-    s = dataclasses.replace(defaults(), usd_mxn=_keep(float(fx), cur.usd_mxn, 0.00005), sales_people=people["sales"], admin_people=people["admin"],
+    move_types, seen = [], set()
+    for i in range(MAX_MOVE_TYPES):
+        code = (form.get(f"mt_code_{i}") or "").strip().upper()
+        kind = (form.get(f"mt_kind_{i}") or "").strip()
+        if not code:
+            continue
+        if not re.fullmatch(r"[A-Z0-9]{2,6}", code):
+            raise SettingsFormError(f"Move type {code[:10]}: use the Moveware code, 2 to 6 letters or digits.",
+                                    f"Tipo de mudanza {code[:10]}: use el código de Moveware, 2 a 6 letras o dígitos.")
+        if code in seen:
+            raise SettingsFormError(f"Move type {code} appears twice.", f"El tipo de mudanza {code} aparece dos veces.")
+        if kind not in E.MOVE_KINDS:
+            raise SettingsFormError(f"Move type {code}: choose what it is.", f"Tipo de mudanza {code}: elija qué es.")
+        seen.add(code)
+        move_types.append((code, kind))
+    s = dataclasses.replace(defaults(), move_types=tuple(move_types) if move_types else cur.move_types, usd_mxn=_keep(float(fx), cur.usd_mxn, 0.00005), sales_people=people["sales"], admin_people=people["admin"],
                             admin_share=cur.admin_share if vals["sales_share"] == cur.sales_share else 1.0 - vals["sales_share"],
                             budgets=budgets, **vals)
     try:
@@ -159,7 +180,7 @@ def changes(before: E.Settings, after: E.Settings) -> list:
     a, b = to_doc(before), to_doc(after)
     out = [f"{k}: {a[k]} -> {b[k]}" for k in ("rate", "w_invoicing", "w_margin", "w_discipline", "target_margin",
                                                "usd_mxn", "sales_share") if abs(a[k] - b[k]) > 1e-9]
-    for k in ("sales_people", "admin_people"):
+    for k in ("sales_people", "admin_people", "move_types"):
         if a[k] != b[k]:
             out.append(f"{k}: {a[k]} -> {b[k]}")
     for m in sorted(set(a["budgets"]) | set(b["budgets"])):

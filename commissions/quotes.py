@@ -38,6 +38,7 @@ from . import engine as E
 
 EPS = 0.005
 JOB = re.compile(r"^\d{5,7}[A-Z]{0,2}$")
+MOVE_CODE = r"[A-Z0-9]{2,6}"
 CUSTOMER_TYPES = ("Company", "Private", "Diplomatic", "Agent", "Blank")
 # Move types of agent business: never Corporate or Private (Lupita, 12 Oct 2026).
 AGENT_MOVE_TYPES = ("IMA", "EXA")
@@ -130,9 +131,9 @@ def load_removals(src) -> tuple:
             move = str(_cell(r, 1) or "").strip().upper()
             branch = str(_cell(r, 10) or "").strip().upper()
             status = str(_cell(r, 14) or "").strip().upper()
-            if not re.fullmatch(r"[A-Z]{3}", move):
-                _bad(f"row {i}: the move type is not a three-letter code",
-                     f"fila {i}: el tipo de mudanza no es un código de tres letras")
+            if not re.fullmatch(MOVE_CODE, move):       # XUSA, STG … (Moveware training, 16 Oct 2026)
+                _bad(f"row {i}: the move type is not a Moveware code (2 to 6 letters or digits)",
+                     f"fila {i}: el tipo de mudanza no es un código de Moveware (2 a 6 letras o dígitos)")
             if not re.fullmatch(r"[A-Z]{2,4}", branch) or branch != ctx["Branch"]:
                 _bad(f"row {i}: the branch of the job does not match its branch group",
                      f"fila {i}: la sucursal del expediente no coincide con su grupo de sucursal")
@@ -278,7 +279,7 @@ def load_costing(src) -> tuple:
             for c in r[12:]:
                 if isinstance(c, str) and c.strip().startswith("Client Type"):
                     ct = c.split(":", 1)[1].strip() if ":" in c else ""
-            cur = [job, move if re.fullmatch(r"[A-Z]{3}", move) else "?",
+            cur = [job, move if re.fullmatch(MOVE_CODE, move) else "?",
                    ct if ct in CUSTOMER_TYPES else ("Blank" if not ct else "?"), [], i, {}]
         elif a == "Cost Option":
             if cur is None:
@@ -344,7 +345,7 @@ def removals_from_records(doc) -> tuple:
     try:
         jobs = [Removal(**r) for r in doc["jobs"]]
         control = {k: doc["control"][k] for k in ("listed", "listed_ex", "total_files", "total_ex")}
-        ok = all(JOB.match(x.job) and re.fullmatch(r"[A-Z]{3}", x.move_type) and re.fullmatch(r"[A-Z]{2,4}", x.branch)
+        ok = all(JOB.match(x.job) and re.fullmatch(MOVE_CODE, x.move_type) and re.fullmatch(r"[A-Z]{2,4}", x.branch)
                  and x.customer_type in CUSTOMER_TYPES + ("?",) and re.fullmatch(r"[A-Z]", x.status)
                  and (x.won == "" or dt.date.fromisoformat(x.won)) and isinstance(x.row, int)
                  and E._finite(x.value_ex, x.value_inc) and x.value_ex >= 0 and x.value_inc >= 0 for x in jobs)
@@ -368,7 +369,7 @@ def costing_from_records(doc) -> tuple:
                                           "rows": [int(x) for x in d["rows"]]} for d in r.get("duplicates", ())))
                 for r in doc["jobs"]]
         period = {k: str(doc["period"].get(k, "")) for k in ("won_from", "won_to")}
-        ok = all(JOB.match(j.job) and (j.move_type == "?" or re.fullmatch(r"[A-Z]{3}", j.move_type))
+        ok = all(JOB.match(j.job) and (j.move_type == "?" or re.fullmatch(MOVE_CODE, j.move_type))
                  and j.client_type in CUSTOMER_TYPES + ("?",) and isinstance(j.row, int)
                  and all(re.fullmatch(r"\d{1,3}|\?", o.no) and re.fullmatch(r"[A-Z]", o.status)
                          and E._finite(o.cost, o.sell, o.actual) and isinstance(o.lines, int)
@@ -446,20 +447,21 @@ def book(removals=None, costings=None, s: E.Settings | None = None, pesos=()) ->
     return out
 
 
-def in_scope_by_moveware(q: dict) -> bool:
+def in_scope_by_moveware(q: dict, agent=AGENT_MOVE_TYPES) -> bool:
     """Corporate or Private by Moveware's own marks: not an agent move type,
-    and customer type Company or Private."""
-    return q["move_type"] not in AGENT_MOVE_TYPES and q["customer_type"] in ("Company", "Private")
+    and customer type Company or Private. `agent` = the agent move types of the
+    settings (engine.agent_types)."""
+    return q["move_type"] not in agent and q["customer_type"] in ("Company", "Private")
 
 
-def won_by_month(quotes: dict, also=()) -> dict:
+def won_by_month(quotes: dict, also=(), agent=AGENT_MOVE_TYPES) -> dict:
     """{month: sale prices of the Corporate and Private jobs won in it}. `also`
     names jobs to count although Moveware's customer type is blank."""
     out = {}
     for job, q in quotes.items():
         if q["sale"] is None or not q["won"]:
             continue
-        if in_scope_by_moveware(q) or (job in also and q["move_type"] not in AGENT_MOVE_TYPES):
+        if in_scope_by_moveware(q, agent) or (job in also and q["move_type"] not in agent):
             out[q["won"][:7]] = out.get(q["won"][:7], 0.0) + q["sale"]
     return out
 

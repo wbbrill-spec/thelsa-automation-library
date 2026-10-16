@@ -886,6 +886,12 @@ input[type=file]{font:inherit}button.go,.btn{background:var(--navy);color:#fff;b
 <h3>{{ t(label, label_es) }}</h3><div class="scroll"><table>
 {% for i in range(ss.MAX_PEOPLE) %}{% set p = people[i] if i < people|length else none %}<tr><td><input type="text" name="{{ group }}_name_{{ i }}" value="{{ p[0] if p else '' }}" {{ dis }} size="34"></td><td><input type="text" name="{{ group }}_share_{{ i }}" value="{{ '%g'|format(p[1] * 100) if p else '' }}" {{ dis }} size="6"> %</td></tr>{% endfor %}
 </table></div>{% endfor %}
+<h3>{{ t('Moveware move types', 'Tipos de mudanza de Moveware') }}</h3>
+<p class="small">{{ t('What each Moveware move type is for the commission. A file whose type is not on this list, or is marked not in use, is listed under the points to look at. Add a type with its exact Moveware code.',
+'Qué es cada tipo de mudanza de Moveware para la comisión. Un expediente con un tipo que no está en la lista, o marcado sin uso, aparece en los puntos por revisar. Agregue un tipo con su código exacto de Moveware.') }}</p>
+<div class="scroll"><table>{% for i in range(ss.MAX_MOVE_TYPES) %}{% set mt = s.move_types[i] if i < s.move_types|length else none %}{% if mt or i < s.move_types|length + 3 %}
+<tr><td><input type="text" name="mt_code_{{ i }}" value="{{ mt[0] if mt else '' }}" {{ dis }} size="6" style="text-align:left"></td>
+<td><select name="mt_kind_{{ i }}" {{ dis }}>{% for k, en, es in ss.MOVE_KIND_LABELS %}<option value="{{ k }}" {{ 'selected' if mt and mt[1] == k else '' }}>{{ en }} / {{ es }}</option>{% endfor %}</select></td></tr>{% endif %}{% endfor %}</table></div>
 <h3>{{ t('Booking budget per month, Corporate + Private (MXN)', 'Presupuesto de ventas contratadas por mes, Corporativo + Privado (MXN)') }}</h3>
 <p class="small">{{ t('A month with no budget is not calculated.', 'Un mes sin presupuesto no se calcula.') }}</p>
 <div class="scroll"><table>{% for m in ss.budget_months({'budgets': s.budgets}) %}<tr><td class="l">{{ mon(m) }}</td><td><input type="text" name="bud_{{ m }}" inputmode="decimal" value="{{ '{:,.2f}'.format(s.budgets[m]) if m in s.budgets else '' }}" {{ dis }}></td></tr>{% endfor %}</table></div>

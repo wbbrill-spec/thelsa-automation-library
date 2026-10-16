@@ -204,6 +204,16 @@ class Costing:
     client_type: str
     options: tuple
     row: int
+    # Cost lines that appear more than once on the job's valid (W) options: same
+    # description, same creditor, same amount. Usually a costing line opened again
+    # because a supplier purchase order could not be reversed (MC team, Moveware
+    # training 16 Oct 2026); it inflates cost and lowers the margin. Kept as
+    # amounts and sheet rows only: [{"kind": "quoted"|"actual", "amount", "times", "rows"}].
+    duplicates: tuple = ()
+
+
+def _norm(v) -> str:
+    return re.sub(r"\s+", " ", str(v or "")).strip().lower()
 
 
 def load_costing(src) -> tuple:
@@ -220,7 +230,7 @@ def load_costing(src) -> tuple:
             except ValueError:
                 pass
     jobs, seen = [], {}
-    cur = None           # [job, move, client type, options, row]
+    cur = None           # [job, move, client type, options, row, {line key: [rows]}]
     opt = None           # the option being read
     phase = ""
 
@@ -242,7 +252,10 @@ def load_costing(src) -> tuple:
         nonlocal cur
         if cur is None:
             return
-        jobs.append(Costing(job=cur[0], move_type=cur[1], client_type=cur[2], options=tuple(cur[3]), row=cur[4]))
+        dups = tuple({"kind": k[3], "amount": k[2], "times": len(rws), "rows": list(rws)}
+                     for k, rws in sorted(cur[5].items(), key=lambda kv: kv[1][0]) if len(rws) > 1)
+        jobs.append(Costing(job=cur[0], move_type=cur[1], client_type=cur[2], options=tuple(cur[3]), row=cur[4],
+                            duplicates=dups))
         cur = None
 
     for i, r in enumerate(rows[1:], start=2):
@@ -266,7 +279,7 @@ def load_costing(src) -> tuple:
                 if isinstance(c, str) and c.strip().startswith("Client Type"):
                     ct = c.split(":", 1)[1].strip() if ":" in c else ""
             cur = [job, move if re.fullmatch(r"[A-Z]{3}", move) else "?",
-                   ct if ct in CUSTOMER_TYPES else ("Blank" if not ct else "?"), [], i]
+                   ct if ct in CUSTOMER_TYPES else ("Blank" if not ct else "?"), [], i, {}]
         elif a == "Cost Option":
             if cur is None:
                 _bad(f"row {i}: a cost option before any removal plan", f"fila {i}: una opción de costo antes de un plan de mudanza")
@@ -296,6 +309,11 @@ def load_costing(src) -> tuple:
             cost = _num(_cell(r, 3), i, "quoted cost", "el costo cotizado")
             sell = _num(_cell(r, 6), i, "quoted sale price", "el precio de venta cotizado")
             act = _num(_cell(r, 8), i, "actual cost", "el costo real")
+            if opt["status"] == "W":                         # the text is compared here and never kept
+                who = (_norm(a), _norm(_cell(r, 13)))
+                for kind, amount in (("quoted", cost), ("actual", act)):
+                    if amount is not None and abs(amount) >= EPS:
+                        cur[5].setdefault(who + (round(amount, 2), kind), []).append(i)
             opt["lines"] += 1
             if phase == "lines":
                 opt["line_cost"] += cost or 0.0
@@ -345,7 +363,10 @@ def costing_to_records(jobs, period) -> dict:
 def costing_from_records(doc) -> tuple:
     try:
         jobs = [Costing(job=r["job"], move_type=r["move_type"], client_type=r["client_type"], row=r["row"],
-                        options=tuple(CostOption(**o) for o in r["options"])) for r in doc["jobs"]]
+                        options=tuple(CostOption(**o) for o in r["options"]),
+                        duplicates=tuple({"kind": str(d["kind"]), "amount": float(d["amount"]), "times": int(d["times"]),
+                                          "rows": [int(x) for x in d["rows"]]} for d in r.get("duplicates", ())))
+                for r in doc["jobs"]]
         period = {k: str(doc["period"].get(k, "")) for k in ("won_from", "won_to")}
         ok = all(JOB.match(j.job) and (j.move_type == "?" or re.fullmatch(r"[A-Z]{3}", j.move_type))
                  and j.client_type in CUSTOMER_TYPES + ("?",) and isinstance(j.row, int)
@@ -485,6 +506,14 @@ def problems(removals=None, control=None, costings=None, pesos=()) -> list:
             add("quote_branch_currency", x.job, f"branch {x.branch} does not end in U or M: currency not known",
                 f"la sucursal {x.branch} no termina en U ni en M: no se conoce la moneda")
     for j in costings or []:
+        for d in j.duplicates:
+            word, word_es = ("quoted cost", "costo cotizado") if d["kind"] == "quoted" else ("actual cost", "costo real")
+            rows = ", ".join(str(x) for x in d["rows"])
+            add("costing_duplicate", j.job,
+                f"Move Costing Sheet rows {rows}: the same cost line ({word} {d['amount']:,.2f}, same description "
+                f"and creditor) appears {d['times']} times on the valid option",
+                f"Move Costing Sheet filas {rows}: la misma línea de costo ({word_es} {d['amount']:,.2f}, misma "
+                f"descripción y acreedor) aparece {d['times']} veces en la opción válida")
         for o in j.options:
             if o.status == "W" and o.total_off:
                 add("quote_total_off", j.job,

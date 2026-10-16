@@ -359,3 +359,20 @@ def test_sheet_shows_the_quote_and_sums_the_sale_prices(load, tmp_path):
     text = " ".join(str(c.value) for ws in wb for r_ in ws.iter_rows() for c in r_ if c.value is not None)
     for name in NAMES:
         assert name not in text
+
+
+def test_a_cost_line_entered_twice_on_the_valid_option_is_listed_without_its_text(tmp_path):
+    jobs = [("110001", "EXP", "Company", [
+                O("01", "W", lines=((1000.0, 1300.0, None, None), (1000.0, 1300.0, None, None), (500.0, 650.0, 480.0, None)),
+                  after=((0.0, 0.0, 480.0, None),)),
+                O("02", "C", lines=((700.0, 900.0, None, None), (700.0, 900.0, None, None)))]),   # cancelled option: ignored
+            ("110002", "IMP", "Private", [O("01", "W", lines=((1000.0, 1300.0, None, None), (900.0, 1100.0, None, None)))])]
+    got, _ = Q.load_costing(xl(tmp_path, costing_rows(jobs)))
+    by = {j.job: j for j in got}
+    assert [(d["kind"], d["amount"], d["times"]) for d in by["110001"].duplicates] == [("quoted", 1000.0, 2),
+                                                                                      ("actual", 480.0, 2)]
+    assert by["110002"].duplicates == ()
+    back, _ = Q.costing_from_records(Q.costing_to_records(got, {"won_from": "", "won_to": ""}))
+    assert back == got and "Supplier" not in str(Q.costing_to_records(got, {}))
+    probs = [p for p in Q.problems(costings=got) if p["kind"] == "costing_duplicate"]
+    assert [p["job"] for p in probs] == ["110001", "110001"] and "aparece 2 veces" in probs[0]["detail_es"]

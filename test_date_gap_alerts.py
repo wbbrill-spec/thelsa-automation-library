@@ -111,3 +111,11 @@ def test_the_keeper_runs_it_once_a_weekday_from_the_set_hour(monkeypatch):
     assert not dga.due_now(dt.datetime(2026, 10, 18, 9, 0, tzinfo=dga.MEXICO))          # Sunday
     dga._save_state({"(summary)": "2026-10-19"})
     assert not dga.due_now(mon9)
+
+
+def test_a_date_typed_in_the_wrong_year_is_listed_to_be_corrected():
+    g = gaps([rec("110801", "IMP", pack="2026-08-30", delivery="2020-09-02", booked="2026-08-01"),
+              rec("110802", "IMP", pack="2026-08-30", delivery="2026-09-02", booked="2026-08-01")])
+    assert [x["file"] for x in g] == ["110801"] and g[0]["wrong_year"] == ["delivery"]
+    body = dga.build(g)["coordinators"][0]["body"]
+    assert "año equivocado" in body and "2020-09-02" in body

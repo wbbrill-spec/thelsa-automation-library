@@ -222,6 +222,7 @@ def faim_snapshot(files, today=None, sit=None):
             "sit_pack": sit_pack if (sit_pack and sit_pack <= today) else None,
             "type": job_type,
             "coord_email": str(f.get("coordinator_email") or "").strip(),
+            "pack_day": pack, "delivery_day": delivered,
             "booked": _as_date(f.get("booked")),
             # proof it really moved, for a file not marked booked (Bill, 15 Oct):
             # it was invoiced, or SIT's plan shows a truck carried it
@@ -321,6 +322,22 @@ def faim_snapshot(files, today=None, sit=None):
                               "coord": r["coord"], "coord_email": r["coord_email"], "missing": miss,
                               "sit_pack": "", "sit_delivery": "", "key_date": "", "no_dates": True,
                               "booked": r["booked"].isoformat()})
+    # A date typed in the wrong year (2020 for 2026: seen on 110801, 110878,
+    # 110735, 15 Oct) is as bad as a missing one: the file drops out of every
+    # report. A key date more than a year before the file was won, or more than
+    # 18 months ahead, is listed to be corrected.
+    far = today + dt.timedelta(days=548)
+    seen = {g["file"] for g in date_gaps}
+    for r in audited + [x for x in no_date if x["status"] == BOOKED_STATUS]:
+        if r["number"] in seen:
+            continue
+        floor = (r["booked"] - dt.timedelta(days=365)) if r["booked"] else dt.date(today.year - 2, 1, 1)
+        odd = [k for k, d in (("pack", r["pack_day"]), ("delivery", r["delivery_day"])) if d and (d < floor or d > far)]
+        if odd:
+            date_gaps.append({"file": r["number"], "status": r["status"], "type": r["type"], "coord": r["coord"],
+                              "coord_email": r["coord_email"], "missing": [], "wrong_year": odd,
+                              "dates": {k: r[f"{k}_day"].isoformat() for k in odd},
+                              "sit_pack": "", "sit_delivery": "", "key_date": ""})
     date_gaps.sort(key=lambda g: (g["coord"].lower(), g["file"]))
 
     def _by(rows, field="status"):
@@ -564,9 +581,11 @@ def faim_date_gaps():
         import io
         buf = io.StringIO()
         w = csv.writer(buf)
-        w.writerow(["coordinator", "file", "type", "missing", "sit_pack", "sit_delivery", "no_dates", "booked"])
+        w.writerow(["coordinator", "file", "type", "missing", "wrong_year", "sit_pack", "sit_delivery", "no_dates",
+                    "booked"])
         for g in gaps:
-            w.writerow([g["coord"], g["file"], g["type"], "+".join(g["missing"]), g["sit_pack"],
+            w.writerow([g["coord"], g["file"], g["type"], "+".join(g["missing"]),
+                        " ".join(f"{k}={v}" for k, v in (g.get("dates") or {}).items()), g["sit_pack"],
                         g["sit_delivery"], "yes" if g.get("no_dates") else "", g.get("booked", "")])
         return buf.getvalue(), 200, {"Content-Type": "text/csv; charset=utf-8",
                                      "Content-Disposition": "attachment; filename=moveware-missing-dates.csv"}
@@ -577,6 +596,7 @@ def faim_date_gaps():
                     "no_dates_at_all": sum(1 for g in gaps if g.get("no_dates")),
                     "pack_missing": sum(1 for g in gaps if "pack" in g["missing"]),
                     "delivery_missing": sum(1 for g in gaps if "delivery" in g["missing"]),
+                    "wrong_year": sum(1 for g in gaps if g.get("wrong_year")),
                     "by_coordinator": sorted(by, key=lambda x: -x["files"]),
                     "alerts": {"enabled": dga.enabled(), "send": dga.send_enabled(),
                                "auto_daily": os.environ.get("DATE_ALERTS_AUTO") == "1"}})

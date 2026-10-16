@@ -13,7 +13,9 @@ WHAT COUNTS AS A GAP (the FAIM audit's own rules, faim_web.faim_snapshot)
     not pack those (Lupita, 16 Oct: "IMA ... no nos interesa cuando se empaca");
   - delivery date missing, except agent exports (EXA): Thelsa's part ends at
     origin;
-  - a booked file (status W, won in the last 12 months) with no key date at all.
+  - a booked file (status W, won in the last 12 months) with no key date at all;
+  - a key date in the wrong year (more than a year before the file was won, or
+    more than 18 months ahead: 2020 typed for 2026 on three files on 15 Oct).
   Where SIT's Plan de Viajes has the day, the email says so, so the coordinator
   can copy it — but it stays a gap until it is in Moveware.
 
@@ -91,6 +93,11 @@ def _save_state(state: dict) -> None:
 
 
 def _line(g) -> str:
+    if g.get("wrong_year"):
+        es = ", ".join(f"{WORD_ES[k]} {g['dates'][k]}" for k in g["wrong_year"])
+        en = ", ".join(f"{WORD_EN[k]} {g['dates'][k]}" for k in g["wrong_year"])
+        return (f"• {g['file']} ({g['type'] or 's/tipo'}): fecha con año equivocado: {es}\n"
+                f"  {g['file']}: date in the wrong year: {en}")
     if g.get("no_dates"):
         es = f"• {g['file']} ({g['type'] or 's/tipo'}): ganado el {g.get('booked', '')} y SIN NINGUNA fecha clave"
         en = f"  {g['file']}: won {g.get('booked', '')}, no key date at all"

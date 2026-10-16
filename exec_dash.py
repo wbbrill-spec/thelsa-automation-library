@@ -185,6 +185,7 @@ def build(files, finance: dict, today: dt.date | None = None, costing: dict | No
         if not ccy:
             orig = (e.get("inv_orig") or {})
             ccy = next(iter(orig)) if len(orig) == 1 else ""
+        ccy = CS.check_currency(ccy, c.get("sell"), e.get("inv_mxn"), plan)
         return CS.to_mxn(c["cost_best"], ccy, e, plan)
 
     out = {"periods": {}, "fx": {"plan": plan, "spot": spot}, "as_of": today.isoformat()}

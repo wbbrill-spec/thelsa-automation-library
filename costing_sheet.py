@@ -180,6 +180,19 @@ def to_mxn(amount: float, ccy: str, ledger_entry: dict | None = None, plan_rate:
     return None
 
 
+def check_currency(ccy: str, sell, fin_sales, plan_rate: float = 17.4479) -> str:
+    """Correct an obvious currency mix-up with Finance's net sales: a "dollar"
+    file whose sale price already equals Finance's pesos is in pesos, and the
+    other way round. Sale prices may include 16% IVA, hence the wide band."""
+    if not sell or not fin_sales or fin_sales <= 0:
+        return ccy
+    if ccy in ("USD", "") and 0.8 <= sell / fin_sales <= 1.3:
+        return "MXN"
+    if ccy in ("MXN", "") and 0.8 <= sell * plan_rate / fin_sales <= 1.4:
+        return "USD"
+    return ccy
+
+
 # ── storage ──────────────────────────────────────────────────────────────────
 def save(parsed: dict, by: str = "") -> None:
     """Keep the parsed sheet in the app's database (commission_docs table, which
@@ -313,10 +326,14 @@ def compare_finance(summary: dict, finance: dict, currencies: dict | None = None
         cur, br = currencies.get(job, ("", ""))
         ccy = file_currency(job, cur, br)
         L = ledger.get(job) or {}
+        F = fin_files.get(job)
         if not ccy and len(L.get("inv_orig") or {}) == 1:
             ccy = next(iter(L["inv_orig"]))           # the one currency Finance invoiced it in
+            fin_cost = (F or {}).get("total_cost") or 0
+            if ccy != "MXN" and fin_cost and 0.7 <= (e["act"] or 0) / fin_cost <= 1.3:
+                ccy = "MXN"                            # the costs are plainly pesos
+        ccy = check_currency(ccy, e.get("sell"), (F or {}).get("net_sales"), plan_rate)
         act_mxn = to_mxn(e["act"], ccy, L, plan_rate) if ccy else None
-        F = fin_files.get(job)
         fin = (F or {}).get("total_cost")
         row = {"job": job, "currency": ccy, "lines": f'{e["lines_with_act"]} of {e["lines"]}',
                "act": e["act"], "act_mxn": act_mxn, "finance_cost_mxn": fin, "difference_mxn": None}

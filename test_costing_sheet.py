@@ -179,3 +179,9 @@ def test_compare_uses_finance_currency_when_moveware_has_none(parsed):
     rows = {r["job"]: r for r in cs.compare_finance(s, fin, {})}
     assert rows["110579"]["currency"] == "USD" and rows["110579"]["act_mxn"] == 17500.0
     assert rows["110579"]["finding"] == "match"
+
+
+def test_currency_mixup_is_corrected():
+    assert cs.check_currency("USD", 309000, 300000) == "MXN"
+    assert cs.check_currency("MXN", 17000, 300000) == "USD"
+    assert cs.check_currency("USD", 17000, 300000) == "USD"

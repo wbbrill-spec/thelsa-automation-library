@@ -2,14 +2,16 @@
 milestone_plan.py — what the automation WOULD change in MoveWare's diary so pack
 and delivery match SIT's Plan de Viajes. DRY RUN ONLY: nothing here writes.
 
-MoveWare V2 (Dave Pile, MOS-51412, 13 Oct 2026): diary actions are "activities".
+MoveWare V2 (Dave Pile, MOS-51412, 13 and 15 Oct 2026): diary actions are "activities".
   GET   /jobs/{id}/activities
   POST  /jobs/{id}/activities                {"type","date","comment","completed","completedby"}
   PATCH /jobs/{id}/activities/{activityId}   only the fields to change
 Updating a Pack or Uplift activity also moves the matching job-header date; child
 actions are not recalculated.
 
-Codes read from Thelsa's own activities (15 Oct 2026): Pack, Delivery, Unpack,
+Diary action codes vary by client; the full list is in the MoveWare app under
+Reports → Other → Diary Actions Listing. Codes read from Thelsa's own activities
+(15 Oct 2026): Pack, Delivery, Unpack,
 Uplift, "Uplift O/S", UpliftandReturntoWH. The parent actions to keep green are
 Pack and Delivery.
 
@@ -27,11 +29,15 @@ Rules — chosen to never overwrite a person's work by mistake:
 from __future__ import annotations
 
 import datetime as dt
+import os
 
 CODES = {"pack": "Pack", "delivery": "Delivery"}
 LABELS = {"pack": "Pack", "delivery": "Delivery"}
 TYPO_BEFORE = dt.date(2025, 1, 1)
-AUTO_USER = "AUTO"          # to be confirmed with MoveConnect (MOS-51412)
+# Dave Pile (MOS-51412, 15 Oct 2026): writes are signed by a dedicated MoveWare
+# user whose code is three characters. Create that user in the MoveWare app, then
+# set MW_AUTO_USER on Render to its code. "AUT" is only a placeholder.
+AUTO_USER = (os.environ.get("MW_AUTO_USER") or "AUT").strip().upper()[:3]
 
 
 def _d(v):

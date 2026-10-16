@@ -170,3 +170,12 @@ def test_finance_files_from_commission_lines():
     f = audit_web.finance_files_from_lines(lines)
     assert list(f) == ["110578"]
     assert f["110578"]["net_sales"] == 80.0 and f["110578"]["total_cost"] == 60.0 and f["110578"]["has_cost"]
+
+
+def test_compare_uses_finance_currency_when_moveware_has_none(parsed):
+    s = cs.summarize(parsed)
+    fin = {"files": {"110579": {"total_cost": 17500.0}},
+           "ledger": {"110579": {"inv_orig": {"USD": 100.0}, "inv_mxn": 1000.0}}}
+    rows = {r["job"]: r for r in cs.compare_finance(s, fin, {})}
+    assert rows["110579"]["currency"] == "USD" and rows["110579"]["act_mxn"] == 17500.0
+    assert rows["110579"]["finding"] == "match"

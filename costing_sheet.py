@@ -313,6 +313,8 @@ def compare_finance(summary: dict, finance: dict, currencies: dict | None = None
         cur, br = currencies.get(job, ("", ""))
         ccy = file_currency(job, cur, br)
         L = ledger.get(job) or {}
+        if not ccy and len(L.get("inv_orig") or {}) == 1:
+            ccy = next(iter(L["inv_orig"]))           # the one currency Finance invoiced it in
         act_mxn = to_mxn(e["act"], ccy, L, plan_rate) if ccy else None
         F = fin_files.get(job)
         fin = (F or {}).get("total_cost")

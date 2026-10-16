@@ -1266,8 +1266,14 @@ def _supplier_checks_view(files) -> dict:
     for r in rows:
         counts[r["check"]] = counts.get(r["check"], 0) + 1
     cur = {}
-    for f in files or []:
-        cur.setdefault(cs.base(f.get("job")), (f.get("currency") or "", f.get("branch") or ""))
+    try:
+        import mw_live
+        everything = list(files or []) + list(mw_live.audited_files() or [])
+    except Exception:
+        everything = list(files or [])
+    for f in everything:
+        if f.get("currency") or f.get("branch"):
+            cur.setdefault(cs.base(f.get("job")), (f.get("currency") or "", f.get("branch") or ""))
     fin = _load_finance_cost()
     recon = cs.compare_finance(cs.summarize(doc), fin, cur)
     rc = {}

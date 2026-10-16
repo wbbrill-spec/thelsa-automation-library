@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import datetime as dt
 import os
+import job_rules
 
 import fx
 
@@ -238,6 +239,10 @@ def build(files, finance: dict, today: dt.date | None = None, costing: dict | No
                    "pack": pack.isoformat() if pack else None,
                    "delivery": deliv.isoformat() if deliv else None,
                    "pack_src": f.get("pack_src"), "delivery_src": f.get("delivery_src"),
+                   "job_id": f.get("job_id"), "job_type": f.get("job_type") or "",
+                   # EXA has no Delivery and IMA no Pack by design (training 16 Oct).
+                   "pack_na": not job_rules.pack_expected(f.get("job_type")),
+                   "delivery_na": not job_rules.delivery_expected(f.get("job_type")),
                    "status": st, "embassy": emb, "value": _r(q),
                    "ccy": fx.normalize(f.get("currency"), None) or "",
                    "value_mxn": round(to_mxn(q, s_rate))}

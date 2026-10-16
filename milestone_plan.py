@@ -25,11 +25,19 @@ Rules — chosen to never overwrite a person's work by mistake:
     (the coordinator may know the real date; 1–2 days apart is normal);
   * completed with a date before 2025 (a typing slip) → PATCH to the plan date;
   * completed with a FUTURE date → REVIEW: should be reopened until it happens.
+  * job type decides what is due (job_rules, training 16 Oct 2026): no Delivery
+    on an agent export (EXA), no Pack on an agent import (IMA);
+  * actions are matched by KEY ACTION, not code: MoveWare has several Pack
+    actions (Pack, Pack2 …, some children of Uplift at −1/−2/−3 days) that all
+    carry key action Pack. The one with the plain code is preferred, so a
+    calculated reminder date is never mistaken for the move itself.
 """
 from __future__ import annotations
 
 import datetime as dt
 import os
+
+import job_rules
 
 CODES = {"pack": "Pack", "delivery": "Delivery"}
 LABELS = {"pack": "Pack", "delivery": "Delivery"}
@@ -49,14 +57,18 @@ def _d(v):
         return None
 
 
-def plan_for_job(job: str, sit_job: dict, activities: list, today: dt.date | None = None) -> list:
+def plan_for_job(job: str, sit_job: dict, activities: list, today: dt.date | None = None,
+                 job_type: str = "") -> list:
     """Steps for one file. `sit_job` from sit_milestones.collect(); `activities`
-    the job's MoveWare activities (dicts with type, date, completed, completedby, id)."""
+    the job's MoveWare activities (dicts with type, keyaction, date, completed,
+    completedby, id); `job_type` the MoveWare service code (EXA, IMA, XP …)."""
     today = today or dt.date.today()
     steps = []
     for key, code in CODES.items():
+        if not job_rules.expected(key, job_type):
+            continue                                   # e.g. Delivery on an EXA: not ours
         m = (sit_job or {}).get(key) or {}
-        mine = [a for a in activities or [] if (a.get("type") or "") == code]
+        mine = [a for a in activities or [] if job_rules.is_milestone(a, key)]
         plan_day = _d(m.get("date"))
         done = m.get("status") == "done" and plan_day and plan_day <= today
         base = {"job": job, "milestone": key, "code": code, "plan_date": m.get("date"),
@@ -77,8 +89,10 @@ def plan_for_job(job: str, sit_job: dict, activities: list, today: dt.date | Non
                 "notes": "From SIT Plan de Viajes (automation)"},
                 "why": f"No {code} action on the file."})
             continue
-        # Prefer the action that is already completed, else the first one.
-        a = next((x for x in mine if (x.get("completed") or "").upper() == "Y"), mine[0])
+        # Prefer the action that is already completed, then the one with the plain
+        # code (Pack / Delivery), else the first one.
+        a = next((x for x in mine if (x.get("completed") or "").upper() == "Y"), None) \
+            or next((x for x in mine if (x.get("type") or "") == code), mine[0])
         ad, comp = _d(a.get("date")), (a.get("completed") or "").upper() == "Y"
         info = {"activity_id": a.get("id"), "mw_date": (a.get("date") or "")[:10],
                 "mw_completed": "Y" if comp else "N", "mw_by": a.get("completedby") or ""}

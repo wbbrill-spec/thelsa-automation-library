@@ -1109,6 +1109,10 @@ def audit():
     except Exception:
         pass
     try:
+        _mark_confirmed(ex, raw_dated)
+    except Exception:
+        pass
+    try:
         import supplier_costs
         supplier_costs.ensure_scanner()
         ex["sc"] = supplier_costs.get_state()
@@ -1260,7 +1264,8 @@ def _supplier_checks_view(files) -> dict:
         if d:
             delivered[cs.base(f.get("job"))] = str(d)[:10]
     rows = cs.supplier_checks(doc, delivered)
-    order = {"po_on_two_files": 0, "over_quote": 1, "invoice_missing": 2, "no_approval": 3}
+    order = {"duplicate_line": 0, "po_on_two_files": 1, "over_quote": 2, "invoice_missing": 3,
+             "no_approval": 4}
     rows.sort(key=lambda r: (order.get(r["check"], 9), -(r.get("difference") or 0), r["job"]))
     counts = {}
     for r in rows:
@@ -1325,6 +1330,64 @@ def audit_supplier_checks():
 
 _MS_PLAN = {"steps": [], "summary": {}, "built_at": None, "running": False, "error": None, "skipped": []}
 
+# Diary dates MARKED COMPLETED in MoveWare, per file number. Since the 16 Oct 2026
+# training, Pack and Delivery are auto-created at quote stage with the planned
+# date, so a date on the file is a plan until the coordinator completes it. Read
+# from /jobs/{id}/activities for the files on the ready-to-invoice list (and the
+# Plan de Viajes files, during the milestone dry run). Read-only.
+_CONFIRMED = {"by_job": {}, "running": False}
+_CONFIRMED_TTL = 6 * 3600
+_CONFIRMED_MAX = 150
+
+
+def _confirmed_fetch(pairs):
+    """pairs = [(job, job_id)] → fill _CONFIRMED['by_job'] in the background."""
+    import time
+    import job_rules
+    import mw_live
+    _CONFIRMED["running"] = True
+    try:
+        for job, jid in pairs[:_CONFIRMED_MAX]:
+            try:
+                body = mw_live._get_timed(f"/jobs/{jid}/activities", 15) or {}
+            except Exception:
+                continue
+            acts = body.get("activities") or []
+            _CONFIRMED["by_job"][str(job)] = {**job_rules.confirmed_dates(acts), "at": time.time()}
+    finally:
+        _CONFIRMED["running"] = False
+
+
+def _mark_confirmed(ex, files):
+    """Tag each ready-to-invoice row: is its pack / delivery date a fact (marked
+    completed in MoveWare, or done in SIT's Plan de Viajes) or only planned?"""
+    import threading
+    import time
+    need, seen = [], set()
+    unconf = 0
+    for p in (ex.get("periods") or {}).values():
+        for r in p.get("ready") or []:
+            job = str(r.get("job") or "")
+            c = _CONFIRMED["by_job"].get(job)
+            if (not c or time.time() - c.get("at", 0) > _CONFIRMED_TTL) and r.get("job_id") and job not in seen:
+                need.append((job, r["job_id"]))
+                seen.add(job)
+            if not c:
+                r["confirm"] = None                    # not read yet
+                continue
+            pk = bool(r.get("pack_src") or c.get("pack") or c.get("load"))
+            dl = bool(r.get("delivery_src") or c.get("delivery"))
+            r["pack_planned"] = bool(r.get("pack")) and not pk
+            r["delivery_planned"] = bool(r.get("delivery")) and not dl
+            r["confirm"] = not (r["pack_planned"] or r["delivery_planned"])
+            if not r["confirm"]:
+                unconf += 1
+        p["ready_planned_n"] = sum(1 for r in p.get("ready") or [] if r.get("confirm") is False)
+        p["ready_unread_n"] = sum(1 for r in p.get("ready") or [] if r.get("confirm") is None)
+    if need and not _CONFIRMED["running"]:
+        threading.Thread(target=_confirmed_fetch, args=(need,), daemon=True, name="confirmed-dates").start()
+    return unconf
+
 
 def _build_milestone_plan():
     """Dry run: compare each Plan de Viajes milestone with the file's MoveWare
@@ -1337,6 +1400,11 @@ def _build_milestone_plan():
     try:
         jobs = sm.state().get("jobs") or {}
         steps, skipped = [], []
+        try:
+            types = {str(f.get("job") or "").upper(): f.get("job_type") or ""
+                     for f in mw_live.audited_files() or []}
+        except Exception:
+            types = {}
         for job, j in sorted(jobs.items()):
             jid = job
             if not job.isdigit():
@@ -1355,7 +1423,8 @@ def _build_milestone_plan():
             except Exception:
                 skipped.append(job)
                 continue
-            for st in mp.plan_for_job(job, j, acts):
+            _CONFIRMED["by_job"][job] = {**__import__("job_rules").confirmed_dates(acts), "at": time.time()}
+            for st in mp.plan_for_job(job, j, acts, job_type=types.get(job) or types.get(sm.base_file(job)) or ""):
                 st["coordinator"] = j.get("coordinator") or ""
                 steps.append(st)
         _MS_PLAN.update(steps=steps, summary=mp.summarize(steps), skipped=skipped,

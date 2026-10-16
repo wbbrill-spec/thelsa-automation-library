@@ -39,6 +39,8 @@ import re
 import threading
 import time
 
+import job_rules
+
 HUB_WORDS = ("BODEGA", "THELSA", "PUERTO", "PORT ", "AEROPUERTO", "AIRPORT", "ADUANA",
              "RECINTO", "FISCAL", "PATIO", "CRUCE", "FRONTERA", "TERMINAL", "NAVIERA",
              "MANZANILLO", "LAZARO CARDENAS", "LÁZARO CÁRDENAS", "ALTAMIRA", "VERACRUZ PUERTO",
@@ -160,8 +162,13 @@ def compare(sit_jobs: dict, mw_files: list, today: dt.date | None = None) -> dic
                "mw_pack": mw_pack, "mw_delivery": mw_del,
                "sit_pack": j["pack"], "sit_delivery": j["delivery"], "legs": j["legs"]}
         gaps = []
+        # Job type decides what is due (job_rules): no Delivery on an agent export
+        # (EXA), no Pack on an agent import (IMA) — not counted as missing.
+        jt = f.get("job_type") or ""
+        row["job_type"] = jt
+        row["not_expected"] = [n for n in ("pack", "delivery") if not job_rules.expected(n, jt)]
         for name, sit, mw in (("pack", j["pack"], mw_pack), ("delivery", j["delivery"], mw_del)):
-            if not sit:
+            if not sit or name in row["not_expected"]:
                 continue
             if not mw:
                 gaps.append(f"{name} missing in MoveWare")
@@ -171,8 +178,10 @@ def compare(sit_jobs: dict, mw_files: list, today: dt.date | None = None) -> dic
         rows.append(row)
     return {
         "as_of": today.isoformat(), "files": len(rows),
-        "pack_missing": sum(1 for r in rows if r["sit_pack"] and not r["mw_pack"]),
-        "delivery_missing": sum(1 for r in rows if r["sit_delivery"] and not r["mw_delivery"]),
+        "pack_missing": sum(1 for r in rows if r["sit_pack"] and not r["mw_pack"]
+                            and "pack" not in r["not_expected"]),
+        "delivery_missing": sum(1 for r in rows if r["sit_delivery"] and not r["mw_delivery"]
+                                and "delivery" not in r["not_expected"]),
         "differs": sum(1 for r in rows if any("differs" in g for g in r["gaps"])),
         "not_in_moveware": sum(1 for r in rows if not r["in_moveware"]),
         "rows": rows,

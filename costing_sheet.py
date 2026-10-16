@@ -283,6 +283,7 @@ def supplier_checks(parsed: dict, delivered: dict | None = None, today: dt.date 
                     if late:
                         rows.append({**common, "check": "invoice_missing", "delivered": d,
                                      "days": (today - dt.date.fromisoformat(d)).days})
+    rows += duplicate_lines(parsed)
     dup = {po: sorted(js) for po, js in po_seen.items() if len(js) > 1}
     for job, f in (parsed.get("files") or {}).items():
         for o in f.get("options") or []:
@@ -298,7 +299,48 @@ def supplier_checks(parsed: dict, delivered: dict | None = None, today: dt.date 
     return rows
 
 
+def duplicate_lines(parsed: dict) -> list:
+    """The same cost entered more than once on one file (its W options).
+
+    Why it happens (MoveWare training, 16 Oct 2026, Elizabeth): once a supplier
+    purchase order is generated with "Purchase" it cannot be reversed, so the
+    coordinators open a NEW costing line instead of correcting the old one. Both
+    lines then count as cost and the file's margin looks worse than it is.
+
+    A pair is: same supplier and the same actual amount (non-zero), or same
+    description, supplier and quoted amount. One row per extra line, with the
+    amount that may be counted twice."""
+    rows = []
+    for job, f in (parsed.get("files") or {}).items():
+        groups = {}
+        for o in f.get("options") or []:
+            if o.get("status") != "W":
+                continue
+            for ln in o.get("lines") or []:
+                cred = (ln.get("creditor") or "").strip().lower()
+                act, est = ln.get("act"), ln.get("est")
+                if act not in (None, 0) and cred:
+                    groups.setdefault(("act", cred, round(float(act), 2)), []).append(ln)
+                elif act is None and (est or 0) > 0:
+                    groups.setdefault(("est", cred, (ln.get("desc") or "").strip().lower(),
+                                       round(float(est), 2)), []).append(ln)
+        for key, lines in groups.items():
+            if len(lines) < 2:
+                continue
+            amount = key[2] if key[0] == "act" else key[3]
+            for ln in lines[1:]:
+                rows.append({"job": job, "line": ln.get("desc"), "creditor": ln.get("creditor") or "",
+                             "quoted": ln.get("est"), "actual": ln.get("act"),
+                             "po": (ln.get("po") or "").strip(), "date": ln.get("date") or "",
+                             "check": "duplicate_line", "times": len(lines),
+                             "pos": sorted({(x.get("po") or "").strip() for x in lines} - {""}),
+                             "difference": amount})
+    return rows
+
+
 CHECK_LABELS = {
+    "duplicate_line": ("Same cost entered twice on one file (may double-count cost)",
+                       "Mismo costo cargado dos veces en un expediente (puede duplicar el costo)"),
     "over_quote": ("Actual cost more than 10% over the quote", "Costo real más de 10% arriba de lo cotizado"),
     "no_approval": ("Actual cost loaded with no approval number", "Costo real cargado sin número de aprobación"),
     "po_on_two_files": ("Same approval number on two files", "Mismo número de aprobación en dos expedientes"),

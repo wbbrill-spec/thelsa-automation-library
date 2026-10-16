@@ -1,0 +1,80 @@
+"""
+job_rules.py — which key dates a file is EXPECTED to carry, by MoveWare job type.
+
+Agreed in the MoveWare diary-action training of 16 Oct 2026 (Jose Rivas with
+Lupita, Sara, Stephanie, Elizabeth) and confirmed by Bill the same day:
+
+  * agent export (EXA): Thelsa's part ends at origin, so NO Delivery date is
+    expected (Delivery is deliberately not auto-created on EXA);
+  * agent import (IMA): the agent packs at origin, so NO Pack date is expected
+    (Lupita: "IMA ... no nos interesa cuando se empaca").
+
+Every completeness measure (missing-date counts, Plan de Viajes vs MoveWare, the
+diary write-back) uses these two functions, so a file is never counted as
+"missing" a date that is not supposed to exist. Same environment settings as the
+FAIM audit (faim_web.AGENT_EXPORT_TYPES / AGENT_IMPORT_TYPES), so both agree.
+
+In MoveWare a diary action is identified by its KEY ACTION, not its code: Jose
+showed several Pack actions (different codes, some children of Uplift at −1/−2/−3
+days) that all carry key action "Pack". Match on `keyaction` first.
+"""
+from __future__ import annotations
+
+import os
+
+
+def _codes(name: str, default: list) -> set:
+    vals = [x.strip().upper() for x in os.environ.get(name, "").split(",") if x.strip()]
+    return set(vals or default)
+
+
+AGENT_EXPORT_TYPES = _codes("FAIM_AGENT_EXPORT_TYPES", ["EXA"])   # no delivery date due
+AGENT_IMPORT_TYPES = _codes("FAIM_AGENT_IMPORT_TYPES", ["IMA"])   # no pack date due
+
+KEY_ACTIONS = {"pack": "PACK", "delivery": "DELIVERY", "load": "UPLIFT"}
+
+
+def _base(job_type) -> str:
+    """'EXA', 'EXA1', 'exa 3' → 'EXA' (job-type combos share the service code)."""
+    t = str(job_type or "").strip().upper().replace(" ", "")
+    return t[:3] if len(t) > 3 and t[:3].isalpha() and t[3:].isdigit() else t
+
+
+def pack_expected(job_type) -> bool:
+    return _base(job_type) not in AGENT_IMPORT_TYPES
+
+
+def delivery_expected(job_type) -> bool:
+    return _base(job_type) not in AGENT_EXPORT_TYPES
+
+
+def expected(milestone: str, job_type) -> bool:
+    if milestone == "pack":
+        return pack_expected(job_type)
+    if milestone == "delivery":
+        return delivery_expected(job_type)
+    return True
+
+
+def is_milestone(activity: dict, milestone: str) -> bool:
+    """True when a MoveWare activity is the given milestone, by key action
+    (falling back to the code when the key action isn't returned)."""
+    want = KEY_ACTIONS.get(milestone, milestone.upper())
+    ka = str(activity.get("keyaction") or activity.get("keyAction") or "").strip().upper()
+    if ka:
+        return ka == want
+    code = str(activity.get("type") or "").strip().upper()
+    return code == want or (milestone == "pack" and code.startswith("PACK") and code[4:].isdigit())
+
+
+def confirmed_dates(activities) -> dict:
+    """{'pack': 'YYYY-MM-DD' | None, 'delivery': …, 'load': …} from activities
+    marked COMPLETED only. A date that is merely planned is not a fact."""
+    out = {"pack": None, "delivery": None, "load": None}
+    for m in out:
+        days = sorted(str(a.get("date") or "")[:10] for a in activities or []
+                      if is_milestone(a, m) and str(a.get("completed") or "").upper() == "Y"
+                      and a.get("date"))
+        if days:
+            out[m] = days[0] if m in ("pack", "load") else days[-1]
+    return out

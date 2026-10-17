@@ -7,8 +7,13 @@ TMS rows carry the MoveWare file number (column headed "Teléfono"). MoveWare
 itself rarely has pack or delivery dates (training session 9 Oct 2026: the diary
 isn't kept), so this module reads the plan history and gives each TMS file:
 
-  pack      = the first day a truck LOADS at the customer's end (origin is not a
-              Thelsa warehouse, port, airport or border crossing)
+  pack      = the first day either a packing crew works OR a truck loads at the
+              customer's end (kept for the audit's "did it move" evidence)
+  load      = the first day a TRUCK loads at the customer's end (origin is not a
+              Thelsa warehouse, port, airport or border crossing): MoveWare's
+              Uplift / Load key action, the parent date (training 16 Oct 2026)
+  packing   = the first day a PACKING CREW works at the customer's end (TIPO
+              EMPAQUE / EMBALAJE / HUACAL / SUELTO / MUEBLES): MoveWare's Pack
   delivery  = the last day a truck UNLOADS at the customer's end (destination is
               not one of those)
 
@@ -101,28 +106,35 @@ def collect(snapshots, today: dt.date | None = None) -> dict:
             leg["unload"] = t.unload_date
             leg["unit"] = t.unit
     for j in jobs.values():
-        pack = deliv = moved = None
+        pack = load = packing = deliv = moved = None
         for leg in j["legs"].values():
             kind = re.sub(r"[^a-z]", "", (leg.get("tipo") or "").lower())
-            p_day = d_day = m_day = None
+            l_day = k_day = d_day = m_day = None
             if kind.startswith(("desemp", "desep")):          # unpacking at the customer = delivery
                 d_day = leg.get("load") or leg.get("unload")
             elif kind in ("huacal", "suelto", "muebles", "empaque", "embalaje"):
-                if not is_hub(leg["origin"]):                  # packing services at the customer
-                    p_day = leg.get("load")
+                if not is_hub(leg["origin"]):                  # packing crew at the customer
+                    k_day = leg.get("load")
             else:                                             # truck movements
                 if not is_hub(leg["origin"]):
-                    p_day = leg.get("load")
+                    l_day = leg.get("load")                    # truck loads at the customer
                 if not is_hub(leg["destination"]):
                     d_day = leg.get("unload")
                 m_day = leg.get("load") or leg.get("unload")
-            if p_day and (pack is None or p_day < pack[0]):
-                pack = (p_day, leg)
+            if l_day and (load is None or l_day < load[0]):
+                load = (l_day, leg)
+            if k_day and (packing is None or k_day < packing[0]):
+                packing = (k_day, leg)
+            for p_day in (l_day, k_day):
+                if p_day and (pack is None or p_day < pack[0]):
+                    pack = (p_day, leg)
             if d_day and (deliv is None or d_day > deliv[0]):
                 deliv = (d_day, leg)
             if m_day and (moved is None or m_day < moved[0]):
                 moved = (m_day, leg)
         j["pack"] = _milestone(pack, today)
+        j["load"] = _milestone(load, today)
+        j["packing"] = _milestone(packing, today)
         j["delivery"] = _milestone(deliv, today)
         j["moved"] = _milestone(moved, today)
         j["legs"] = [{**v, "load": _iso(v.get("load")), "unload": _iso(v.get("unload")),

@@ -49,7 +49,9 @@ def delivery_expected(job_type) -> bool:
 
 
 def expected(milestone: str, job_type) -> bool:
-    if milestone == "pack":
+    # Load follows the Pack rule: on an agent import (IMA) the agent loads at
+    # origin, so neither is Thelsa's date to record.
+    if milestone in ("pack", "load"):
         return pack_expected(job_type)
     if milestone == "delivery":
         return delivery_expected(job_type)

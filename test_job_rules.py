@@ -34,7 +34,7 @@ def test_confirmed_dates_only_completed():
 def test_plan_skips_delivery_on_exa_and_pack_on_ima():
     sit = {"pack": {"date": "2026-09-01", "status": "done"}, "delivery": {"date": "2026-09-05", "status": "done"}}
     exa = mp.plan_for_job("1", sit, [], T, job_type="EXA")
-    assert [s["milestone"] for s in exa] == ["pack"]
+    assert [s["milestone"] for s in exa] == ["load"]
     ima = mp.plan_for_job("2", sit, [], T, job_type="IMA")
     assert [s["milestone"] for s in ima] == ["delivery"]
 

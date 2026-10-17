@@ -68,3 +68,26 @@ def test_future_completed_is_flagged():
                         [act("Uplift", "2026-12-07", "Y", "EH1")], T)
     assert [x["action"] for x in s] == ["review"] and "future" in s[0]["why"]
     assert mp.summarize(s) == {"create": 0, "update": 0, "review": 1, "files": 1}
+
+
+def test_load_and_pack_written_from_their_own_plan_rows():
+    sit = {"load": {"date": "2026-10-07", "status": "done"},
+           "packing": {"date": "2026-10-05", "status": "done"},
+           "pack": {"date": "2026-10-05", "status": "done"}}
+    s = mp.plan_for_job("111200", sit, [act("Pack", "2026-10-06", id_=2)], T, job_type="XP")
+    by = {x["milestone"]: x for x in s}
+    assert by["load"]["action"] == "create" and by["load"]["body"]["type"] == "Uplift"
+    assert by["load"]["body"]["date"] == "2026-10-07"
+    assert by["pack"]["action"] == "update" and by["pack"]["body"]["date"] == "2026-10-05"
+
+
+def test_packing_row_alone_never_becomes_the_load():
+    sit = {"load": None, "packing": {"date": "2026-10-05", "status": "done"},
+           "pack": {"date": "2026-10-05", "status": "done"}}
+    s = mp.plan_for_job("111202", sit, [], T, job_type="XP")
+    assert [x["body"]["type"] for x in s] == ["Pack"]
+
+
+def test_no_pack_written_on_agent_import():
+    sit = {"load": None, "packing": {"date": "2026-10-05", "status": "done"}}
+    assert mp.plan_for_job("111203", sit, [], T, job_type="IMA") == []

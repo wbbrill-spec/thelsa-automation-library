@@ -116,3 +116,16 @@ def test_coverage_counts_rows_without_a_file_number():
                                trip("", "A", "B", None, None), trip("110801", "A", "B", None, None, src="TIM")])]
     assert sm.coverage(snaps) == {"tms_rows": 3, "tms_rows_with_file_number": 1,
                                   "tms_rows_without_file_number": 2, "customers_without_file_number": 1}
+
+
+def test_packing_crew_and_truck_load_are_separate():
+    # Packing crew on the 5th, truck loads on the 7th: MoveWare Pack = 5th, Load (Uplift) = 7th.
+    snaps = [(D(2026, 10, 8), [trip("111200", "SAN PEDRO, NL", "SAN PEDRO, NL", D(2026, 10, 5), None, tipo="EMPAQUE"),
+                               trip("111200", "SAN PEDRO, NL", "PUERTO DE VERACRUZ", D(2026, 10, 7), D(2026, 10, 9))])]
+    j = sm.collect(snaps, TODAY)["111200"]
+    assert j["packing"]["date"] == "2026-10-05" and j["load"]["date"] == "2026-10-07"
+    assert j["pack"]["date"] == "2026-10-05"            # earliest of the two, as before
+    # Truck only: a load date, no packing date.
+    snaps = [(D(2026, 10, 8), [trip("111201", "SAN PEDRO, NL", "PUERTO DE VERACRUZ", D(2026, 10, 7), D(2026, 10, 9))])]
+    j = sm.collect(snaps, TODAY)["111201"]
+    assert j["load"]["date"] == "2026-10-07" and j["packing"] is None

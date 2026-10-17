@@ -40,13 +40,20 @@ import os
 
 import job_rules
 
-# Bill, 16 Oct 2026: the LOAD date is the one that counts. SIT's "pack" milestone
-# is the first day a truck loads at the customer's end, so it is written to the
-# Load action (key action Uplift, code "Uplift", shown as "Load"), not to Pack.
+# Bill, 16 Oct 2026: the LOAD date is the one that counts. In MoveWare, Uplift
+# (shown as "Load") and Delivery are the parent key actions; Pack, Pack1, Pack2
+# are children dated −1…−3 days from Uplift (Jose Rivas, training 16 Oct 2026).
+# The Plan de Viajes lists both: truck rows (DIA CARGA = load day) and separate
+# packing-crew rows (EMPAQUE / EMBALAJE / HUACAL). So:
+#   load     ← the plan's first truck load at the customer  → Uplift
+#   pack     ← the plan's packing-crew row, only when there is one → Pack
+#   delivery ← the plan's last unload at the customer        → Delivery
 # Dave Pile: updating an Uplift activity also moves the job-header load date.
-CODES = {"pack": "Uplift", "delivery": "Delivery"}
-LABELS = {"pack": "Load", "delivery": "Delivery"}
-MATCH = {"pack": "load", "delivery": "delivery"}       # job_rules key action per milestone
+CODES = {"load": "Uplift", "pack": "Pack", "delivery": "Delivery"}
+LABELS = {"load": "Load", "pack": "Pack", "delivery": "Delivery"}
+MATCH = {"load": "load", "pack": "pack", "delivery": "delivery"}   # job_rules key action
+# which sit_milestones date feeds each MoveWare action
+SOURCE = {"load": "load", "pack": "packing", "delivery": "delivery"}
 TYPO_BEFORE = dt.date(2025, 1, 1)
 # Dave Pile (MOS-51412, 15 Oct 2026): writes are signed by a dedicated MoveWare
 # user whose code is three characters. Create that user in the MoveWare app, then
@@ -73,7 +80,11 @@ def plan_for_job(job: str, sit_job: dict, activities: list, today: dt.date | Non
     for key, code in CODES.items():
         if not job_rules.expected(key, job_type):
             continue                                   # e.g. Delivery on an EXA: not ours
-        m = (sit_job or {}).get(key) or {}
+        sj = sit_job or {}
+        src = SOURCE[key]
+        if key == "load" and src not in sj:
+            src = "pack"                                # older plan data without the split
+        m = sj.get(src) or {}
         mine = [a for a in activities or [] if job_rules.is_milestone(a, MATCH[key])]
         plan_day = _d(m.get("date"))
         done = m.get("status") == "done" and plan_day and plan_day <= today

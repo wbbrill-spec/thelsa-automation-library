@@ -464,6 +464,11 @@ def _keeper_tick():
         sm.ensure_built()
     except Exception:
         pass
+    try:  # diary write-back from SIT's Plan de Viajes (off unless MW_DIARY_WRITE=1)
+        import milestone_apply
+        milestone_apply.run_once()
+    except Exception:
+        pass
 
 
 def _keeper_loop(every_s: float):

@@ -89,11 +89,22 @@ def alerts_state() -> dict:
         return {"enabled": False, "send": False, "auto": False, "hour": "8", "cc": ""}
 
 
+def writeback_state() -> dict:
+    try:
+        import milestone_apply as ma
+        log = ma.recent_log(200)
+        return {"on": ma.write_enabled(), "blocked": ma.blocked_reason(), "user": ma.auto_user(),
+                "written": sum(1 for r in log if str(r.get("result", "")).startswith(("verified", "written"))),
+                "failed": sum(1 for r in log if str(r.get("result", "")).startswith("failed"))}
+    except Exception:
+        return {"on": False, "blocked": "unavailable", "user": "", "written": 0, "failed": 0}
+
+
 def summary() -> dict:
     """Everything for the admin panel; never raises."""
     out = {"live": False, "complete": False, "gaps": [], "gap_total": 0, "unassigned": 0,
            "confirms": {"rows": [], "unread": 0}, "types": {"recent": [], "new": []},
-           "alerts": alerts_state()}
+           "alerts": alerts_state(), "writeback": writeback_state()}
     try:
         import mw_live
         if not mw_live.have_creds():

@@ -36,7 +36,8 @@ SAFETY — nothing goes out by accident
   once per coordinator per day (state file next to the audit cache);
   DATE_ALERTS_MAX caps emails per run (default 30).
   DATE_ALERTS_AUTO=1 lets the FAIM keeper run it by itself once a day, from
-  DATE_ALERTS_HOUR (Mexico City time, default 8).
+  DATE_ALERTS_HOUR (Mexico City time, default 8), only within DATE_ALERTS_WINDOW_H
+  hours of it (default 4), so a restart never mails the team at night.
 """
 from __future__ import annotations
 
@@ -216,4 +217,11 @@ def due_now(now=None) -> bool:
         hour = int(os.environ.get("DATE_ALERTS_HOUR", "8"))
     except ValueError:
         hour = 8
-    return now.weekday() < 5 and now.hour >= hour and _load_state().get("(summary)") != now.date().isoformat()
+    try:
+        window = max(1, int(os.environ.get("DATE_ALERTS_WINDOW_H", "4")))
+    except ValueError:
+        window = 4
+    # Only inside the morning window: a restart or a late full read of the file
+    # book must not email the whole team at night.
+    return (now.weekday() < 5 and hour <= now.hour < hour + window
+            and _load_state().get("(summary)") != now.date().isoformat())

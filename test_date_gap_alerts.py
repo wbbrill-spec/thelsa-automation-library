@@ -119,3 +119,14 @@ def test_a_date_typed_in_the_wrong_year_is_listed_to_be_corrected():
     assert [x["file"] for x in g] == ["110801"] and g[0]["wrong_year"] == ["delivery"]
     body = dga.build(g)["coordinators"][0]["body"]
     assert "año equivocado" in body and "2020-09-02" in body
+
+
+def test_auto_send_only_in_the_morning_window(monkeypatch, tmp_path):
+    import date_gap_alerts as dga
+    monkeypatch.setenv("DATE_ALERTS_AUTO", "1")
+    monkeypatch.delenv("DATE_ALERTS_HOUR", raising=False)
+    monkeypatch.delenv("DATE_ALERTS_WINDOW_H", raising=False)
+    monkeypatch.setattr(dga, "_load_state", lambda: {})
+    fri = lambda h: dt.datetime(2026, 10, 16, h, 0, tzinfo=dga.MEXICO)
+    assert dga.due_now(fri(8)) and dga.due_now(fri(11))
+    assert not dga.due_now(fri(12)) and not dga.due_now(fri(20))   # never at night

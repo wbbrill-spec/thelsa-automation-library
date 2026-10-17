@@ -91,8 +91,10 @@ def mailer(monkeypatch):
 def test_nothing_goes_out_unless_on_live_complete_and_once_a_day(monkeypatch, mailer):
     g = gaps([rec("111002", "EXP", pack="2026-09-10")])
     now = dt.datetime(2026, 10, 19, 9, 0, tzinfo=dga.MEXICO)
+    monkeypatch.setenv("DATE_ALERTS_ENABLED", "0")
     assert dga.dispatch(g, live=True, complete=True, now=now)["skipped_reason"].startswith("DATE_ALERTS_ENABLED")
     monkeypatch.setenv("DATE_ALERTS_ENABLED", "1")
+    monkeypatch.setenv("DATE_ALERTS_SEND", "0")
     assert dga.dispatch(g, live=False, complete=True, now=now)["skipped_reason"] == "not live Moveware data"
     assert "still being read" in dga.dispatch(g, live=True, complete=False, now=now)["skipped_reason"]
     st = dga.dispatch(g, live=True, complete=True, now=now)
@@ -105,6 +107,7 @@ def test_nothing_goes_out_unless_on_live_complete_and_once_a_day(monkeypatch, ma
 
 def test_the_keeper_runs_it_once_a_weekday_from_the_set_hour(monkeypatch):
     mon9 = dt.datetime(2026, 10, 19, 9, 0, tzinfo=dga.MEXICO)
+    monkeypatch.setenv("DATE_ALERTS_AUTO", "0")
     assert not dga.due_now(mon9)
     monkeypatch.setenv("DATE_ALERTS_AUTO", "1")
     assert dga.due_now(mon9) and not dga.due_now(mon9.replace(hour=7))
@@ -130,3 +133,10 @@ def test_auto_send_only_in_the_morning_window(monkeypatch, tmp_path):
     fri = lambda h: dt.datetime(2026, 10, 16, h, 0, tzinfo=dga.MEXICO)
     assert dga.due_now(fri(8)) and dga.due_now(fri(11))
     assert not dga.due_now(fri(12)) and not dga.due_now(fri(20))   # never at night
+
+
+def test_on_by_default(monkeypatch):
+    assert dga.enabled() and dga.send_enabled()
+    assert dga.due_now(dt.datetime(2026, 10, 19, 9, 0, tzinfo=dga.MEXICO))
+    monkeypatch.setenv("DATE_ALERTS_ENABLED", "0")
+    assert not dga.enabled() and not dga.send_enabled()

@@ -28,14 +28,15 @@ WHO GETS WHAT
   - Spanish first, English below.
 
 SAFETY — nothing goes out by accident
-  DATE_ALERTS_ENABLED=1 and DRY_RUN!=1   master switch (else: preview only)
-  DATE_ALERTS_SEND=1                     actually SEND; otherwise DRAFTS in the
-                                         "Audit Alert Drafts" folder
+  ON BY DEFAULT since 16 Oct 2026 (Bill: enforce data entry). Off switches:
+  DATE_ALERTS_ENABLED=0 or DRY_RUN=1     master switch off (preview only)
+  DATE_ALERTS_SEND=0                     DRAFTS in the "Audit Alert Drafts"
+                                         folder instead of sending
   live data only, and only once the file book has been read in full (a half-read
   book would accuse people of gaps that are not there)
   once per coordinator per day (state file next to the audit cache);
   DATE_ALERTS_MAX caps emails per run (default 30).
-  DATE_ALERTS_AUTO=1 lets the FAIM keeper run it by itself once a day, from
+  DATE_ALERTS_AUTO (default 1) lets the FAIM keeper run it once a day, from
   DATE_ALERTS_HOUR (Mexico City time, default 8), only within DATE_ALERTS_WINDOW_H
   hours of it (default 4), so a restart never mails the team at night.
 """
@@ -59,11 +60,13 @@ def _list(name, default):
 
 
 def enabled() -> bool:
-    return os.environ.get("DATE_ALERTS_ENABLED") == "1" and os.environ.get("DRY_RUN", "0") != "1"
+    # ON by default (Bill, 16 Oct 2026: "we will enforce the coordinators doing the
+    # right data entry"). DATE_ALERTS_ENABLED=0 is the off switch.
+    return os.environ.get("DATE_ALERTS_ENABLED", "1") == "1" and os.environ.get("DRY_RUN", "0") != "1"
 
 
 def send_enabled() -> bool:
-    return enabled() and os.environ.get("DATE_ALERTS_SEND") == "1"
+    return enabled() and os.environ.get("DATE_ALERTS_SEND", "1") == "1"
 
 
 def _max() -> int:
@@ -210,7 +213,7 @@ def dispatch(date_gaps, live: bool, complete: bool, send=None, now=None) -> dict
 
 def due_now(now=None) -> bool:
     """For the keeper: once a day, from DATE_ALERTS_HOUR (Mexico City time)."""
-    if os.environ.get("DATE_ALERTS_AUTO") != "1":
+    if os.environ.get("DATE_ALERTS_AUTO", "1") != "1":
         return False
     now = now or dt.datetime.now(MEXICO)
     try:

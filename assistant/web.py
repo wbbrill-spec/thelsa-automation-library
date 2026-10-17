@@ -771,7 +771,7 @@ never anyone's emails or to-dos.</p>
   Reminder email:
   {% if h.alerts.enabled and h.alerts.auto %}<span class="ok">{{ 'sending' if h.alerts.send else 'drafts only' }}</span>,
     weekdays from {{ h.alerts.hour }}:00 Mexico City, cc {{ h.alerts.cc }}
-  {% else %}<span class="bad">off</span> (Render: DATE_ALERTS_ENABLED=1, DATE_ALERTS_AUTO=1, DATE_ALERTS_SEND=1){% endif %}
+  {% else %}<span class="bad">off</span> (on Render remove DATE_ALERTS_ENABLED=0 / DATE_ALERTS_AUTO=0 / DRY_RUN=1){% endif %}
   · File book: {% if not h.live %}<span class="bad">not loaded</span>{% elif h.complete %}<span class="ok">fully read</span>{% else %}still being read{% endif %}
 </div></div>
 {% if h.live %}

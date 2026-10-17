@@ -82,7 +82,7 @@ def alerts_state() -> dict:
     try:
         import date_gap_alerts as dga
         return {"enabled": dga.enabled(), "send": dga.send_enabled(),
-                "auto": os.environ.get("DATE_ALERTS_AUTO") == "1",
+                "auto": os.environ.get("DATE_ALERTS_AUTO", "1") == "1",
                 "hour": os.environ.get("DATE_ALERTS_HOUR", "8"),
                 "cc": ", ".join(dga._list("DATE_ALERT_CC", dga.DEFAULT_CC))}
     except Exception:

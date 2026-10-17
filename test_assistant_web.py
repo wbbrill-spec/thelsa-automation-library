@@ -603,7 +603,7 @@ def test_admin_shows_moveware_data_entry_panel(client, monkeypatch):
     assert r.status_code == 200 and "Moveware data entry" in html
     assert "Sara Reyes" in html and "Elizabeth Hernandez" in html
     assert "New job type(s) not seen on older files: TIA" in html
-    assert "DATE_ALERTS_ENABLED=1" in html              # tells Bill the email is off
+    assert "DATE_ALERTS_ENABLED=0" in html              # tells Bill how to undo an off switch
 
 
 def test_admin_panel_survives_no_moveware(client):

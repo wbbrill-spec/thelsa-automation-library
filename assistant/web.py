@@ -765,6 +765,28 @@ never anyone's emails or to-dos.</p>
   <form method="post" action="/assistant/admin/run"><input type="hidden" name="csrf" value="{{ csrf }}">
     <button class="btn" type="submit">Run all now</button></form></div>
 
+<h2>Moveware data entry</h2>
+{% set h = health %}
+<div class="banner"><div style="flex:1">
+  Reminder email:
+  {% if h.alerts.enabled and h.alerts.auto %}<span class="ok">{{ 'sending' if h.alerts.send else 'drafts only' }}</span>,
+    weekdays from {{ h.alerts.hour }}:00 Mexico City, cc {{ h.alerts.cc }}
+  {% else %}<span class="bad">off</span> (Render: DATE_ALERTS_ENABLED=1, DATE_ALERTS_AUTO=1, DATE_ALERTS_SEND=1){% endif %}
+  · File book: {% if not h.live %}<span class="bad">not loaded</span>{% elif h.complete %}<span class="ok">fully read</span>{% else %}still being read{% endif %}
+</div></div>
+{% if h.live %}
+<table><tr><th>Coordinator</th><th>Files missing key dates</th><th>Won, no date at all</th><th>Wrong year</th><th>Planned date passed, still open</th></tr>
+{% set conf = dict(h.confirms.rows) %}
+{% for r in h.gaps %}<tr><td>{{ r.coord }}</td><td><b>{{ r.files }}</b></td><td>{{ r.no_dates }}</td><td>{{ r.wrong_year }}</td><td>{{ conf.get(r.coord, 0) }}</td></tr>{% endfor %}
+{% for name, n in h.confirms.rows if name not in h.gaps|map(attribute='coord')|list %}<tr><td>{{ name }}</td><td>0</td><td>0</td><td>0</td><td>{{ n }}</td></tr>{% endfor %}
+{% if not h.gaps and not h.confirms.rows %}<tr><td colspan="5" class="ok">Nothing missing.</td></tr>{% endif %}
+</table>
+<p class="sub">{{ h.gap_total }} file(s) with date gaps{% if h.unassigned %}, <b class="bad">{{ h.unassigned }} with no coordinator</b> (shown to the key users to assign){% endif %}.
+{% if h.confirms.unread %} {{ h.confirms.unread }} diary(ies) not read yet.{% endif %}
+Job types on files opened in the last 30 days: {% for t, n in h.types.recent %}{{ t }} {{ n }}{% if not loop.last %}, {% endif %}{% endfor %}.
+{% if h.types.new %}<br><b class="bad">New job type(s) not seen on older files: {{ h.types.new|join(', ') }}</b> — check the Moveware setup.{% endif %}</p>
+{% endif %}
+
 <h2>Add a user</h2>
 <form method="post" action="/assistant/admin/add" class="bar"><input type="hidden" name="csrf" value="{{ csrf }}">
   <input type="email" name="email" placeholder="name@thelsa.com" required>
@@ -839,7 +861,17 @@ def admin(u):
                    db_kind="Postgres" if db._db_url().startswith("postgresql") else "SQLite (temporary!)",
                    draft_on=drafting.enabled(), can_write=graph.can_write_drafts(),
                    wa_ai=wa_triage.enabled(),
-                   sched=scan._sched is not None)
+                   sched=scan._sched is not None, health=_health())
+
+
+def _health():
+    try:
+        from . import mw_health
+        return mw_health.summary()
+    except Exception:
+        return {"live": False, "complete": False, "gaps": [], "gap_total": 0, "unassigned": 0,
+                "confirms": {"rows": [], "unread": 0}, "types": {"recent": [], "new": []},
+                "alerts": {"enabled": False, "send": False, "auto": False, "hour": "8", "cc": ""}}
 
 
 @bp.route("/assistant/admin/add", methods=["POST"])

@@ -585,3 +585,44 @@ def test_diag_reports_a_dead_moveware_connection(client, monkeypatch):
         audited_in_window=lambda: (_ for _ in ()).throw(RuntimeError("auditor offline"))))
     mw = client.get("/assistant/diag?token=t").get_json()["moveware"]
     assert mw["files_in_window"] == 0 and "auditor offline" in mw["error"]
+
+
+def test_admin_shows_moveware_data_entry_panel(client, monkeypatch):
+    from assistant import mw_health
+    monkeypatch.setattr(mw_health, "summary", lambda: {
+        "live": True, "complete": True, "gap_total": 4, "unassigned": 1,
+        "gaps": [{"coord": "Sara Reyes", "files": 3, "no_dates": 1, "wrong_year": 0},
+                 {"coord": "Unassigned", "files": 1, "no_dates": 0, "wrong_year": 0}],
+        "confirms": {"rows": [("Sara Reyes", 2), ("Elizabeth Hernandez", 5)], "unread": 3},
+        "types": {"recent": [("XP", 10), ("TIA", 1)], "new": ["TIA"]},
+        "alerts": {"enabled": False, "send": False, "auto": False, "hour": "8", "cc": ""}})
+    consent("boss@thelsa.com")
+    login(client, "boss@thelsa.com")
+    r = client.get("/assistant/admin")
+    html = r.data.decode()
+    assert r.status_code == 200 and "Moveware data entry" in html
+    assert "Sara Reyes" in html and "Elizabeth Hernandez" in html
+    assert "New job type(s) not seen on older files: TIA" in html
+    assert "DATE_ALERTS_ENABLED=1" in html              # tells Bill the email is off
+
+
+def test_admin_panel_survives_no_moveware(client):
+    consent("boss@thelsa.com")
+    login(client, "boss@thelsa.com")
+    r = client.get("/assistant/admin")
+    assert r.status_code == 200 and b"not loaded" in r.data
+
+
+def test_health_job_types_and_gap_rollup():
+    from assistant import mw_health
+    today = dt.date(2026, 10, 20)
+    files = [{"job_type": "XP", "created": "2026-10-10"}, {"job_type": "TIA", "created": "2026-10-12"},
+             {"job_type": "XP", "created": "2025-03-01"}, {"job_type": "EXA2", "created": "2025-03-01"}]
+    t = mw_health.job_types(files, today)
+    assert dict(t["recent"]) == {"XP": 1, "TIA": 1} and t["new"] == ["TIA"]
+    rows = mw_health.gaps_by_coordinator([
+        {"coord": "Sara", "coord_email": "s@x", "no_dates": True},
+        {"coord": "Sara", "coord_email": "s@x", "wrong_year": ["pack"]},
+        {"coord": "Unassigned", "coord_email": ""}])
+    assert rows[0] == {"coord": "Sara", "files": 2, "no_dates": 1, "wrong_year": 1}
+    assert rows[1]["coord"] == "Unassigned"

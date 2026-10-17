@@ -44,6 +44,11 @@ def score(item, now=None) -> int:
         s = 55 + min(int(m.get("days") or 0) * 4, 35)
     elif kind == "request_docs":
         s = 35 + max(0, 10 - int(m.get("days_left") or 0)) * 5
+    elif kind == "enter_dates":
+        # Data entry is not optional (Bill, 16 Oct 2026): always Urgent, and
+        # opening it does not push it down — only entering the date clears it.
+        s = 85 if (m.get("no_dates") or m.get("wrong_year")) else 80
+        return max(0, min(100, int(s)))
     elif kind == "tim_docs":
         s = 50 + min(int(m.get("days") or 0) * 4, 40)
     elif kind == "tim_stalled":

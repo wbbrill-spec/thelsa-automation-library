@@ -16,6 +16,12 @@ actions:
   request_docs    Pack date is within REQUEST_DOCS_DAYS and the file has no
                   declared value / insurance on it — request the valued
                   inventory / insurance form from the customer.
+  enter_dates     A key date (Load/Pack, Delivery) is missing or typed in the
+                  wrong year in Moveware. Same list, same rules as the daily
+                  missing-dates email (faim_web date_gaps → date_gap_alerts), so
+                  the dashboard and the email can never disagree. Always Urgent,
+                  even once seen: it stays at the top until the date is entered
+                  (Bill, 16 Oct 2026: data entry is not optional).
 
 Rules are deliberately simple and each is one function, so they can be tuned.
 """
@@ -134,6 +140,41 @@ def tasks_for_underbilling(rows: list) -> list:
     return out
 
 
+def tasks_for_date_gaps(gaps: list, emails) -> list:
+    """faim_web date_gaps rows whose coordinator is one of `emails` → items.
+
+    A gap row without a coordinator email cannot be placed on anyone's
+    dashboard; the daily email routes those to the fallback inbox instead."""
+    out = []
+    for g in gaps or []:
+        job = str(g.get("file") or "")
+        if not job or not (g.get("coord_email") or "").strip() or not _matches(g.get("coord_email"), emails):
+            continue
+        meta = {"job": job, "type": g.get("type") or "", "missing": list(g.get("missing") or []),
+                "wrong_year": list(g.get("wrong_year") or []), "dates": dict(g.get("dates") or {}),
+                "no_dates": bool(g.get("no_dates")), "booked": g.get("booked") or "",
+                "sit_pack": g.get("sit_pack") or "", "sit_delivery": g.get("sit_delivery") or ""}
+        item = {"kind": "enter_dates", "external_id": f"{job}:dates", "from_name": "Moveware",
+                "from_addr": None, "url": _url(job), "received_at": None, "meta": meta}
+        from . import i18n
+        item["subject"], item["snippet"] = i18n.item_text(item, "en")
+        out.append(item)
+    return out
+
+
+def _date_gaps():
+    """(gaps, complete) from the same source as the daily missing-dates email.
+    Returns (None, False) when the shared file book is not readable."""
+    try:
+        import faim_web
+        gaps, live, complete = faim_web._date_gaps_now()
+    except Exception:
+        return None, False
+    if not live:
+        return None, False
+    return gaps, bool(complete)
+
+
 def _matches(addr, emails):
     return (addr or "").strip().lower() in emails
 
@@ -193,4 +234,29 @@ def tasks_for_user(user) -> list:
         items += tasks_for_underbilling([r for r in rows if _matches(r.get("coordinator"), emails)])
     except Exception:
         pass
+    items += _gap_items(user, emails)
     return items
+
+
+def _gap_items(user, emails) -> list:
+    """Missing-date items. Only a FULL read of the file book may change them:
+    a half-read book would accuse people of gaps that are not there, so while
+    it is still being read the previous gap items are carried over unchanged."""
+    gaps, complete = _date_gaps()
+    if gaps is not None and complete:
+        return tasks_for_date_gaps(gaps, emails)
+    try:
+        from . import db
+        import json
+        prev = []
+        for r in db.list_items(user["id"], "moveware"):
+            if r["kind"] != "enter_dates":
+                continue
+            d = dict(r)
+            m = d.get("meta")
+            d["meta"] = m if isinstance(m, dict) else json.loads(m or "{}")
+            prev.append({k: d.get(k) for k in ("kind", "external_id", "from_name", "from_addr",
+                                               "subject", "snippet", "url", "received_at", "meta")})
+        return prev
+    except Exception:
+        return []

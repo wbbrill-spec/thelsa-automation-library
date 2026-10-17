@@ -166,6 +166,7 @@ KIND = {
     "invoice_charge": ("Invoice charges", "Facturar cargos"),
     "upload_docs": ("Send documents", "Enviar documentos"),
     "request_docs": ("Request documents", "Solicitar documentos"),
+    "enter_dates": ("Enter Moveware dates", "Capturar fechas en Moveware"),
     "tim_docs": ("Documents pending", "Documentos pendientes"),
     "tim_stalled": ("Stalled", "Detenido"),
     "tim_step": ("Next step", "Siguiente paso"),
@@ -228,6 +229,43 @@ def _money(v) -> str:
     return "$" + f"{float(v or 0):,.0f}"
 
 
+GAP_WORD = {"pack": ("Load / pack date", "fecha de carga / empaque"),
+            "delivery": ("Delivery date", "fecha de entrega")}
+
+
+def _gap_text(m, _name, es):
+    """Subject + snippet for a missing / wrong Moveware key date."""
+    job, jt = m["job"], m.get("type") or ""
+    tag = f" ({jt})" if jt else ""
+    w = (lambda k: GAP_WORD[k][1]) if es else (lambda k: GAP_WORD[k][0])
+    if m.get("wrong_year"):
+        bits = ", ".join(f"{w(k)} {(m.get('dates') or {}).get(k, '')}".strip() for k in m["wrong_year"])
+        if es:
+            return (f"Corregir fecha en Moveware — {job}{tag}",
+                    f"Fecha con año equivocado: {bits}. Corrígela hoy; el expediente no sale en los reportes.")
+        return (f"Fix Moveware date — {job}{tag}",
+                f"Date typed in the wrong year: {bits}. Correct it today; the file drops out of every report.")
+    if m.get("no_dates"):
+        won = m.get("booked") or ""
+        if es:
+            return (f"Capturar fechas en Moveware — {job}{tag}",
+                    f"Ganado {won} y SIN NINGUNA fecha clave. Captura la fecha planeada de carga"
+                    + (" y de entrega" if "delivery" in (m.get("missing") or []) else "") + " hoy.")
+        return (f"Enter Moveware dates — {job}{tag}",
+                f"Won {won} with NO key date at all. Enter the planned load"
+                + (" and delivery" if "delivery" in (m.get("missing") or []) else "") + " date today.")
+    parts = []
+    for k in m.get("missing") or []:
+        hint = m.get(f"sit_{k}") or ""
+        parts.append(w(k) + ((f" (Plan de Viajes: {hint})" if es else f" (SIT plan: {hint})") if hint else ""))
+    miss = ", ".join(parts)
+    if es:
+        return (f"Capturar fechas en Moveware — {job}{tag}",
+                f"Falta: {miss}. Si aún no ocurre, captura la fecha planeada y corrígela cuando suceda.")
+    return (f"Enter Moveware dates — {job}{tag}",
+            f"Missing: {miss}. If it hasn't happened yet, enter the planned date and correct it when it does.")
+
+
 def item_text(item, lang):
     """(subject, snippet) in the user's language for generated items."""
     es = norm(lang) == "es"
@@ -268,6 +306,8 @@ def item_text(item, lang):
             else:
                 subj = f"Request valued inventory / insurance form — {m['job']} {client}"
                 snip = f"Pack in {m['days_left']} day(s) and no declared value or insurance on file."
+        elif kind == "enter_dates" and "job" in m:
+            subj, snip = _gap_text(m, item.get("from_name") or "", es)
         elif kind == "invoice_charge" and "job" in m and "approved" in m:
             a, i, g = _money(m["approved"]), _money(m.get("invoiced")), _money(m.get("value"))
             if es:

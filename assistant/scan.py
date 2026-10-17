@@ -85,6 +85,11 @@ def scan_user_async(user_id: str):
 
 def run_all(trigger: str = "schedule") -> dict:
     run_id = db.start_run(trigger)
+    try:  # read due files' Moveware diaries first, so "did it happen?" is current
+        from . import mw_confirm
+        mw_confirm.prewarm()
+    except Exception as exc:
+        log.warning("confirm prewarm failed: %s", exc)
     ids = {u["id"] for u in db.users_to_scan("microsoft")}
     ids |= {u["id"] for u in db.list_users() if u["active"] and u["consent_at"]}
     scanned = errors = 0

@@ -167,6 +167,8 @@ KIND = {
     "upload_docs": ("Send documents", "Enviar documentos"),
     "request_docs": ("Request documents", "Solicitar documentos"),
     "enter_dates": ("Enter Moveware dates", "Capturar fechas en Moveware"),
+    "confirm_done": ("Confirm in Moveware", "Confirmar en Moveware"),
+    "assign_coord": ("Assign coordinator", "Asignar coordinador"),
     "tim_docs": ("Documents pending", "Documentos pendientes"),
     "tim_stalled": ("Stalled", "Detenido"),
     "tim_step": ("Next step", "Siguiente paso"),
@@ -306,6 +308,29 @@ def item_text(item, lang):
             else:
                 subj = f"Request valued inventory / insurance form — {m['job']} {client}"
                 snip = f"Pack in {m['days_left']} day(s) and no declared value or insurance on file."
+        elif kind == "confirm_done" and "job" in m and "date" in m:
+            jt = f" ({m['type']})" if m.get("type") else ""
+            load = m.get("milestone") == "load"
+            if es:
+                what = "Carga" if load else "Entrega"
+                subj = f"¿Se realizó la {what.lower()}? — {m['job']}{jt}"
+                snip = (f"{what} planeada el {m['date']} (hace {m.get('days', 0)} día(s)) y la acción sigue abierta "
+                        "en Moveware. Si ya ocurrió, márcala como completada; si cambió, corrige la fecha.")
+            else:
+                what = "Load" if load else "Delivery"
+                subj = f"Did the {what.lower()} happen? — {m['job']}{jt}"
+                snip = (f"{what} planned for {m['date']} ({m.get('days', 0)} day(s) ago) and still open in "
+                        "Moveware. If it happened, mark it completed; if it moved, correct the date.")
+        elif kind == "assign_coord" and "job" in m:
+            jt = f" ({m['type']})" if m.get("type") else ""
+            if es:
+                subj = f"Asignar coordinador — {m['job']}{jt}"
+                snip = ("Expediente ganado sin coordinador en Moveware y con fechas clave faltantes: "
+                        "nadie recibe el aviso. Asigna el Move Manager / coordinador.")
+            else:
+                subj = f"Assign a coordinator — {m['job']}{jt}"
+                snip = ("Booked file with no coordinator in Moveware and key dates missing: nobody is being "
+                        "reminded. Assign the Move Manager / coordinator.")
         elif kind == "enter_dates" and "job" in m:
             subj, snip = _gap_text(m, item.get("from_name") or "", es)
         elif kind == "invoice_charge" and "job" in m and "approved" in m:

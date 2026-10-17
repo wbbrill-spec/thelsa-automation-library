@@ -16,6 +16,12 @@ actions:
   request_docs    Pack date is within REQUEST_DOCS_DAYS and the file has no
                   declared value / insurance on it — request the valued
                   inventory / insurance form from the customer.
+  confirm_done    A planned Load / Delivery date has passed and the action is
+                  still open in Moveware: mark it completed or fix the date
+                  (assistant/mw_confirm.py).
+  assign_coord    A booked file with a missing key date has NO coordinator, so
+                  nobody's dashboard or email can carry it. Shown to the key
+                  users (DATE_ALERT_CC: Lupita, Sara) to assign one.
   enter_dates     A key date (Load/Pack, Delivery) is missing or typed in the
                   wrong year in Moveware. Same list, same rules as the daily
                   missing-dates email (faim_web date_gaps → date_gap_alerts), so
@@ -162,6 +168,29 @@ def tasks_for_date_gaps(gaps: list, emails) -> list:
     return out
 
 
+def key_users() -> set:
+    """Moveware key users (Lupita, Sara) — same list the missing-dates email cc's."""
+    import date_gap_alerts as dga
+    return {e.lower() for e in dga._list("DATE_ALERT_CC", dga.DEFAULT_CC)}
+
+
+def tasks_for_unassigned(gaps: list) -> list:
+    """Gap rows with no coordinator email → 'assign a coordinator' items."""
+    out = []
+    for g in gaps or []:
+        job = str(g.get("file") or "")
+        if not job or (g.get("coord_email") or "").strip():
+            continue
+        meta = {"job": job, "type": g.get("type") or "", "missing": list(g.get("missing") or []),
+                "no_dates": bool(g.get("no_dates")), "coord": g.get("coord") or ""}
+        item = {"kind": "assign_coord", "external_id": f"{job}:assign", "from_name": "Moveware",
+                "from_addr": None, "url": _url(job), "received_at": None, "meta": meta}
+        from . import i18n
+        item["subject"], item["snippet"] = i18n.item_text(item, "en")
+        out.append(item)
+    return out
+
+
 def _date_gaps():
     """(gaps, complete) from the same source as the daily missing-dates email.
     Returns (None, False) when the shared file book is not readable."""
@@ -235,6 +264,11 @@ def tasks_for_user(user) -> list:
     except Exception:
         pass
     items += _gap_items(user, emails)
+    try:
+        from . import mw_confirm
+        items += mw_confirm.items(mine)
+    except Exception:
+        pass
     return items
 
 
@@ -244,13 +278,19 @@ def _gap_items(user, emails) -> list:
     it is still being read the previous gap items are carried over unchanged."""
     gaps, complete = _date_gaps()
     if gaps is not None and complete:
-        return tasks_for_date_gaps(gaps, emails)
+        out = tasks_for_date_gaps(gaps, emails)
+        try:
+            if (user.get("email") or "").strip().lower() in key_users():
+                out += tasks_for_unassigned(gaps)
+        except Exception:
+            pass
+        return out
     try:
         from . import db
         import json
         prev = []
         for r in db.list_items(user["id"], "moveware"):
-            if r["kind"] != "enter_dates":
+            if r["kind"] not in ("enter_dates", "assign_coord"):
                 continue
             d = dict(r)
             m = d.get("meta")

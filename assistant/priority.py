@@ -49,6 +49,12 @@ def score(item, now=None) -> int:
         # opening it does not push it down — only entering the date clears it.
         s = 85 if (m.get("no_dates") or m.get("wrong_year")) else 80
         return max(0, min(100, int(s)))
+    elif kind == "assign_coord":
+        return 82                     # nobody else will ever be told about it
+    elif kind == "confirm_done":
+        # Planned date passed, action still open: Today, Urgent after 3 days.
+        # Opening it does not push it down; only fixing Moveware clears it.
+        return max(0, min(100, 65 + min(int(m.get("days") or 0) * 4, 30)))
     elif kind == "tim_docs":
         s = 50 + min(int(m.get("days") or 0) * 4, 40)
     elif kind == "tim_stalled":

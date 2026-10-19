@@ -3,8 +3,9 @@
 Bilingual: every visible string is rendered in both languages with
 {{ t('English', 'Español') }}; the EN/ES toggle just flips a class on <body>.
 Money: {{ M(pair) }} renders a span carrying [mxn, usd]; the currency control
-(MXN · USD plan · USD spot) formats it in the browser. Period: both YTD and
-last-12-months blocks are rendered; the period control shows one.
+(MXN · USD plan · USD spot) formats it in the browser. Period: today, week,
+month, quarter and year to date and the last 12 months are all rendered; the
+period control shows one.
 """
 
 EXEC_TEMPLATE = r"""<!DOCTYPE html>
@@ -21,7 +22,9 @@ EXEC_TEMPLATE = r"""<!DOCTYPE html>
   body{margin:0;font-family:-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
        background:var(--bg);color:var(--ink);font-size:14px;line-height:1.45}
   body:not(.es) .es, body.es .en{display:none}
-  .per{display:none} body.p-ytd .per-ytd, body.p-l12m .per-l12m{display:block}
+  .per{display:none} body.p-day .per-day, body.p-wtd .per-wtd, body.p-mtd .per-mtd, body.p-qtd .per-qtd,
+  body.p-ytd .per-ytd, body.p-l12m .per-l12m{display:block}
+  #perSeg{flex-wrap:wrap}
   header{background:var(--card);border-bottom:1px solid var(--line);padding:18px 30px;
          display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px}
   header h1{font-size:21px;margin:0;font-weight:800;letter-spacing:-.2px}
@@ -75,7 +78,7 @@ EXEC_TEMPLATE = r"""<!DOCTYPE html>
       · MoveWare + {{ t('Finance', 'Finanzas') }} · {{ ex.as_of }}</div>
   </div>
   <div class="controls">
-    <div class="seg" id="perSeg"><button data-p="ytd">{{ t('YTD', 'Año a la fecha') }}</button><button data-p="l12m">{{ t('Last 12 months', 'Últimos 12 meses') }}</button></div>
+    <div class="seg" id="perSeg"><button data-p="day">{{ t('Today', 'Hoy') }}</button><button data-p="wtd">{{ t('Week', 'Semana') }}</button><button data-p="mtd">{{ t('Month', 'Mes') }}</button><button data-p="qtd">{{ t('Quarter', 'Trimestre') }}</button><button data-p="ytd">{{ t('YTD', 'Año') }}</button><button data-p="l12m">{{ t('12 months', '12 meses') }}</button></div>
     <div class="seg" id="fxSeg"><button data-b="mxn">{{ t('Pesos', 'Pesos') }}</button><button data-b="plan">{{ t('USD · plan', 'USD · plan') }}</button><button data-b="spot">{{ t('USD · spot', 'USD · spot') }}</button></div>
     <div class="seg" id="langSeg"><button data-l="en">EN</button><button data-l="es">ES</button></div>
   </div>
@@ -95,7 +98,7 @@ EXEC_TEMPLATE = r"""<!DOCTYPE html>
   </nav>
 
   <section class="tab" data-tab="overview">
-  {% for key in ['ytd', 'l12m'] %}{% set P = ex.periods[key] %}
+  {% for key in ['day', 'wtd', 'mtd', 'qtd', 'ytd', 'l12m'] %}{% set P = ex.periods[key] %}{% set fin_gap = ex.fin_ledger_to and ex.fin_ledger_to < P['to'] %}{% set fin_none = ex.fin_ledger_to and ex.fin_ledger_to < P['from'] %}
   <div class="per per-{{ key }}">
     <p class="meta" style="margin:8px 0 0">{{ t('Period', 'Periodo') }}: <b>{{ P['from'] }}</b> → <b>{{ P['to'] }}</b></p>
 
@@ -105,11 +108,12 @@ EXEC_TEMPLATE = r"""<!DOCTYPE html>
         <div class="value">{{ M(P.inv_num) }}</div>
         <div class="sub">{{ N(P.inv_files) }} {{ t('files · numbered invoices dated in the period, net of IVA, cancelled excluded', 'expedientes · facturas con número y fecha en el periodo, sin IVA, sin canceladas') }}</div></div>
       <div class="tile"><div class="label">{{ t('Invoiced — Finance', 'Facturado — Finanzas') }}</div>
-        <div class="value">{{ M(P.fin_sales_all) }}</div>
-        <div class="sub">{{ t("Finance's ledger, net of credit notes · files first invoiced in the period", 'Libro de Finanzas, neto de notas de crédito · expedientes con primera factura en el periodo') }}{% if P.fin_last_invoice %} · {{ t('ledger through', 'datos hasta') }} {{ P.fin_last_invoice }}{% endif %}</div></div>
+        <div class="value">{% if fin_none %}—{% else %}{{ M(P.fin_sales_all) }}{% endif %}</div>
+        <div class="sub">{% if fin_none %}{{ t("Finance's ledger runs through", 'El libro de Finanzas llega hasta') }} {{ ex.fin_ledger_to }} {{ t('— this period is not in it yet. MoveWare invoicing (left) is live.', '— este periodo aún no está. La facturación de MoveWare (izquierda) está al día.') }}{% else %}{{ t("Finance's ledger, net of credit notes · files first invoiced in the period", 'Libro de Finanzas, neto de notas de crédito · expedientes con primera factura en el periodo') }}{% if fin_gap %} · {{ t('ledger through', 'datos hasta') }} {{ ex.fin_ledger_to }}{% elif P.fin_last_invoice %} · {{ t('ledger through', 'datos hasta') }} {{ P.fin_last_invoice }}{% endif %}{% endif %}</div></div>
       <div class="tile"><div class="label">{{ t('Gross margin — Finance actuals', 'Margen bruto — real de Finanzas') }}</div>
-        <div class="value {{ 'good' if (P.fin_margin_pct or 0) >= 0 else 'bad' }}">{{ M(P.fin_margin) }}</div>
-        <div class="sub">{% if P.fin_margin_pct is not none %}<b>{{ P.fin_margin_pct }}%</b> {{ t('on', 'sobre') }} {{ N(P.fin_costed_n) }} {{ t('costed files', 'expedientes con costo') }}{% if P.fin_neg_n %} · <span class="bad">{{ P.fin_neg_n }} {{ t('below cost', 'bajo costo') }}</span>{% endif %}{% if P.fin_sheet_n %} · {{ P.fin_sheet_n }} {{ t('costed from the MoveWare costing sheet until Finance posts them', 'con costo de la hoja de costeo de MoveWare hasta que Finanzas los registre') }}{% endif %}{% else %}{{ t('no costed files in this period yet', 'aún no hay expedientes con costo en este periodo') }}{% endif %}</div></div>
+        <div class="value {{ 'good' if (P.fin_margin_pct or 0) >= 0 else 'bad' }}">{% if fin_none %}—{% else %}{{ M(P.fin_margin) }}{% endif %}</div>
+        <div class="sub">{% if fin_none %}{{ t('needs Finance\'s ledger for this period (through', 'requiere el libro de Finanzas de este periodo (hasta') }} {{ ex.fin_ledger_to }})
+        {% elif P.fin_margin_pct is not none %}<b>{{ P.fin_margin_pct }}%</b> {{ t('on', 'sobre') }} {{ N(P.fin_costed_n) }} {{ t('costed files', 'expedientes con costo') }}{% if P.fin_neg_n %} · <span class="bad">{{ P.fin_neg_n }} {{ t('below cost', 'bajo costo') }}</span>{% endif %}{% if P.fin_sheet_n %} · {{ P.fin_sheet_n }} {{ t('costed from the MoveWare costing sheet until Finance posts them', 'con costo de la hoja de costeo de MoveWare hasta que Finanzas los registre') }}{% endif %}{% else %}{{ t('no costed files in this period yet', 'aún no hay expedientes con costo en este periodo') }}{% endif %}</div></div>
       <div class="tile"><div class="label">{{ t('Cost pending', 'Costo pendiente') }}</div>
         <div class="value warn">{{ N(P.fin_pending_n) }}</div>
         <div class="sub">{{ t('invoiced files with no cost posted yet — left out of the margin, never shown as 100%', 'expedientes facturados sin costo registrado — fuera del margen, nunca como 100%') }}</div></div>
@@ -281,7 +285,7 @@ EXEC_TEMPLATE = r"""<!DOCTYPE html>
   var S = {lang: get('audit.lang', dl), basis: get('audit.basis', 'mxn'), per: get('audit.period', 'ytd')};
   if (['en','es'].indexOf(S.lang) < 0) S.lang = 'en';
   if (['mxn','plan','spot'].indexOf(S.basis) < 0) S.basis = 'mxn';
-  if (['ytd','l12m'].indexOf(S.per) < 0) S.per = 'ytd';
+  if (['day','wtd','mtd','qtd','ytd','l12m'].indexOf(S.per) < 0) S.per = 'ytd';
 
   function render(){
     var loc = S.lang === 'es' ? 'es-MX' : 'en-US';

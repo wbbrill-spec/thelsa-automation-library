@@ -44,9 +44,27 @@ def _d(v):
         return None
 
 
+MEXICO = dt.timezone(dt.timedelta(hours=-6))       # Thelsa's working day (CDMX, no DST)
+PERIOD_KEYS = ["day", "wtd", "mtd", "qtd", "ytd", "l12m"]
+
+
+def today_mx() -> dt.date:
+    """Today in Mexico City: the server runs in UTC, so after 6 pm in Mexico
+    dt.date.today() would already be tomorrow."""
+    return dt.datetime.now(MEXICO).date()
+
+
 def periods(today: dt.date | None = None) -> dict:
-    today = today or dt.date.today()
+    """Day, week (Mon–today), month, quarter and year to date, plus the last 12
+    months (Bill, 19 Oct 2026: short periods so problems are fixed as they
+    happen, not found at year end)."""
+    today = today or today_mx()
+    q0 = dt.date(today.year, 3 * ((today.month - 1) // 3) + 1, 1)
     return {
+        "day": (today, today),
+        "wtd": (today - dt.timedelta(days=today.weekday()), today),
+        "mtd": (today.replace(day=1), today),
+        "qtd": (q0, today),
         "ytd": (dt.date(today.year, 1, 1), today),
         "l12m": (today - dt.timedelta(days=364), today),
     }
@@ -156,7 +174,7 @@ def build(files, finance: dict, today: dt.date | None = None, costing: dict | No
     in-window records (NOT the display-currency copies). `costing` = the Move
     Costing Sheet per base file (costing_sheet.costs()): the interim cost for
     files Finance has invoiced but not costed yet."""
-    today = today or dt.date.today()
+    today = today or today_mx()
     P = periods(today)
     spot = fx.month_end_spot(today)
     plan = fx.plan_rate()
@@ -189,7 +207,10 @@ def build(files, finance: dict, today: dt.date | None = None, costing: dict | No
         ccy = CS.check_currency(ccy, c.get("sell"), e.get("inv_mxn"), plan)
         return CS.to_mxn(c["cost_best"], ccy, e, plan)
 
-    out = {"periods": {}, "fx": {"plan": plan, "spot": spot}, "as_of": today.isoformat()}
+    out = {"periods": {}, "fx": {"plan": plan, "spot": spot}, "as_of": today.isoformat(),
+           # Finance's ledger is loaded monthly: say how far it runs, so a short
+           # period past it reads "not in Finance's ledger yet", not as zero sales.
+           "fin_ledger_to": max(filter(None, (e.get("last") for e in ledger.values())), default=None)}
     stale = sum(1 for f in files if "inv_list" not in f)
 
     for key, p in P.items():

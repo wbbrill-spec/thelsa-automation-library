@@ -151,3 +151,19 @@ def test_template_supplier_costs_tab():
     with Flask(__name__).app_context():
         html = render_template_string(EXEC_TEMPLATE, m=m, ex=ex)
     assert "Waiting on mailbox access" in html
+
+
+def test_short_periods():
+    p = exec_dash.periods(dt.date(2026, 10, 19))          # a Monday
+    assert p["day"] == (dt.date(2026, 10, 19),) * 2
+    assert p["wtd"][0] == dt.date(2026, 10, 19)
+    assert p["mtd"][0] == dt.date(2026, 10, 1) and p["qtd"][0] == dt.date(2026, 10, 1)
+    p = exec_dash.periods(dt.date(2026, 8, 13))           # a Thursday in Q3
+    assert p["wtd"][0] == dt.date(2026, 8, 10) and p["qtd"][0] == dt.date(2026, 7, 1)
+    assert list(p) == exec_dash.PERIOD_KEYS
+
+
+def test_ledger_end_is_reported():
+    ledger = {"1": {"first": "2026-09-02", "last": "2026-09-30", "inv_mxn": 10, "inv_orig": {"MXN": 10}}}
+    ex = exec_dash.build([], {"ledger": ledger}, TODAY)
+    assert ex["fin_ledger_to"] == "2026-09-30" and set(ex["periods"]) == set(exec_dash.PERIOD_KEYS)

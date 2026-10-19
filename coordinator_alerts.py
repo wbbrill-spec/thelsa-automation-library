@@ -45,19 +45,32 @@ def _fallback_inbox():
             or "bbrill@thelsa.com").strip()
 
 
+# Coordinators whose address was confirmed from mail they sent themselves
+# (19 Oct 2026). AUDIT_COORDINATOR_EMAILS adds to / overrides these.
+KNOWN_COORDINATORS = {
+    "sara reyes": "sarareyes@thelsa.com",
+    "sara reyes gallegos": "sarareyes@thelsa.com",
+    "stephanie barraza": "stephaniebarraza@thelsa.com",
+    "stephanie barraza villa": "stephaniebarraza@thelsa.com",
+    "elizabeth hernandez": "elizabethhernandez@thelsa.com",
+    "elizabeth hernandez bravo": "elizabethhernandez@thelsa.com",
+}
+
+
 def _coordinator_map():
-    """Parse AUDIT_COORDINATOR_EMAILS (JSON or 'Name:email,...'). Lower-keyed."""
+    """KNOWN_COORDINATORS plus AUDIT_COORDINATOR_EMAILS (JSON or
+    'Name:email,...'). Lower-keyed."""
     raw = (os.environ.get("AUDIT_COORDINATOR_EMAILS") or "").strip()
+    out = dict(KNOWN_COORDINATORS)
     if not raw:
-        return {}
-    out = {}
+        return out
     if raw.startswith("{"):
         try:
             for k, v in json.loads(raw).items():
                 if k and v:
                     out[str(k).strip().lower()] = str(v).strip()
         except (ValueError, TypeError):
-            return {}
+            return dict(KNOWN_COORDINATORS)
     else:
         for pair in raw.split(","):
             if ":" in pair:
@@ -67,18 +80,44 @@ def _coordinator_map():
     return out
 
 
+def _fold(s: str) -> str:
+    import unicodedata
+    s = unicodedata.normalize("NFKD", str(s or "")).encode("ascii", "ignore").decode().lower()
+    return "".join(ch for ch in s if ch.isalnum() or ch == " ")
+
+
+def name_matches(name, email) -> bool:
+    """Does this address belong to this person? True when the mailbox part holds
+    the first name and at least one surname (sarareyes@ ↔ "Sara Reyes",
+    maria.gonzalez@ ↔ "Maria Gonzalez"), accents ignored.
+
+    Why (19 Oct 2026): on live V2 files the coordinator NAME comes from Moveware's
+    coordinator role while the EMAIL can come from any @thelsa.com address on any
+    role. Sara's, Stephanie's and Elizabeth's missing-date lists all went to
+    Edgar Espino. An address that does not match the name is never used."""
+    local = _fold((email or "").split("@")[0]).replace(" ", "")
+    parts = [p for p in _fold(name).split() if len(p) > 1]
+    if not local or not parts:
+        return False
+    return parts[0] in local and (len(parts) == 1 or any(p in local for p in parts[1:]))
+
+
 def resolve_email(coordinator, direct_email=None):
     """Return (to_email, resolved: bool) for a coordinator.
 
-    Prefers the email carried on the file itself (MoveWare quote roles), then the
-    AUDIT_COORDINATOR_EMAILS override map; if neither, routes to the fallback inbox
-    so a person assigns it — we never send to a guessed address.
+    Prefers the AUDIT_COORDINATOR_EMAILS override map, then the email carried on
+    the file itself — only when it belongs to that coordinator (name_matches) or
+    no name is known; else the fallback inbox so a person assigns it. Never a
+    guessed or someone else's address.
     """
     direct = (direct_email or "").strip()
-    if "@" in direct:
-        return direct, True
     name = (coordinator or "").strip()
-    email = _coordinator_map().get(name.lower())
+    mapped = _coordinator_map().get(name.lower()) if name else None
+    if mapped:
+        return mapped, True
+    if "@" in direct and (not name or name_matches(name, direct)):
+        return direct, True
+    email = None
     if email:
         return email, True
     return _fallback_inbox(), False

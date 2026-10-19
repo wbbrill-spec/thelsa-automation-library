@@ -338,6 +338,24 @@ def faim_snapshot(files, today=None, sit=None):
                               "coord_email": r["coord_email"], "missing": [], "wrong_year": odd,
                               "dates": {k: r[f"{k}_day"].isoformat() for k in odd},
                               "sit_pack": "", "sit_delivery": "", "key_date": ""})
+    # The coordinator's address must belong to the coordinator (19 Oct 2026: the
+    # first round of missing-date emails for Sara, Stephanie and Elizabeth went to
+    # Edgar, whose @thelsa.com address sat on another role of those files). Learn
+    # each name's own address from any file where name and email match, and drop
+    # any address that does not match: the daily email then routes that coordinator
+    # to the fallback inbox instead of to someone else.
+    import coordinator_alerts as _ca
+    own = dict(_ca._coordinator_map())
+    for r in audited + no_date + upcoming:
+        nm, em = r.get("coord") or "", r.get("coord_email") or ""
+        if nm and nm != "Unassigned" and em and _ca.name_matches(nm, em):
+            own.setdefault(nm.lower(), em.lower())
+    own = {k: v for k, v in own.items() if _ca.name_matches(k, v)}
+    for g in date_gaps:
+        nm = g.get("coord") or ""
+        if nm.lower() in ("moveware admin", "admin"):
+            g["coord"] = nm = "Unassigned"          # a system user, not a person
+        g["coord_email"] = own.get(nm.lower(), "") if nm != "Unassigned" else ""
     date_gaps.sort(key=lambda g: (g["coord"].lower(), g["file"]))
 
     def _by(rows, field="status"):

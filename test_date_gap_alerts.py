@@ -140,3 +140,39 @@ def test_on_by_default(monkeypatch):
     assert dga.due_now(dt.datetime(2026, 10, 19, 9, 0, tzinfo=dga.MEXICO))
     monkeypatch.setenv("DATE_ALERTS_ENABLED", "0")
     assert not dga.enabled() and not dga.send_enabled()
+
+
+def test_never_mails_someone_elses_address():
+    """19 Oct 2026: Sara's, Stephanie's and Elizabeth's lists went to Edgar, whose
+    @thelsa.com address sat on another role of their files."""
+    import coordinator_alerts as ca
+    assert ca.name_matches("Sara Reyes", "sarareyes@thelsa.com")
+    assert ca.name_matches("Maria Gonzalez", "maria.gonzalez@thelsa.com")
+    assert ca.name_matches("Daniela Martínez", "danielamartinez@thelsa.com")
+    assert not ca.name_matches("Sara Reyes", "edgarespino@thelsa.com")
+    assert not ca.name_matches("Stephanie Barraza", "elizabethhernandez@thelsa.com")
+    files = [rec("111002", "EXP", pack="2026-09-10", coord="Sara Reyes", email="edgarespino@thelsa.com"),
+             rec("111003", "EXP", pack="2026-09-11", coord="Brenda Roldan",
+                 email="edgarespino@thelsa.com"),
+             rec("111004", "EXP", pack="2026-09-12", delivery="2026-09-20", coord="Sara Reyes",
+                 email="sarareyes@thelsa.com")]
+    g = gaps(files)
+    by = {x["file"]: x for x in g}
+    assert by["111002"]["coord_email"] == "sarareyes@thelsa.com"      # learned from her own file
+    assert by["111003"]["coord_email"] == ""                           # nobody's address is hers
+    plan = dga.build(g)
+    to = {a["coordinator"]: (a["to"], a["resolved"]) for a in plan["coordinators"]}
+    assert to["Sara Reyes"] == ("sarareyes@thelsa.com", True)
+    assert to["Brenda Roldan"][1] is False and "edgar" not in to["Brenda Roldan"][0]
+
+
+def test_moveware_admin_is_not_a_coordinator():
+    g = gaps([rec("111009", "EXP", pack="2026-09-10", coord="Moveware Admin", email="")])
+    assert g[0]["coord"] == "Unassigned"
+
+
+def test_known_coordinators_reach_their_own_inbox():
+    g = gaps([rec("111005", "EXP", pack="2026-09-10", coord="Stephanie Barraza", email="edgarespino@thelsa.com")])
+    assert g[0]["coord_email"] == "stephaniebarraza@thelsa.com"
+    a = dga.build(g)["coordinators"][0]
+    assert a["to"] == "stephaniebarraza@thelsa.com" and a["resolved"]

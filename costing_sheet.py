@@ -258,22 +258,28 @@ def load() -> dict:
     with _LOCK:
         if _CACHE.get("at") and time.time() - _CACHE["at"] < 600:
             return _CACHE["doc"]
-    doc = None
+    cands = []
     try:
         from commissions import store
         got = store.get(STORE_KEY)
-        doc = got[0] if isinstance(got, tuple) else got
+        got = got[0] if isinstance(got, tuple) else got
+        if got:
+            cands.append(got)
     except Exception:
-        doc = None
-    if not doc:
-        for p in (os.environ.get("COSTING_SHEET_PATH", "/var/data/costing_sheet.json"), SEED):
-            try:
-                with open(p) as fh:
-                    doc = json.load(fh)
-                    doc.setdefault("source", os.path.basename(p))
-                    break
-            except Exception:
-                continue
+        pass
+    for p in (os.environ.get("COSTING_SHEET_PATH", "/var/data/costing_sheet.json"), SEED):
+        try:
+            with open(p) as fh:
+                d = json.load(fh)
+                d.setdefault("source", os.path.basename(p))
+                cands.append(d)
+        except Exception:
+            continue
+    # The sheet that reaches the latest "Won To" date wins (an older upload must
+    # not hide a newer sheet shipped with the app, or the reverse); ties keep the
+    # order above: database, disk, seed.
+    doc = max(cands, key=lambda d: str((d.get("period") or {}).get("won_to") or ""), default=None) \
+        if cands else None
     doc = doc or {"period": {}, "files": {}}
     with _LOCK:
         _CACHE.update(at=time.time(), doc=doc)

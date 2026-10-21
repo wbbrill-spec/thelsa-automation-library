@@ -134,7 +134,7 @@ def parse(form, current: E.Settings | None = None) -> E.Settings:
         budgets[m] = _keep(float(raw.replace(",", "")), cur.budgets.get(m), 0.005)
     for group, rows in people.items():          # equal thirds typed as 33.3333: the last share takes the 0.0001
         total = sum(p for _, p in rows)
-        if 0 < abs(total - 1.0) < 1e-4:
+        if 1e-9 < abs(total - 1.0) < 1e-4:     # ignore float noise (1e-16) or it creeps into the shares
             rows = rows[:-1] + ((rows[-1][0], rows[-1][1] + 1.0 - total),)
             people[group] = rows
     move_types, seen = [], set()

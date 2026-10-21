@@ -7,8 +7,12 @@ Moveware (Dave Pile, MOS-51412, 15 Oct 2026):
     /jobs/{id}/activities/{activityId} changes only the fields sent;
   * any valid diary action can be added on any job type (the job-type filter is
     only the in-app lookup list);
-  * writes are signed by a DEDICATED Moveware user with a three-character code,
-    created in the Moveware app; that code goes in MW_AUTO_USER;
+  * the "user" is only a set of INITIALS for the completedby field; access comes
+    from the API credentials (Dave, 18 Oct: "It doesnt need any security"), and
+    Moveware's event log marks every API edit as such;
+  * NO new Moveware user (Lupita, 20 Oct, agreed by Bill 21 Oct: every user is
+    billed monthly). MW_AUTO_USER = Lupita's existing Moveware initials. Her
+    password is never needed or used;
   * action codes are client-specific (Reports → Other → Diary Actions Listing).
     Thelsa's: Load = "Uplift" (key action Uplift), Delivery = "Delivery".
 
@@ -19,7 +23,7 @@ future) are NEVER written — they stay for a person to decide.
 
 SWITCHES — nothing is written unless ALL of these hold:
   MW_DIARY_WRITE=1           the write-back is on (default OFF)
-  MW_AUTO_USER=<3 letters>   the Moveware user exists (the "AUT" placeholder is refused)
+  MW_AUTO_USER=<initials>    Lupita's Moveware initials (the "AUT" placeholder is refused)
   DRY_RUN != 1
 MW_DIARY_WRITE_MAX caps writes per pass (default 40). Every write is re-read from
 Moveware and logged (job, step, result — no customer data) to
@@ -52,7 +56,7 @@ def blocked_reason() -> str | None:
     if os.environ.get("DRY_RUN", "0") == "1":
         return "DRY_RUN=1"
     if auto_user() in PLACEHOLDER_USERS:
-        return "MW_AUTO_USER not set to the 3-letter Moveware user created for the automation"
+        return "MW_AUTO_USER not set to Lupita's Moveware initials"
     return None
 
 

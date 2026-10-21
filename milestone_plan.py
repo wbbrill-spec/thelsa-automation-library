@@ -55,9 +55,10 @@ MATCH = {"load": "load", "pack": "pack", "delivery": "delivery"}   # job_rules k
 # which sit_milestones date feeds each MoveWare action
 SOURCE = {"load": "load", "pack": "packing", "delivery": "delivery"}
 TYPO_BEFORE = dt.date(2025, 1, 1)
-# Dave Pile (MOS-51412, 15 Oct 2026): writes are signed by a dedicated MoveWare
-# user whose code is three characters. Create that user in the MoveWare app, then
-# set MW_AUTO_USER on Render to its code. "AUT" is only a placeholder.
+# Writes are signed (completedby) with a set of Moveware initials; access comes
+# from the API credentials (Dave Pile, MOS-51412, 18 Oct 2026). No new user is
+# created (Lupita, 20 Oct; Bill agreed 21 Oct): MW_AUTO_USER = Lupita's existing
+# initials. "AUT" is only a placeholder and the executor refuses it.
 AUTO_USER = (os.environ.get("MW_AUTO_USER") or "AUT").strip().upper()[:3]
 
 

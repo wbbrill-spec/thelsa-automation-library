@@ -990,7 +990,11 @@ def test_finance_join_cost_pending_never_full_margin(monkeypatch, tmp_path):
 
 def test_finance_cost_json_shipped_is_pii_free():
     import json, os
-    d = json.load(open(os.path.join(os.path.dirname(audit_web.__file__), "finance_cost.json")))
+    import pytest
+    path = os.path.join(os.path.dirname(audit_web.__file__), "finance_cost.json")
+    if not os.path.exists(path):
+        pytest.skip("finance_cost.json is kept out of the repo (Render secret file)")
+    d = json.load(open(path))
     assert d["currency"] == "MXN" and d["files"]
     assert d["ledger"]
     for rec in d["ledger"].values():

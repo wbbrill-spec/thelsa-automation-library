@@ -61,6 +61,36 @@ def _iso(v):
     return None
 
 
+def _name_parts(name) -> list:
+    """Words that identify the customer, from the Removal Plan 'Name' cell
+    ('First Last/First'), longest first: full names, then each surname-length word."""
+    parts = set()
+    for chunk in re.split(r"[/,;]", str(name or "")):
+        chunk = " ".join(chunk.split())
+        if len(chunk) >= 4:
+            parts.add(chunk)
+        parts.update(w for w in chunk.split() if len(w) >= 4)
+    return sorted(parts, key=len, reverse=True)
+
+
+_SERVICE_WORDS = {"move", "moves", "clearance", "customs", "freight", "inland", "national",
+                  "international", "delivery", "services", "service", "packing", "storage",
+                  "insurance", "transport", "handling", "origin", "destination", "extra",
+                  "extras", "file", "job", "for", "de", "del", "la", "el", "en", "para"}
+
+
+def _scrub(text: str, parts: list) -> str:
+    """Remove the file's customer name from a free-text cost-line description
+    (coordinators sometimes type it there: 'Customs Clearance 110790 <name>')."""
+    for p in parts:
+        text = re.sub(re.escape(p), "", text, flags=re.I)
+    # A capitalised word right before another file's number is that file's
+    # customer ("Int.Move <name> 110611" when the name isn't in this sheet).
+    text = re.sub(r"(^|[\s.])([A-ZÁÉÍÓÚÑ][a-záéíóúñü]+)\s+(?=\d{6}\b)",
+                  lambda m: m.group(0) if m.group(2).lower() in _SERVICE_WORDS else m.group(1), text)
+    return " ".join(text.split()).strip(" -/") or "(line)"
+
+
 def parse(src) -> dict:
     """src: path, bytes or file object of the .xlsx. Returns
     {"period": {won_from, won_to}, "files": {job: {...}}}; raises ValueError when
@@ -79,6 +109,14 @@ def parse(src) -> dict:
         period[key] = dt.date(2000 + int(m.group(3)), int(m.group(2)), int(m.group(1))).isoformat() if m else ""
     files: dict = {}
     cur = opt = None
+    name_parts: list = []
+    # Every customer's full name in the sheet: a line typed on one file can name
+    # the customer of another ("Int. Move <name> 110612" under a different job).
+    all_names = sorted({" ".join(c.split()) for r in rows[1:] if r[0] == "Removal Plan"
+                        for c in re.split(r"[/,;]", str(r[5] or "")) if len(" ".join(c.split()).split()) >= 2},
+                       key=len, reverse=True)
+    name_by_job = {str(r[2] or "").strip().upper(): _name_parts(r[5])
+                   for r in rows[1:] if r[0] == "Removal Plan"}
     for r in rows[1:]:
         a = r[0].strip() if isinstance(r[0], str) else r[0]
         if a in (None, ""):
@@ -93,6 +131,7 @@ def parse(src) -> dict:
             cur = files.setdefault(job, {"job": job, "move_type": str(r[11] or "").strip().upper(),
                                          "client_type": ct.group(1) if ct else "", "options": []})
             opt = None
+            name_parts = _name_parts(r[5]) + all_names  # used to scrub, never kept
         elif a == "Cost Option" and cur is not None:
             opt = {"no": str(r[2] or "").strip(), "status": str(r[8] or "").strip().upper(), "lines": []}
             cur["options"].append(opt)
@@ -100,7 +139,8 @@ def parse(src) -> dict:
             continue
         else:
             opt["lines"].append({
-                "desc": str(a)[:80], "est": _num(r[3]), "sell": _num(r[6]), "act": _num(r[8]),
+                "desc": _scrub(str(a), name_parts + [w for j in re.findall(r"\b\d{6}\b", str(a))
+                                                      for w in name_by_job.get(j, [])])[:80], "est": _num(r[3]), "sell": _num(r[6]), "act": _num(r[8]),
                 "date": _iso(r[9]), "acc": str(r[10] or "").strip(), "inv": str(r[11] or "").strip(),
                 "po": str(r[12] or "").strip(), "creditor": str(r[13] or "").strip()[:80]})
     if not files or not any(f["options"] for f in files.values()):

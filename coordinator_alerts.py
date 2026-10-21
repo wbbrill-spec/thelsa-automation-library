@@ -34,6 +34,14 @@ import os
 DEFAULT_CC = "maria.gonzalez@thelsa.com"
 
 
+
+# Bill, 21 Oct 2026: every email the app sends carries the app's name in the
+# subject line, so people know where it came from. APP_EMAIL_NAME overrides.
+def app_subject(subject: str) -> str:
+    name = os.environ.get("APP_EMAIL_NAME", "FAIM Audit Assistant").strip()
+    tag = f"[{name}]"
+    return subject if not name or subject.startswith(tag) else f"{tag} {subject}"
+
 def _cc_list():
     raw = os.environ.get("AUDIT_ALERT_CC", DEFAULT_CC)
     return [a.strip() for a in raw.split(",") if a.strip()]
@@ -178,7 +186,7 @@ def build_alerts(files):
                    f"discrepancies — {coord} ({_fmt(total)})")
         alerts.append({
             "coordinator": coord, "to": to_email, "cc": cc, "resolved": resolved,
-            "subject": subject, "body": _body_for(coord, cfiles, resolved),
+            "subject": app_subject(subject), "body": _body_for(coord, cfiles, resolved),
             "file_count": n, "total": total,
         })
     return alerts
@@ -287,7 +295,7 @@ def build_invoice_alerts(worklist):
                    f"{coord} ({_fmt(total)})")
         alerts.append({
             "coordinator": coord, "to": to_email, "cc": cc, "resolved": resolved,
-            "subject": subject, "body": _invoice_body(coord, rows, resolved, followup),
+            "subject": app_subject(subject), "body": _invoice_body(coord, rows, resolved, followup),
             "file_count": n, "total": total, "followup": followup,
         })
     return alerts

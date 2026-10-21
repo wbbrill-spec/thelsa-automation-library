@@ -142,8 +142,8 @@ def build(date_gaps) -> dict:
                         "email not on file: routed here for manual assignment.]")
         body.append("— Thelsa Automation Library · Auditoría FAIM / FAIM audit")
         out.append({"coordinator": coord, "to": to, "cc": cc, "files": n, "resolved": resolved,
-                    "subject": f"Fechas faltantes en Moveware: {n} expediente{'s' if n != 1 else ''} / "
-                               f"Missing Moveware dates: {n} file{'s' if n != 1 else ''}",
+                    "subject": ca.app_subject(f"Fechas faltantes en Moveware: {n} expediente{'s' if n != 1 else ''} / "
+                                              f"Missing Moveware dates: {n} file{'s' if n != 1 else ''}"),
                     "body": "\n".join(body)})
     summary = None
     if out:
@@ -153,8 +153,8 @@ def build(date_gaps) -> dict:
         no_dates = sum(1 for g in date_gaps if g.get("no_dates"))
         summary = {"coordinator": "(summary)", "to": os.environ.get("DATE_ALERT_SUMMARY_TO", DEFAULT_SUMMARY_TO),
                    "cc": cc, "files": total, "resolved": True,
-                   "subject": f"Fechas faltantes en Moveware: {total} expedientes, {len(out)} coordinadores / "
-                              f"Missing Moveware dates: {total} files",
+                   "subject": ca.app_subject(f"Fechas faltantes en Moveware: {total} expedientes, {len(out)} coordinadores / "
+                                             f"Missing Moveware dates: {total} files"),
                    "body": "\n".join(["Expedientes con fechas clave faltantes, por coordinador / Files missing key "
                                       "dates, by coordinator:", ""] + rows +
                                      ["", f"De ellos, {no_dates} ganados sin ninguna fecha / of which {no_dates} "

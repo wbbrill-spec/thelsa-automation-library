@@ -1118,3 +1118,22 @@ def test_finance_reconcile_only_drafts_counts_as_not_issued(monkeypatch, tmp_pat
 def test_likely_cause_currency_label():
     assert audit_web._likely_cause(1000.0, 20000.0, 20.0) == "currency label (pesos vs dollars)"
     assert audit_web._likely_cause(1000.0, 1160.0, 20.0) == "IVA included on one side"
+
+
+def test_costing_sheet_drops_customer_names_from_line_text():
+    import costing_sheet as cs
+    parts = cs._name_parts("Ana Pérez Gómez/Ana")
+    assert cs._scrub("Customs Clearance 110790 Ana Pérez Gómez", parts) == "Customs Clearance 110790"
+    assert cs._scrub("Ana Pérez Gómez", parts) == "(line)"
+
+
+def test_costing_sheet_drops_name_before_another_files_number():
+    import costing_sheet as cs
+    assert cs._scrub("Int.Move Joviel 110611", []) == "Int.Move 110611"
+    assert cs._scrub("Customs Clearance 110790", []) == "Customs Clearance 110790"
+
+
+def test_alert_subjects_carry_the_app_name():
+    import coordinator_alerts as ca
+    assert ca.app_subject("Fechas faltantes") == "[FAIM Audit Assistant] Fechas faltantes"
+    assert ca.app_subject("[FAIM Audit Assistant] x") == "[FAIM Audit Assistant] x"

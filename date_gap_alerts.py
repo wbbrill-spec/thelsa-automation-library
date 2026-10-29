@@ -28,7 +28,7 @@ WHO GETS WHAT
   - Spanish first, English below.
 
 SAFETY — nothing goes out by accident
-  ON BY DEFAULT since 16 Oct 2026 (Bill: enforce data entry). Off switches:
+  PAUSED since 29 Oct 2026 (Bill): OFF unless DATE_ALERTS_ENABLED=1. Switches:
   DATE_ALERTS_ENABLED=0 or DRY_RUN=1     master switch off (preview only)
   DATE_ALERTS_SEND=0                     DRAFTS in the "Audit Alert Drafts"
                                          folder instead of sending
@@ -60,9 +60,10 @@ def _list(name, default):
 
 
 def enabled() -> bool:
-    # ON by default (Bill, 16 Oct 2026: "we will enforce the coordinators doing the
-    # right data entry"). DATE_ALERTS_ENABLED=0 is the off switch.
-    return os.environ.get("DATE_ALERTS_ENABLED", "1") == "1" and os.environ.get("DRY_RUN", "0") != "1"
+    # PAUSED (Bill, 29 Oct 2026): the team is struggling with the daily intensity
+    # and doesn't yet know how to cancel files in Moveware. OFF by default; the
+    # dashboard still shows the gaps. DATE_ALERTS_ENABLED=1 turns emails back on.
+    return os.environ.get("DATE_ALERTS_ENABLED", "0") == "1" and os.environ.get("DRY_RUN", "0") != "1"
 
 
 def send_enabled() -> bool:

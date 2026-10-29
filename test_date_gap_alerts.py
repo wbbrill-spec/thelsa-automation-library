@@ -135,11 +135,12 @@ def test_auto_send_only_in_the_morning_window(monkeypatch, tmp_path):
     assert not dga.due_now(fri(12)) and not dga.due_now(fri(20))   # never at night
 
 
-def test_on_by_default(monkeypatch):
+def test_paused_by_default(monkeypatch):
+    # Bill, 29 Oct 2026: team emails paused; DATE_ALERTS_ENABLED=1 turns them back on.
+    assert not dga.enabled() and not dga.send_enabled()
+    monkeypatch.setenv("DATE_ALERTS_ENABLED", "1")
     assert dga.enabled() and dga.send_enabled()
     assert dga.due_now(dt.datetime(2026, 10, 19, 9, 0, tzinfo=dga.MEXICO))
-    monkeypatch.setenv("DATE_ALERTS_ENABLED", "0")
-    assert not dga.enabled() and not dga.send_enabled()
 
 
 def test_never_mails_someone_elses_address():

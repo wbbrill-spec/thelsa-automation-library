@@ -595,6 +595,12 @@ try:
     app.register_blueprint(commissions_bp)
 except Exception as _comm_exc:  # never block the library from booting
     logger.warning("Commission report not mounted: %s", _comm_exc)
+# Moveware schema reader for the new-platform spec — hidden admin page, no tile.
+try:
+    from mw_schema import schema_bp
+    app.register_blueprint(schema_bp)
+except Exception as _schema_exc:  # never block the library from booting
+    logger.warning("Moveware schema reader not mounted: %s", _schema_exc)
 try:
     from assistant.scan import start_scheduler as _asst_start_scheduler
     _asst_start_scheduler()

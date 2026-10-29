@@ -594,3 +594,10 @@ def test_pending_file_a_truck_carried_is_audited_but_a_scheduled_one_is_not():
     t = out["metrics"]["tiles"]
     assert (t["audited"], t["notBookedUnproven"]) == (1, 1)
     assert out["selection"]["not_booked_kept_with_proof"] == 1
+
+
+def test_test_file_111000_is_treated_as_cancelled():
+    # Lupita, 29 Oct 2026: 111000 is a TEST file that can't be cancelled in Moveware yet.
+    out = snap([rec("111000", "W", pack=dt.date(2026, 5, 1)), rec("1", "W", pack=dt.date(2026, 5, 1))])
+    assert out["metrics"]["tiles"]["lost"] == 1 and out["metrics"]["tiles"]["audited"] == 1
+    assert "111000" not in [g["file"] for g in out.get("date_gaps", [])]

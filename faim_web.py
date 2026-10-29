@@ -89,6 +89,10 @@ LOST_STATUSES = _env_codes("FAIM_LOST_STATUSES", ["L", "C"])
 AGENT_EXPORT_TYPES = _env_codes("FAIM_AGENT_EXPORT_TYPES", ["EXA"])   # no delivery date due
 AGENT_IMPORT_TYPES = _env_codes("FAIM_AGENT_IMPORT_TYPES", ["IMA"])   # no pack date due
 BOOKED_STATUS = "W"
+# Files Thelsa says are not real moves but can't be cancelled in Moveware yet.
+# Treated as cancelled everywhere in the audit. Lupita, 29 Oct 2026: 111000 is a
+# TEST file. FAIM_IGNORE_FILES adds more (comma-separated file numbers).
+IGNORE_FILES = _env_codes("FAIM_IGNORE_FILES", []) | {"111000"}
 WINDOW_MONTHS = int(os.environ.get("FAIM_WINDOW_MONTHS", "12"))
 PASS_BAR = 80
 _MAX_GAP_ROWS = 15
@@ -190,6 +194,8 @@ def faim_snapshot(files, today=None, sit=None):
             continue
         status = str(f.get("status") or "").strip().upper()
         number = str(f.get("job") or f.get("number") or f.get("job_id") or "")
+        if number.strip().upper() in IGNORE_FILES:
+            status = "C"                               # test file: counted as cancelled
         pack = _as_date(f.get("pack"))
         delivered = _as_date(f.get("delivery"))
         from_sit = sit.get(number.upper()) or {}

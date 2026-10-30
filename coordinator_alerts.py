@@ -62,6 +62,10 @@ KNOWN_COORDINATORS = {
     "stephanie barraza villa": "stephaniebarraza@thelsa.com",
     "elizabeth hernandez": "elizabethhernandez@thelsa.com",
     "elizabeth hernandez bravo": "elizabethhernandez@thelsa.com",
+    # Lupita (Maria Guadalupe Gonzalez); her Moveware code MG2 (her email, 30 Oct 2026)
+    "maria gonzalez": "maria.gonzalez@thelsa.com",
+    "maria guadalupe gonzalez": "maria.gonzalez@thelsa.com",
+    "mg2": "maria.gonzalez@thelsa.com",
 }
 
 

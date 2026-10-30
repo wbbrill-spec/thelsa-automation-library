@@ -51,7 +51,8 @@ SIGN_AS_EMAIL = os.environ.get("MW_SIGN_AS_EMAIL", "maria.gonzalez@thelsa.com")
 
 
 def auto_user() -> str:
-    code = (os.environ.get("MW_AUTO_USER") or "").strip().upper()[:3]
+    # Lupita confirmed her Moveware code on 30 Oct 2026: MG2.
+    code = (os.environ.get("MW_AUTO_USER") or "MG2").strip().upper()[:3]
     if code:
         return code
     try:

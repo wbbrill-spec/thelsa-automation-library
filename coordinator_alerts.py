@@ -485,9 +485,11 @@ def create_invoice_drafts(worklist, live=False):
 
 
 def alerts_enabled():
-    # ON (Bill, 30 Oct 2026: "switch on" the cost and ready-to-invoice emails).
-    # AUDIT_ALERTS_ENABLED=0 turns both off.
-    return (os.environ.get("AUDIT_ALERTS_ENABLED", "1") == "1"
+    # OFF again (Bill, 30 Oct 2026 evening): "ready to invoice" only sees invoices
+    # raised IN Moveware, but Thelsa also invoices outside it (Finance's ledger) —
+    # 110887 was emailed as unbilled though Finance invoiced it in Nov 2025. Stays
+    # off until the list is checked against Finance. AUDIT_ALERTS_ENABLED=1 = on.
+    return (os.environ.get("AUDIT_ALERTS_ENABLED", "0") == "1"
             and os.environ.get("DRY_RUN", "0") != "1")
 
 

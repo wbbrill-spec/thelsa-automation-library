@@ -215,6 +215,12 @@ def run_once(min_gap_s: int = 3 * 3600) -> dict | None:
         import mw_live
         audit_web._build_milestone_plan()
         steps = audit_web._MS_PLAN.get("steps") or []
+        if not steps or audit_web._MS_PLAN.get("error"):
+            # Plan not ready yet (book or Plan de Viajes still loading): don't use
+            # up the 3-hour slot — try again on the next keeper tick (30 min).
+            _LAST["at"] = 0.0
+            _LAST["result"] = {"skipped_reason": "plan not ready", "error": audit_web._MS_PLAN.get("error")}
+            return _LAST["result"]
         ids = {}
         for f in mw_live.audited_files() or []:
             if f.get("job") and f.get("job_id"):

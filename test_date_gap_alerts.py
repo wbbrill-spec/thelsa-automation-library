@@ -10,7 +10,7 @@ import faim_web as fw
 TODAY = dt.date(2026, 10, 16)
 
 
-def rec(job, typ="EXP", status="W", pack=None, delivery=None, coord="Stephanie", email="stephaniebarraza@thelsa.com",
+def rec(job, typ="EXP", status="W", pack=None, delivery=None, coord="Sara", email="sarareyes@thelsa.com",
         booked=None):
     return {"job": job, "status": status, "job_type": typ, "pack": pack, "delivery": delivery,
             "mw_coordinator": coord, "coordinator_email": email, "booked": booked, "survey": "2026-09-01"}
@@ -58,12 +58,12 @@ def test_one_email_per_coordinator_cc_key_users_and_a_summary_for_bill():
               rec("111006", "EXP", booked="2026-09-01", coord="Elizabeth", email="")])
     plan = dga.build(g)
     by = {a["coordinator"]: a for a in plan["coordinators"]}
-    assert by["Stephanie"]["to"] == "stephaniebarraza@thelsa.com" and by["Stephanie"]["files"] == 2
-    assert by["Stephanie"]["cc"] == ["maria.gonzalez@thelsa.com", "sarareyes@thelsa.com"]
+    assert by["Sara"]["to"] == "sarareyes@thelsa.com" and by["Sara"]["files"] == 2
+    assert by["Sara"]["cc"] == ["maria.gonzalez@thelsa.com", "sarareyes@thelsa.com"]
     assert not by["Elizabeth"]["resolved"] and "asignar manualmente" in by["Elizabeth"]["body"]
-    assert "SIN NINGUNA fecha clave" in by["Elizabeth"]["body"] and "sin excepciones" in by["Stephanie"]["body"].lower()
+    assert "SIN NINGUNA fecha clave" in by["Elizabeth"]["body"] and "sin excepciones" in by["Sara"]["body"].lower()
     s = plan["summary"]
-    assert s["to"] == "bill.brill@inflectionpointnow.com" and s["files"] == 3 and "Stephanie: 2" in s["body"]
+    assert s["to"] == "bill.brill@inflectionpointnow.com" and s["files"] == 3 and "Sara: 2" in s["body"]
 
 
 class Mailer:
@@ -151,7 +151,7 @@ def test_never_mails_someone_elses_address():
     assert ca.name_matches("Maria Gonzalez", "maria.gonzalez@thelsa.com")
     assert ca.name_matches("Daniela Martínez", "danielamartinez@thelsa.com")
     assert not ca.name_matches("Sara Reyes", "edgarespino@thelsa.com")
-    assert not ca.name_matches("Stephanie Barraza", "elizabethhernandez@thelsa.com")
+    assert not ca.name_matches("Sara Reyes", "elizabethhernandez@thelsa.com")
     files = [rec("111002", "EXP", pack="2026-09-10", coord="Sara Reyes", email="edgarespino@thelsa.com"),
              rec("111003", "EXP", pack="2026-09-11", coord="Brenda Roldan",
                  email="edgarespino@thelsa.com"),
@@ -173,7 +173,15 @@ def test_moveware_admin_is_not_a_coordinator():
 
 
 def test_known_coordinators_reach_their_own_inbox():
-    g = gaps([rec("111005", "EXP", pack="2026-09-10", coord="Stephanie Barraza", email="edgarespino@thelsa.com")])
-    assert g[0]["coord_email"] == "stephaniebarraza@thelsa.com"
+    g = gaps([rec("111005", "EXP", pack="2026-09-10", coord="Sara Reyes", email="edgarespino@thelsa.com")])
+    assert g[0]["coord_email"] == "sarareyes@thelsa.com"
     a = dga.build(g)["coordinators"][0]
-    assert a["to"] == "stephaniebarraza@thelsa.com" and a["resolved"]
+    assert a["to"] == "sarareyes@thelsa.com" and a["resolved"]
+
+
+def test_former_staff_never_emailed_and_codes_resolve():
+    import coordinator_alerts as ca
+    assert ca.resolve_email("SR2") == ("sarareyes@thelsa.com", True)
+    assert ca.resolve_email("EH1") == ("elizabethhernandez@thelsa.com", True)
+    to, ok = ca.resolve_email("Stephanie Barraza", "stephaniebarraza@thelsa.com")
+    assert not ok and to != "stephaniebarraza@thelsa.com"

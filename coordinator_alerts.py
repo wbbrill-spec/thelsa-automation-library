@@ -58,15 +58,19 @@ def _fallback_inbox():
 KNOWN_COORDINATORS = {
     "sara reyes": "sarareyes@thelsa.com",
     "sara reyes gallegos": "sarareyes@thelsa.com",
-    "stephanie barraza": "stephaniebarraza@thelsa.com",
-    "stephanie barraza villa": "stephaniebarraza@thelsa.com",
     "elizabeth hernandez": "elizabethhernandez@thelsa.com",
     "elizabeth hernandez bravo": "elizabethhernandez@thelsa.com",
     # Lupita (Maria Guadalupe Gonzalez); her Moveware code MG2 (her email, 30 Oct 2026)
     "maria gonzalez": "maria.gonzalez@thelsa.com",
     "maria guadalupe gonzalez": "maria.gonzalez@thelsa.com",
     "mg2": "maria.gonzalez@thelsa.com",
+    # Moveware codes (Bill, 30 Oct 2026): Sara = SR2, Elizabeth Hernandez = EH1.
+    "sr2": "sarareyes@thelsa.com",
+    "eh1": "elizabethhernandez@thelsa.com",
 }
+# No longer with Thelsa (Bill, 30 Oct 2026): never emailed. Other unknown codes
+# are probably ex-staff too and go to the fallback inbox, never guessed.
+FORMER_STAFF = {"stephanie barraza", "stephanie barraza villa", "stephaniebarraza@thelsa.com"}
 
 
 def _coordinator_map():
@@ -124,6 +128,8 @@ def resolve_email(coordinator, direct_email=None):
     """
     direct = (direct_email or "").strip()
     name = (coordinator or "").strip()
+    if name.lower() in FORMER_STAFF or direct.lower() in FORMER_STAFF:
+        return _fallback_inbox(), False
     mapped = _coordinator_map().get(name.lower()) if name else None
     if mapped:
         return mapped, True

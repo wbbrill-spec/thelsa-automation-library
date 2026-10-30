@@ -304,7 +304,7 @@ def build_invoice_alerts(worklist):
 def send_enabled():
     """Actually SEND (vs draft) only when explicitly turned on — a second switch
     on top of AUDIT_ALERTS_ENABLED so sending is never the accidental default."""
-    return alerts_enabled() and os.environ.get("INVOICE_ALERTS_SEND") == "1"
+    return alerts_enabled() and os.environ.get("INVOICE_ALERTS_SEND", "1") == "1"
 
 
 def _sender():
@@ -479,8 +479,93 @@ def create_invoice_drafts(worklist, live=False):
 
 
 def alerts_enabled():
-    return (os.environ.get("AUDIT_ALERTS_ENABLED") == "1"
+    # ON (Bill, 30 Oct 2026: "switch on" the cost and ready-to-invoice emails).
+    # AUDIT_ALERTS_ENABLED=0 turns both off.
+    return (os.environ.get("AUDIT_ALERTS_ENABLED", "1") == "1"
             and os.environ.get("DRY_RUN", "0") != "1")
+
+
+def daily_due(key: str, now=None) -> bool:
+    """Once per weekday, in the morning window (Mexico City, ALERTS_HOUR default 8,
+    for ALERTS_WINDOW_H default 4 h) — never at night after a restart."""
+    import datetime as _dt
+    mx = _dt.timezone(_dt.timedelta(hours=-6))
+    now = now or _dt.datetime.now(mx)
+    try:
+        hour = int(os.environ.get("ALERTS_HOUR", "8"))
+        window = max(1, int(os.environ.get("ALERTS_WINDOW_H", "4")))
+    except ValueError:
+        hour, window = 8, 4
+    last = (_load_state().get("_daily") or {}).get(key)
+    return now.weekday() < 5 and hour <= now.hour < hour + window and last != now.date().isoformat()
+
+
+def mark_daily(key: str, now=None) -> None:
+    import datetime as _dt
+    mx = _dt.timezone(_dt.timedelta(hours=-6))
+    now = now or _dt.datetime.now(mx)
+    st = _load_state()
+    st.setdefault("_daily", {})[key] = now.date().isoformat()
+    _save_state(st)
+
+
+def send_cost_alerts(files, live=False):
+    """SEND one cost-discrepancy email per coordinator (Bill, 30 Oct 2026). A
+    coordinator is emailed again only when their list of files changes, at most
+    weekly otherwise (COST_ALERTS_REPEAT_DAYS, default 7). Capped per run."""
+    import datetime as _dt
+    import hashlib
+    alerts = build_alerts(files)
+    status = {"enabled": alerts_enabled(), "live": bool(live), "alert_count": len(alerts),
+              "sent": [], "skipped": 0, "skipped_reason": None}
+    if not alerts:
+        status["skipped_reason"] = "no discrepancies"
+        return status
+    if not live:
+        status["skipped_reason"] = "demo data — never off non-live data"
+        return status
+    if not alerts_enabled():
+        status["skipped_reason"] = "AUDIT_ALERTS_ENABLED=0 (or DRY_RUN=1)"
+        return status
+    try:
+        repeat = max(1, int(os.environ.get("COST_ALERTS_REPEAT_DAYS", "7")))
+    except ValueError:
+        repeat = 7
+    now = _dt.datetime.now()
+    state = _load_state()
+    seen = state.setdefault("_cost", {})
+    try:
+        from engine.mailer import GraphMailer
+        mailer = GraphMailer(mailbox=_sender())
+    except Exception as e:
+        status["skipped_reason"] = f"mailer unavailable: {e}"
+        return status
+    n = 0
+    for a in alerts:
+        sig = hashlib.sha1(a["body"].encode()).hexdigest()[:16]
+        prev = seen.get(a["coordinator"]) or {}
+        try:
+            age = (now - _dt.datetime.fromisoformat(prev["at"])).days if prev.get("at") else None
+        except Exception:
+            age = None
+        if prev.get("sig") == sig and age is not None and age < repeat:
+            status["skipped"] += 1
+            continue
+        if n >= _max_per_run():
+            status["skipped"] += 1
+            continue
+        rec = {"coordinator": a["coordinator"], "to": a["to"]}
+        try:
+            mailer.send_mail(a["to"], a["subject"], a["body"], cc=a["cc"])
+            rec["ok"] = True
+            seen[a["coordinator"]] = {"sig": sig, "at": now.isoformat()}
+            n += 1
+        except Exception as e:
+            rec["ok"] = False
+            rec["error"] = str(e)[:200]
+        status["sent"].append(rec)
+    _save_state(state)
+    return status
 
 
 def create_drafts(files, live=False):

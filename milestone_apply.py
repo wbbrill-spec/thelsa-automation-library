@@ -22,8 +22,9 @@ Delivery that SIT's Plan de Viajes shows as DONE, with no completed action yet.
 future) are NEVER written — they stay for a person to decide.
 
 SWITCHES — nothing is written unless ALL of these hold:
-  MW_DIARY_WRITE=1           the write-back is on (default OFF)
-  MW_AUTO_USER=<initials>    Lupita's Moveware initials (the "AUT" placeholder is refused)
+  MW_DIARY_WRITE (default 1)  the write-back is on since 30 Oct 2026 (Bill); 0 = off
+  initials                   Lupita's, looked up by name from the files (MW_AUTO_USER overrides;
+                             nothing is written until they are found)
   DRY_RUN != 1
 MW_DIARY_WRITE_MAX caps writes per pass (default 40). Every write is re-read from
 Moveware and logged (job, step, result — no customer data) to
@@ -41,30 +42,46 @@ import urllib.request
 PLACEHOLDER_USERS = {"", "AUT"}
 
 
+# Whose initials sign the automated entries (Lupita, 20 Oct; Bill, 30 Oct 2026:
+# "we already know her name"). Moveware's completedby field takes the user's
+# initials code, not a name, so the app looks the code up by name in the staff
+# fields of the files it reads. MW_AUTO_USER overrides the lookup.
+SIGN_AS_NAME = os.environ.get("MW_SIGN_AS_NAME", "Maria Gonzalez")
+SIGN_AS_EMAIL = os.environ.get("MW_SIGN_AS_EMAIL", "maria.gonzalez@thelsa.com")
+
+
 def auto_user() -> str:
-    return (os.environ.get("MW_AUTO_USER") or "").strip().upper()[:3]
+    code = (os.environ.get("MW_AUTO_USER") or "").strip().upper()[:3]
+    if code:
+        return code
+    try:
+        import mw_live
+        return (mw_live.staff_code(SIGN_AS_NAME, SIGN_AS_EMAIL) or "").strip().upper()[:3]
+    except Exception:
+        return ""
 
 
 def write_enabled() -> bool:
-    return (os.environ.get("MW_DIARY_WRITE") == "1" and os.environ.get("DRY_RUN", "0") != "1"
+    # ON (Bill, 30 Oct 2026: "switch on"). MW_DIARY_WRITE=0 turns it off.
+    return (os.environ.get("MW_DIARY_WRITE", "1") == "1" and os.environ.get("DRY_RUN", "0") != "1"
             and auto_user() not in PLACEHOLDER_USERS)
 
 
 def blocked_reason() -> str | None:
-    if os.environ.get("MW_DIARY_WRITE") != "1":
-        return "MW_DIARY_WRITE is not 1 (write-back off)"
+    if os.environ.get("MW_DIARY_WRITE", "1") != "1":
+        return "MW_DIARY_WRITE=0 (write-back off)"
     if os.environ.get("DRY_RUN", "0") == "1":
         return "DRY_RUN=1"
     if auto_user() in PLACEHOLDER_USERS:
-        return "MW_AUTO_USER not set to Lupita's Moveware initials"
+        return f"{SIGN_AS_NAME}'s Moveware initials not found on any file yet (set MW_AUTO_USER)"
     return None
 
 
 def _max() -> int:
     try:
-        return max(1, int(os.environ.get("MW_DIARY_WRITE_MAX", "40")))
+        return max(1, int(os.environ.get("MW_DIARY_WRITE_MAX", "10")))   # gentle start: ≤10 per pass
     except ValueError:
-        return 40
+        return 10
 
 
 def _log_path() -> str:
@@ -112,7 +129,7 @@ def _verified(job_id, step) -> bool:
     """Re-read the diary: is there now a completed action of this milestone on
     the plan date?"""
     import job_rules
-    want = "load" if step["milestone"] == "pack" else "delivery"
+    want = {"load": "load", "pack": "pack", "delivery": "delivery"}.get(step["milestone"], step["milestone"])
     day = str(step.get("plan_date") or "")[:10]
     for a in _activities(job_id):
         if job_rules.is_milestone(a, want) and str(a.get("completed") or "").upper() == "Y" \

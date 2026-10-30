@@ -28,10 +28,13 @@ def calls(monkeypatch):
     return sent
 
 
-def test_off_by_default_and_placeholder_user_refused(monkeypatch, calls):
+def test_on_by_default_but_nothing_written_without_initials(monkeypatch, calls):
+    # Bill, 30 Oct 2026: switched on. No initials found yet -> still nothing written.
+    monkeypatch.setattr("mw_live.staff_code", lambda *a, **k: "")
+    assert not ma.write_enabled() and "initials" in ma.blocked_reason()
+    monkeypatch.setenv("MW_DIARY_WRITE", "0")
     assert not ma.write_enabled() and "MW_DIARY_WRITE" in ma.blocked_reason()
     monkeypatch.setenv("MW_DIARY_WRITE", "1")
-    assert not ma.write_enabled() and "MW_AUTO_USER" in ma.blocked_reason()
     monkeypatch.setenv("MW_AUTO_USER", "aut")
     assert not ma.write_enabled()
     out = ma.apply(STEPS, IDS)
@@ -79,3 +82,15 @@ def test_successful_write_clears_cached_diary(monkeypatch, calls):
 
 def test_run_once_does_nothing_when_off():
     assert ma.run_once() is None
+
+
+def test_lupitas_initials_found_by_name(monkeypatch):
+    import mw_live
+    monkeypatch.setitem(mw_live._AUDIT, "files", {
+        "1": {"mw_staff": {"MG1": "Maria Guadalupe Gonzalez", "SR2": "Sara Reyes"}},
+        "2": {"mw_staff": {"MG1": "Maria Gonzalez"}}})
+    monkeypatch.delenv("MW_AUTO_USER", raising=False)
+    assert mw_live.staff_code("Maria Gonzalez", "maria.gonzalez@thelsa.com") == "MG1"
+    assert ma.auto_user() == "MG1"
+    assert mw_live._staff_codes({"moveManager": {"code": "SR2", "text": "Sara Reyes"},
+                                 "status": {"code": "W", "text": "Won"}}) == {"SR2": "Sara Reyes"}

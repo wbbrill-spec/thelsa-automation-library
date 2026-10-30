@@ -552,6 +552,60 @@ def _role_entity_type(roles_obj, name: str) -> str:
     return t if isinstance(t, str) and len(t) <= 20 and t.replace(" ", "").replace("-", "").isalpha() else ""
 
 
+_STAFF_CODE = re.compile(r"^[A-Z]{1,3}[0-9]{0,2}$")
+
+
+def _staff_codes(*objs) -> dict:
+    """Moveware staff fields are {code, text} pairs: moveManager {"code": "SR2",
+    "text": "Sara Reyes"}. Collect every such pair on the job whose code looks
+    like a user's initials, so the app can find a person's Moveware initials by
+    name (the diary write-back signs with Lupita's, Bill 30 Oct 2026)."""
+    out = {}
+    for o in objs:
+        if not isinstance(o, dict):
+            continue
+        for v in o.values():
+            if isinstance(v, dict) and "code" in v and "text" in v:
+                code = str(v.get("code") or "").strip().upper()
+                text = " ".join(str(v.get("text") or "").split())
+                if _STAFF_CODE.match(code) and len(text.split()) >= 2:
+                    out[code] = text
+    return out
+
+
+def staff_code(name: str = "", email: str = "") -> str:
+    """The Moveware initials of a person, looked up by name (or by the name in
+    their @thelsa.com email: maria.gonzalez@ -> 'maria gonzalez') across every
+    file in the book. Most frequent match wins; '' when nobody matches."""
+    import collections
+    import unicodedata
+
+    def norm(t):
+        t = unicodedata.normalize("NFKD", str(t or "")).encode("ascii", "ignore").decode().lower()
+        return " ".join(re.sub(r"[^a-z ]", " ", t).split())
+
+    wanted = {norm(name)} if name else set()
+    if email:
+        wanted.add(norm(email.split("@")[0].replace(".", " ").replace("_", " ")))
+    wanted.discard("")
+    if not wanted:
+        return ""
+    hits = collections.Counter()
+    with _AUDIT_LOCK:
+        files = list(_AUDIT["files"].values())
+    for f in files:
+        for code, text in (f.get("mw_staff") or {}).items():
+            t = norm(text)
+            # "Maria Gonzalez" matches "Maria Guadalupe Gonzalez Lopez": every wanted
+            # word present, in order.
+            for w in wanted:
+                ws = w.split()
+                it = iter(t.split())
+                if all(x in it for x in ws):
+                    hits[code] += 1
+    return hits.most_common(1)[0][0] if hits else ""
+
+
 def _role_person(role) -> str:
     """Name of the person on a V2 role record. V2 puts the staff member on
     role.entity (firstName/lastName); the role's own name fields are blank."""
@@ -891,6 +945,7 @@ def _map_job(job: dict, prefetched: dict | None = None) -> dict | None:
         "coordinator": coordinator,
         "coordinator_email": coordinator_email,
         "mw_coordinator": mw_coordinator,   # Moveware's coordinator / move manager name
+        "mw_staff": _staff_codes(src, job),  # {initials code: name} of Thelsa staff on the file
         "agent": None,
         "pack": pack,
         "delivery": delivery,

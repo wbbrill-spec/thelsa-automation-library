@@ -488,7 +488,12 @@ def _keeper_tick():
         sm.ensure_built()
     except Exception:
         pass
-    try:  # diary write-back from SIT's Plan de Viajes (off unless MW_DIARY_WRITE=1)
+    try:  # cost + ready-to-invoice emails to coordinators, once each weekday morning
+        import audit_web
+        audit_web.run_daily_coordinator_alerts()
+    except Exception:
+        pass
+    try:  # diary write-back from SIT's Plan de Viajes (on; MW_DIARY_WRITE=0 turns it off)
         import milestone_apply
         milestone_apply.run_once()
     except Exception:

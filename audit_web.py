@@ -1025,6 +1025,28 @@ def _run_invoice_alerts_once():
     return ca.dispatch_invoice_alerts(m.get("to_invoice_worklist", []), live=True)
 
 
+def run_daily_coordinator_alerts():
+    """Called by the FAIM keeper: once each weekday morning, email coordinators
+    their files ready to invoice and their cost discrepancies (Bill, 30 Oct 2026)."""
+    import mw_live
+    import coordinator_alerts as ca
+    if not ca.alerts_enabled() or not ca.daily_due("coordinator_alerts"):
+        return None
+    audited = [m for m in mw_live.audited_files() if m.get("job")]
+    if not audited:
+        return {"skipped_reason": "no audited files yet"}
+    ca.mark_daily("coordinator_alerts")
+    files = reconcile(audited, cost_available=False)
+    check_calculations(files)
+    m = compute_metrics(files, live_counts=None, cost_available=False)
+    out = {"invoice": ca.dispatch_invoice_alerts(m.get("to_invoice_worklist", []), live=True)}
+    try:
+        out["cost"] = ca.send_cost_alerts(files, live=True)
+    except Exception as e:  # noqa: BLE001
+        out["cost"] = {"error": f"{type(e).__name__}: {e}"[:200]}
+    return out
+
+
 def _invoice_alert_loop():
     _time.sleep(int(os.environ.get("INVOICE_ALERTS_START_DELAY", "300")))
     interval = int(os.environ.get("INVOICE_ALERTS_EVERY_SECONDS", str(12 * 3600)))

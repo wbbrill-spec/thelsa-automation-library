@@ -418,6 +418,8 @@ def dispatch_invoice_alerts(worklist, live=False, send=None):
         status["skipped_reason"] = "AUDIT_ALERTS_ENABLED != 1 (or DRY_RUN=1)"
         return status
 
+    # Only booked files from the last 12 months, with a value to bill.
+    worklist = [r for r in (worklist or []) if recent_booked(r) and (r.get("value") or 0) > 0]
     # First alert immediately; then follow up only every 48h while still unbilled.
     state = _load_state()
     fresh = []
@@ -483,6 +485,34 @@ def alerts_enabled():
     # AUDIT_ALERTS_ENABLED=0 turns both off.
     return (os.environ.get("AUDIT_ALERTS_ENABLED", "1") == "1"
             and os.environ.get("DRY_RUN", "0") != "1")
+
+
+def _d(v):
+    import datetime as _dt
+    if isinstance(v, _dt.datetime):
+        return v.date()
+    if isinstance(v, _dt.date):
+        return v
+    try:
+        return _dt.date.fromisoformat(str(v)[:10]) if v else None
+    except ValueError:
+        return None
+
+
+def recent_booked(f, today=None) -> bool:
+    """Emails cover only BOOKED files (status W) whose pack or delivery date falls
+    in the last ALERTS_WINDOW_DAYS (default 365) — Bill, 30 Oct 2026: the first
+    run listed files from 2021-22 and a quote that was never booked."""
+    import datetime as _dt
+    today = today or _dt.date.today()
+    try:
+        days = max(1, int(os.environ.get("ALERTS_WINDOW_DAYS", "365")))
+    except ValueError:
+        days = 365
+    if str(f.get("status") or "").strip().upper() != "W":
+        return False
+    start = today - _dt.timedelta(days=days)
+    return any(d and start <= d <= today for d in (_d(f.get("pack")), _d(f.get("delivery"))))
 
 
 def daily_due(key: str, now=None) -> bool:

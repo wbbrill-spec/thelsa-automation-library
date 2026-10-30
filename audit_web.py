@@ -718,6 +718,7 @@ def compute_metrics(files, live_counts=None, cost_available=True):
           "coordinator": f.get("coordinator") or "Unassigned",
           "coordinator_email": f.get("coordinator_email") or "",
           "value": _bill_value(f), "embassy": bool(f.get("is_embassy")),
+          "status": str(f.get("status") or "").strip().upper(),
           "pack": f["pack"].isoformat() if f.get("pack") else None,
           "delivery": f["delivery"].isoformat() if f.get("delivery") else None}
          for f in to_invoice],
@@ -1036,6 +1037,8 @@ def run_daily_coordinator_alerts():
     if not audited:
         return {"skipped_reason": "no audited files yet"}
     ca.mark_daily("coordinator_alerts")
+    # Bill, 30 Oct 2026: only booked files from the last 12 months — never 2016.
+    audited = [f for f in audited if ca.recent_booked(f)]
     files = reconcile(audited, cost_available=False)
     check_calculations(files)
     m = compute_metrics(files, live_counts=None, cost_available=False)

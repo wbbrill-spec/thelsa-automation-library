@@ -636,8 +636,8 @@ def test_invoice_alerts_send_and_dedupe_within_48h(tmp_path, monkeypatch):
     monkeypatch.setenv("AUDIT_CACHE_PATH", str(tmp_path / "audit_cache.json"))
     log = []
     _fake_mailer(monkeypatch, log)
-    wl = [{"job": 1, "client": "A", "coordinator": "Maria", "value": 100},
-          {"job": 2, "client": "B", "coordinator": "Maria", "value": 200}]
+    wl = [{"job": 1, "client": "A", "coordinator": "Maria", "value": 100, "status": "W", "pack": __import__("datetime").date.today().isoformat()},
+          {"job": 2, "client": "B", "coordinator": "Maria", "value": 200, "status": "W", "pack": __import__("datetime").date.today().isoformat()}]
     st1 = ca.dispatch_invoice_alerts(wl, live=True)          # send=None -> uses flags -> SEND
     assert st1["mode"] == "send" and len(st1["sent"]) == 1   # grouped into one email
     assert log[0][0] == "send"
@@ -658,7 +658,7 @@ def test_invoice_alerts_followup_after_48h(tmp_path, monkeypatch):
     (tmp_path / "invoice_alert_state.json").write_text(_json.dumps({"1": {"last": old, "count": 1}}))
     log = []
     _fake_mailer(monkeypatch, log)
-    wl = [{"job": 1, "client": "A", "coordinator": "Maria", "value": 100}]
+    wl = [{"job": 1, "client": "A", "coordinator": "Maria", "value": 100, "status": "W", "pack": __import__("datetime").date.today().isoformat()}]
     st = ca.dispatch_invoice_alerts(wl, live=True, send=False)
     assert st["followups"] == 1 and len(st["drafts"]) == 1
     assert "REMINDER" in log[0][2]                            # subject marks the follow-up
@@ -1141,3 +1141,12 @@ def test_alert_subjects_carry_the_app_name():
     import coordinator_alerts as ca
     assert ca.app_subject("Fechas faltantes") == "[FAIM Audit Assistant] Fechas faltantes"
     assert ca.app_subject("[FAIM Audit Assistant] x") == "[FAIM Audit Assistant] x"
+
+
+def test_alert_emails_only_cover_booked_files_from_the_last_year():
+    import datetime as dt, coordinator_alerts as ca
+    t = dt.date(2026, 10, 30)
+    assert ca.recent_booked({"status": "W", "pack": "2026-09-28"}, t)
+    assert not ca.recent_booked({"status": "W", "pack": "2022-05-26"}, t)       # 2022: out
+    assert not ca.recent_booked({"status": "P", "pack": "2026-09-28"}, t)       # never booked
+    assert ca.recent_booked({"status": "W", "pack": None, "delivery": dt.date(2026, 1, 5)}, t)

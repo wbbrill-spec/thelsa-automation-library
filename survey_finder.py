@@ -250,10 +250,13 @@ def _search(mbx: str, term: str, h: dict, diag: dict) -> list[dict]:
     params = {"$search": f'"{term}"',
               "$select": "subject,from,receivedDateTime,bodyPreview,webLink,body",
               "$top": "25"}
+    if mbx in (diag.get("refused_mailboxes") or []):
+        return []                       # refused once this run: don't ask again
     hh, url = _auth_for(mbx, h, diag.get("_delegated") or {}, diag)
     if not hh:
         diag["forbidden"] += 1
         diag["searches"] += 1
+        diag.setdefault("refused_mailboxes", []).append(mbx)
         return []
     try:
         r = requests.get(url, headers=hh, params=params, timeout=25)
@@ -289,7 +292,10 @@ def find_for_file(row: dict, client: str, h: dict, diag: dict, keep_all: list | 
     if sn:
         terms.append(sn)
     seen, hits = set(), []
-    for mbx in _mailboxes_for(row.get("coord_email")):
+    boxes = _mailboxes_for(row.get("coord_email"))
+    # anyone else who connected their own mailbox (Bill is often copied)
+    boxes += [b for b in (diag.get("_delegated") or {}) if b not in boxes]
+    for mbx in boxes:
         for term in terms:
             for m in _search(mbx, term, h, diag):
                 key = (m.get("subject"), m.get("receivedDateTime"))

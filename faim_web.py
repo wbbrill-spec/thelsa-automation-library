@@ -219,6 +219,9 @@ def faim_snapshot(files, today=None, sit=None):
             "coord": str((f.get("mw_coordinator") if "mw_coordinator" in f
                           else f.get("coordinator")) or "").strip() or "Unassigned",
             "survey_read": "survey" in f,
+            # agent inbound (IMA): the origin agent abroad does the survey and we
+            # don't usually get it, so it is not expected (Bill, 31 Oct 2026)
+            "survey_due": job_type not in AGENT_IMPORT_TYPES,
             "survey": bool(_as_date(f.get("survey"))),
             "delivery": bool(delivered),
             "sit_delivery": sit_delivered if (sit_delivered and sit_delivered <= today) else None,
@@ -256,8 +259,8 @@ def faim_snapshot(files, today=None, sit=None):
 
     # Survey dates arrive as the auditor re-reads each file; a record read before
     # that carries no survey field at all, which is "not read", not "missing".
-    survey_known = [r for r in audited if r["survey_read"]]
-    survey_pending = n - len(survey_known)
+    survey_known = [r for r in audited if r["survey_read"] and r["survey_due"]]
+    survey_pending = sum(1 for r in audited if r["survey_due"] and not r["survey_read"])
 
     by_criterion = [
         {"name": "Coordinator assigned",
@@ -276,7 +279,7 @@ def faim_snapshot(files, today=None, sit=None):
     ctot, ccov = {}, {}
     for r in audited:
         ctot[r["coord"]] = ctot.get(r["coord"], 0) + 1
-        if r["survey"] and (r["delivery"] or not r["delivery_due"]):
+        if (r["survey"] or not r["survey_due"]) and (r["delivery"] or not r["delivery_due"]):
             ccov[r["coord"]] = ccov.get(r["coord"], 0) + 1
     by_coordinator = sorted(
         [{"name": c, "v": _pct(ccov.get(c, 0), ctot[c]), "files": ctot[c]} for c in ctot],
@@ -285,7 +288,7 @@ def faim_snapshot(files, today=None, sit=None):
     gaps_rows = []
     for r in audited:
         gaps = []
-        if r["survey_read"] and not r["survey"]:
+        if r["survey_due"] and r["survey_read"] and not r["survey"]:
             gaps.append("survey")
         if r["pack_due"] and not r["pack"]:
             gaps.append("pack date" + (f" (SIT plan: packed {r['sit_pack'].isoformat()})"
@@ -390,6 +393,11 @@ def faim_snapshot(files, today=None, sit=None):
             "gapFiles": len(gaps_rows),
         },
         "date_gaps": date_gaps,
+        # audited files with no survey date in Moveware (for the survey finder)
+        "missing_survey": [{"file": r["number"], "status": r["status"], "type": r["type"],
+                            "coord": r["coord"], "coord_email": r["coord_email"],
+                            "key_date": r["collect"].isoformat() if r["collect"] else ""}
+                           for r in survey_known if not r["survey"]],
         "selection": {
             "window_start": start.isoformat(),
             "window_end": today.isoformat(),
@@ -603,6 +611,100 @@ _DATE_ALERT_ADMINS = ("bbrill@thelsa.com", "bill.brill@inflectionpointnow.com", 
                       "sarareyes@thelsa.com")
 
 
+def _survey_inputs():
+    files, _ = _book()
+    sit, _ = _sit()
+    snap = faim_snapshot(files, sit=sit)
+    clients = {str(f.get("job") or ""): str(f.get("client") or "") for f in files or []
+               if isinstance(f, dict)}
+    return snap.get("missing_survey") or [], clients
+
+
+@faim_bp.route("/faim/survey-finder.json")
+@_login_required
+def faim_survey_finder_json():
+    import survey_finder as sf
+    st = sf.state()
+    if request.args.get("run") and not st["running"]:
+        missing, clients = _survey_inputs()
+        if missing:
+            sf.start(missing, clients)
+        st = sf.state()
+    return jsonify(st)
+
+
+@faim_bp.route("/faim/survey-finder")
+@_login_required
+def faim_survey_finder():
+    """Worklist: files with no survey in Moveware, and the coordinator emails
+    that look like survey evidence. Read-only - sends nothing."""
+    import html as _h
+    import survey_finder as sf
+    st = sf.state()
+    if not st["running"] and (request.args.get("run") or not st["started"]):
+        missing, clients = _survey_inputs()
+        if missing:
+            sf.start(missing, clients)
+            st = sf.state()
+    e = _h.escape
+    res = st["results"]
+    found = [r for r in res if r["hits"]]
+    by_coord = {}
+    for r in res:
+        c = by_coord.setdefault(r["coord"], [0, 0])
+        c[0] += 1
+        c[1] += 1 if r["hits"] else 0
+    coord_rows = "".join(
+        f"<tr><td>{e(c)}</td><td class=n>{v[0]}</td><td class=n>{v[1]}</td></tr>"
+        for c, v in sorted(by_coord.items(), key=lambda x: -x[1][0]))
+    rows = []
+    for r in sorted(res, key=lambda r: (not r["hits"], r["coord"], r["file"])):
+        if r["hits"]:
+            hh = "".join(
+                f"<div class=hit><b>{e(x['date'])}</b> &middot; "
+                + (f"<a href='{e(x['link'])}' target=_blank>{e(x['subject']) or '(no subject)'}</a>"
+                   if x["link"] else e(x["subject"]))
+                + f"<br><span class=m>{e(x['from'])} &middot; mailbox {e(x['mailbox'].split('@')[0])}"
+                  f" &middot; matched by {e(x['matched_by'])} &middot; word: \u201c{e(x['word'])}\u201d</span>"
+                  f"<br><span class=s>{e(x['snippet'])}</span></div>"
+                for x in r["hits"])
+        else:
+            hh = "<span class=m>No survey email found</span>"
+        rows.append(f"<tr><td class=n>{e(r['file'])}</td><td>{e(r['coord'])}</td>"
+                    f"<td>{e(r['key_date'])}</td><td>{hh}</td></tr>")
+    d = st.get("diag") or {}
+    status = ("Searching the coordinators' email&hellip; "
+              f"{st['done']} of {st['files']} files checked. This page refreshes by itself."
+              if st["running"] else
+              (f"Could not finish: {e(st['error'])}" if st.get("error") else
+               f"Done. {len(found)} of {len(res)} files have an email that looks like a survey."))
+    if d.get("forbidden"):
+        status += f" ({d['forbidden']} mailbox searches were refused by Microsoft 365.)"
+    refresh = "<meta http-equiv=refresh content=15>" if st["running"] else ""
+    return f"""<!doctype html><html><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">{refresh}
+<title>Missing surveys</title><style>
+body{{font:14px/1.45 system-ui,sans-serif;margin:24px auto;max-width:1150px;padding:0 16px;color:#1d1d1f;background:#fafaf9}}
+table{{border-collapse:collapse;width:100%;background:#fff;margin:12px 0 28px}}
+td,th{{border-bottom:1px solid #e7e5e4;padding:8px;text-align:left;vertical-align:top}}
+th{{font-size:12px;text-transform:uppercase;color:#78716c}} .n{{white-space:nowrap}}
+.m{{color:#78716c;font-size:12px}} .s{{color:#44403c;font-size:12px}} .hit{{margin-bottom:8px}}
+.box{{background:#eef4ff;border:1px solid #c9dafc;padding:10px 14px;border-radius:8px}}
+a{{color:#1d4ed8}}</style></head><body>
+<p><a href="/faim">&larr; Dashboard</a></p>
+<h1>Missing surveys &mdash; what the coordinators' email shows</h1>
+<p>Files in the dashboard with <b>no survey date in Moveware</b>. For each one the app searched the coordinators'
+mailboxes (by file number and by the customer's surname) for an email about a survey, inspection or visit.
+Read-only: nothing is sent. Where an email is found, the survey date can be entered in Moveware.</p>
+<p class=box>{status}</p>
+<h2>By coordinator</h2>
+<table><tr><th>Coordinator</th><th>Files missing a survey</th><th>Survey email found</th></tr>{coord_rows}</table>
+<h2>Files</h2>
+<table><tr><th>File</th><th>Coordinator</th><th>Move date</th><th>Survey emails found</th></tr>{''.join(rows)}</table>
+<p class=m><a href="/faim/survey-finder?run=1">Search again</a></p>
+</body></html>"""
+
+
 @faim_bp.route("/faim/date-gaps")
 @_login_required
 def faim_date_gaps():
@@ -801,7 +903,7 @@ td.num{font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
 <div class="cols2">
 <div class="card">
 <h2>Coverage by coordinator</h2>
-<p class="note">Share of each coordinator's audited files with a survey on record and, unless it is an agent export, a delivery date. Line = 80% target.</p>
+<p class="note">Share of each coordinator's audited files with a survey on record (not expected on an agent import, IMA) and, unless it is an agent export, a delivery date. Line = 80% target.</p>
 <div class="bars" id="byCoord"></div>
 </div>
 <div class="card">

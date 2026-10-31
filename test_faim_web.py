@@ -451,7 +451,16 @@ def test_an_import_with_no_date_in_moveware_is_dated_by_sit_delivery():
     crit = {c["name"]: c["v"] for c in out["metrics"]["byCriterion"]}
     assert crit["Delivery date logged"] == 0
     assert out["metrics"]["breaches"][0]["rule"] == (
-        "Missing: survey, delivery date (SIT plan: delivered 2026-09-30)")   # import: no pack gap
+        "Missing: delivery date (SIT plan: delivered 2026-09-30)")   # agent import: no pack or survey gap
+
+
+def test_no_survey_is_expected_on_an_agent_inbound_move():
+    # Bill, 31 Oct 2026: the origin agent abroad does the survey; we don't usually get it
+    files = [rec("110950", "W", delivery="2026-09-20", job_type="IMA"),
+             rec("110951", "W", pack="2026-09-20", job_type="EXP")]
+    out = faim_web.faim_snapshot(files, today=TODAY)
+    assert [r["file"] for r in out["missing_survey"]] == ["110951"]
+    assert out["metrics"]["tiles"]["missingSurvey"] == 1
 
 
 def test_moveware_dates_win_over_sit():

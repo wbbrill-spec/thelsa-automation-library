@@ -842,7 +842,7 @@ return `<div class="row"><span class="name" title="${d.name}">${d.name}</span>
 async function load(){
 let d;
 try{ const r=await fetch('/faim/api/metrics'); if(r.status===401){location.href='/login';return;} d=await r.json(); }
-catch{ document.getElementById('foot').textContent='Could not load data.'; return; }
+catch{ document.getElementById('foot').textContent='The server is restarting after an update \u2014 trying again in 20 seconds\u2026'; setTimeout(load,20000); return; }
 document.getElementById('window').textContent=d.window||'';
 document.getElementById('viewer').textContent=d.viewer||'';
 if(d.generatedNote){const b=document.getElementById('sampleBanner');b.style.display='block';b.textContent='● '+d.generatedNote;}
@@ -861,6 +861,7 @@ const rows=(d.breaches||[]);
 tb.innerHTML=rows.length?rows.map(b=>`
 <tr><td class="num">${b.file}</td><td>${b.cust}</td><td>${b.rule}</td><td>${b.coord}</td>
 <td class="num">${b.days}</td><td><span class="pill ${b.sev}">${b.sev==='crit'?'● Several gaps':'▲ Minor gaps'}</span></td></tr>`).join(''):'<tr><td colspan="6" style="color:var(--muted)">No gaps on the audited files.</td></tr>';
+if(d.window==='loading'){setTimeout(load,30000);}
 document.getElementById('foot').textContent='Evidence coverage is read from Moveware; a file counts as covered only when the evidence is actually on record. Full FAIM compliance scoring (deadlines, documents, signed inventories) resumes once the remaining Moveware endpoints and field mapping are confirmed.';
 }
 load();

@@ -645,7 +645,7 @@ def stage_for(row: dict, detail: dict | None, today: dt.date) -> tuple[Stage, li
     return Stage.BOOKED, flags, dates
 
 
-def date_gap_flags(dates: dict, stage: Stage, today: dt.date) -> list[str]:
+def date_gap_flags(dates: dict, stage: Stage, today: dt.date, job_type: str = "") -> list[str]:
     """Milestone dates missing from Moveware that are costing the file something.
 
     Measured on the live fleet, 2026-09-23: of 15 open jobs, 2 of 9 imports had
@@ -667,9 +667,24 @@ def date_gap_flags(dates: dict, stage: Stage, today: dt.date) -> list[str]:
     out: list[str] = []
     if stage in (Stage.DELIVERED, Stage.CLOSED):
         return out
-    if not dates.get("uplift"):
+    # Only ask for a date this job type is supposed to have. The rules live in
+    # job_rules, which the FAIM audit and the diary write-back already use, so
+    # all three agree instead of each keeping its own idea (Bill, 31 Oct 2026):
+    #   agent import (IMA) — the overseas agent packs and often never tells us
+    #     the pack/load day. We do not need it: Thelsa's part is the import and
+    #     the delivery.
+    #   agent export (EXA) — Thelsa's role ends when the shipment leaves Mexico,
+    #     so there is no delivery date to give.
+    #   domestic (DIN) and door-to-door — both dates are expected.
+    try:
+        import job_rules
+        want_load = job_rules.expected("load", job_type)
+        want_delivery = job_rules.expected("delivery", job_type)
+    except Exception:                                   # noqa: BLE001
+        want_load = want_delivery = True
+    if want_load and not dates.get("uplift"):
         out.append("no_uplift_date")
-    if not dates.get("delivery"):
+    if want_delivery and not dates.get("delivery"):
         moving = stage in (Stage.TO_BORDER, Stage.CUSTOMS, Stage.AT_HUB,
                            Stage.ONWARD, Stage.OUT_FOR_DELIVERY)
         packed = bool(dates.get("uplift")) and dates["uplift"] <= today
@@ -695,7 +710,8 @@ def build_shipment(row: dict, detail: dict | None, *, today: dt.date | None = No
     sea_leg = veracruz_leg(row)
     dirn = direction(row) or (sea_direction(row) if sea_leg else None) or "import"
     stage, flags, dates = stage_for(row, d, today)
-    flags = flags + date_gap_flags(dates, stage, today)
+    flags = flags + date_gap_flags(dates, stage, today,
+                                   _s(row.get("type")) or _s(row.get("jobType")))
     list_id = str(row.get("id") or "")
     # The number staff can actually search for in Moveware (guide §2) — NOT the
     # internal id, which these two lines used to publish.

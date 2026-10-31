@@ -662,6 +662,24 @@ def _in_month(day, ms, me):
     return bool(day and ms <= day < me)
 
 
+def _finance_invoice_view() -> dict:
+    """{'invoiced': set of base file numbers Finance shows as invoiced,
+        'cutoff': 'YYYY-MM-DD' of the latest invoice in the report ('' if none)}."""
+    try:
+        fin = _load_finance_cost()
+    except Exception:
+        fin = {}
+    inv, cutoff = set(), ""
+    for b, L in (fin.get("ledger") or {}).items():
+        if (L.get("n_inv") or 0) > 0 or (L.get("inv_mxn") or 0) or (L.get("inv_usd") or 0):
+            inv.add(str(b))
+        cutoff = max(cutoff, str(L.get("last") or "")[:10])
+    for b, r in (fin.get("files") or {}).items():
+        if (r.get("net_sales") or 0) > 0:
+            inv.add(str(b))
+    return {"invoiced": inv, "cutoff": cutoff}
+
+
 def compute_metrics(files, live_counts=None, cost_available=True):
     today = dt.date.today()
     ms = today.replace(day=1)
@@ -695,7 +713,24 @@ def compute_metrics(files, live_counts=None, cost_available=True):
             return _delivered(f)          # embassy: not until delivered
         return _packed(f) or _delivered(f)
 
-    to_invoice = [f for f in files if not f["invoiced"] and _invoiceable(f)]
+    # Thelsa invoices in CONTPAQi, not Moveware (Bill, 30 Oct 2026), and the app
+    # stays out of the accounting system. So a file also counts as invoiced when
+    # Lupita's Finance report shows an invoice or net sales for it; and a move
+    # newer than that report's last invoice can't be judged yet — it is left off
+    # the list ("too recent to tell") instead of being called unbilled.
+    fin = _finance_invoice_view()
+
+    def _billed_elsewhere(f):
+        return _base_file(f.get("job")) in fin["invoiced"]
+
+    def _too_recent(f):
+        if not fin["cutoff"]:
+            return True                                  # no Finance report loaded: can't tell
+        d = max([x for x in (f.get("pack"), f.get("delivery")) if x and x <= today], default=None)
+        return bool(d and d.isoformat() > fin["cutoff"])
+
+    to_invoice = [f for f in files if not f["invoiced"] and _invoiceable(f)
+                  and not _billed_elsewhere(f) and not _too_recent(f)]
     invoiceable_n = len(to_invoice)
     invoiceable_val = round(sum(_bill_value(f) for f in to_invoice), 2)
 

@@ -523,7 +523,8 @@ def test_revenue_sums_invoiced_where_billed_else_quoted():
     assert m["tot_revenue"] == round(196166.22 + 5000)
 
 
-def test_ready_to_invoice_by_move_dates_not_status():
+def test_ready_to_invoice_by_move_dates_not_status(monkeypatch):
+    monkeypatch.setattr(aw, "_finance_invoice_view", lambda: {"invoiced": set(), "cutoff": "2099-12-31"})
     """'Ready to invoice' = a real move (pack OR delivery date passed) not yet
     invoiced — keyed on milestone dates, NOT status code (packed/invoiced files
     can show status 'Pending'). Files with no move dates (leads) are excluded."""
@@ -542,7 +543,8 @@ def test_ready_to_invoice_by_move_dates_not_status():
     assert {r["job"] for r in m["to_invoice_worklist"]} == {1, 2}
 
 
-def test_us_embassy_bills_only_after_delivery():
+def test_us_embassy_bills_only_after_delivery(monkeypatch):
+    monkeypatch.setattr(aw, "_finance_invoice_view", lambda: {"invoiced": set(), "cutoff": "2099-12-31"})
     """US Embassy files are NOT ready to invoice until delivered; while packed but
     not delivered they show as 'in transit' with their own dollar value."""
     past = TODAY - dt.timedelta(days=10)
@@ -1150,3 +1152,19 @@ def test_alert_emails_only_cover_booked_files_from_the_last_year():
     assert not ca.recent_booked({"status": "W", "pack": "2022-05-26"}, t)       # 2022: out
     assert not ca.recent_booked({"status": "P", "pack": "2026-09-28"}, t)       # never booked
     assert ca.recent_booked({"status": "W", "pack": None, "delivery": dt.date(2026, 1, 5)}, t)
+
+
+def test_ready_to_invoice_trusts_finance_and_skips_too_recent(monkeypatch):
+    # Bill, 30 Oct 2026: invoices are raised in CONTPAQi, not Moveware; 110887 was
+    # invoiced per Finance yet flagged. Finance-invoiced files and moves newer than
+    # the Finance report are never called unbilled.
+    old = TODAY - dt.timedelta(days=200)
+    files = [_mkfile(job="110887", status="W", invoiced=False, inv_amt=0, sell=100, pack=old),   # invoiced in Finance
+             _mkfile(job="110900", status="W", invoiced=False, inv_amt=0, sell=100, pack=old),   # really unbilled
+             _mkfile(job="111200", status="W", invoiced=False, inv_amt=0, sell=100,
+                     pack=TODAY - dt.timedelta(days=5))]                                        # newer than the report
+    cut = (TODAY - dt.timedelta(days=30)).isoformat()
+    monkeypatch.setattr(aw, "_finance_invoice_view", lambda: {"invoiced": {"110887"}, "cutoff": cut})
+    aw.check_calculations(files)
+    m = aw.compute_metrics(files, live_counts=LIVE_COUNTS, cost_available=False)
+    assert [r["job"] for r in m["to_invoice_worklist"]] == ["110900"]

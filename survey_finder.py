@@ -73,11 +73,15 @@ def surname(client: str) -> str | None:
     return part
 
 
+# Daniela Martinez coordinates TMS files too (she is on the dashboard)
+MAILBOXES = list(dict.fromkeys(ms_graph.TMS_COORDINATORS + ["danielamartinez@thelsa.com"]))
+
+
 def _mailboxes_for(coord_email: str) -> list[str]:
     e = (coord_email or "").strip().lower()
-    if e in ms_graph.TMS_COORDINATORS:
+    if e in MAILBOXES:
         return [e]
-    return list(ms_graph.TMS_COORDINATORS)     # former staff / unknown: look everywhere
+    return list(MAILBOXES)     # former staff / unknown: look everywhere
 
 
 def _search(mbx: str, term: str, h: dict, diag: dict) -> list[dict]:

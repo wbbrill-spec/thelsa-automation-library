@@ -18,4 +18,4 @@ def test_surname_skips_companies_and_short_names():
 
 def test_former_staff_files_search_every_mailbox():
     assert sf._mailboxes_for("sarareyes@thelsa.com") == ["sarareyes@thelsa.com"]
-    assert len(sf._mailboxes_for("someone.gone@thelsa.com")) == len(sf.ms_graph.TMS_COORDINATORS)
+    assert len(sf._mailboxes_for("someone.gone@thelsa.com")) == len(sf.MAILBOXES)

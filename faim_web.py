@@ -678,7 +678,11 @@ def faim_survey_finder():
               if st["running"] else
               (f"Could not finish: {e(st['error'])}" if st.get("error") else
                f"Done. {len(found)} of {len(res)} files have an email that looks like a survey."))
-    if d.get("forbidden"):
+    if d.get("searches") and d.get("forbidden") == d.get("searches"):
+        status = ("Not possible yet: Microsoft 365 does not let the app read the coordinators' "
+                  "mailboxes. IT (C&eacute;sar) needs to give the app read-only access to those "
+                  "mailboxes; once that is done, press &ldquo;Search again&rdquo;.")
+    elif d.get("forbidden"):
         status += f" ({d['forbidden']} mailbox searches were refused by Microsoft 365.)"
     refresh = "<meta http-equiv=refresh content=15>" if st["running"] else ""
     return f"""<!doctype html><html><head><meta charset=utf-8>

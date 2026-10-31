@@ -51,6 +51,13 @@ import job_rules
 # Dave Pile: updating an Uplift activity also moves the job-header load date.
 CODES = {"load": "Uplift", "pack": "Pack", "delivery": "Delivery"}
 LABELS = {"load": "Load", "pack": "Pack", "delivery": "Delivery"}
+# Written into the activity's `comment` so a person can always tell an
+# automated completion from a real one. It has to live in `comment`: that is
+# one of the five fields Moveware documents for this endpoint, and Moveware
+# silently drops the rest — the old "notes" marker almost certainly never
+# persisted. MW_AUTO_USER is Lupita's own initials (no billed extra user), so
+# `completedby` cannot carry the distinction on its own.
+AUTO_MARK = "[auto: SIT Plan de Viajes]"
 MATCH = {"load": "load", "pack": "pack", "delivery": "delivery"}   # job_rules key action
 # which sit_milestones date feeds each MoveWare action
 SOURCE = {"load": "load", "pack": "packing", "delivery": "delivery"}
@@ -102,7 +109,8 @@ def plan_for_job(job: str, sit_job: dict, activities: list, today: dt.date | Non
             continue
         if not mine:
             steps.append({**base, "action": "create", "body": {
-                "type": code, "date": plan_day.isoformat(), "comment": LABELS[key],
+                "type": code, "date": plan_day.isoformat(),
+                "comment": f"{LABELS[key]} {AUTO_MARK}",
                 "completed": "Y", "completedby": AUTO_USER,
                 "notes": "From SIT Plan de Viajes (automation)"},
                 "why": f"No {code} action on the file."})
@@ -126,9 +134,24 @@ def plan_for_job(job: str, sit_job: dict, activities: list, today: dt.date | Non
         why = ("Date looks mistyped (before 2025)." if ad and ad < TYPO_BEFORE
                else "Action open or without a date.")
         steps.append({**base, **info, "action": "update",
-                      "body": {"date": plan_day.isoformat(), "completed": "Y", "completedby": AUTO_USER},
+                      "body": {"date": plan_day.isoformat(), "completed": "Y",
+                               "completedby": AUTO_USER,
+                               "comment": _stamp(a.get("comment"))},
                       "why": why})
     return steps
+
+
+def _stamp(existing: str | None) -> str:
+    """Add the automation marker to a comment without losing what is there.
+
+    A PATCH replaces the whole field, so the coordinator's own note has to be
+    carried through. Stamping twice is pointless, so an already-marked comment
+    comes back unchanged.
+    """
+    text = (existing or "").strip()
+    if AUTO_MARK in text:
+        return text
+    return f"{text} {AUTO_MARK}".strip()
 
 
 def summarize(steps: list) -> dict:

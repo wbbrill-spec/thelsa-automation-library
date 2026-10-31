@@ -32,19 +32,116 @@ NOT_SURVEY = ("satisfaction", "satisfaccion", "encuesta", "quality survey",
 
 # Words that show an email is about a pack/load or a delivery (Bill, 31 Oct 2026:
 # "also scan their emails for the missing pack/load and delivery dates")
-PACK_WORDS = ("empaque", "embalaje", "carga", "cargar", "packing", "pack date",
-              "loading", "uplift", "pick up", "pickup", "recoleccion", "huacal")
-DELIVERY_WORDS = ("entrega", "descarga", "delivery", "delivered", "entregado",
-                  "desempaque", "unpacking", "pod ", "proof of delivery")
+LOAD_WORDS = ("carga", "cargar", "cargamos", "cargado", "loading", "loaded", "uplift",
+              "pick up", "pickup", "recoleccion")
+PACKING_WORDS = ("empaque", "empacar", "empacamos", "embalaje", "packing", "packed", "huacal")
+PACK_WORDS = LOAD_WORDS + PACKING_WORDS
+DELIVERY_WORDS = ("entrega", "entregamos", "entregado", "descarga", "delivery", "delivered",
+                  "desempaque", "unpacking", "proof of delivery")
 _NEED_WORDS = {"pack": PACK_WORDS, "delivery": DELIVERY_WORDS}
+
+
+def _word_re(w: str):
+    return re.compile(r"(?<![a-z])" + re.escape(w) + r"(?![a-z])")
 
 
 def date_hint(text: str, need: str) -> str | None:
     t = _norm(text)
     for w in _NEED_WORDS[need]:
-        if w in t:
+        if _word_re(w).search(t):
             return w
     return None
+
+
+# ── reading the date out of the email ───────────────────────────────────────────
+_MONTHS = {
+    "enero": 1, "ene": 1, "january": 1, "jan": 1,
+    "febrero": 2, "feb": 2, "february": 2,
+    "marzo": 3, "mar": 3, "march": 3,
+    "abril": 4, "abr": 4, "april": 4, "apr": 4,
+    "mayo": 5, "may": 5,
+    "junio": 6, "jun": 6, "june": 6,
+    "julio": 7, "jul": 7, "july": 7,
+    "agosto": 8, "ago": 8, "august": 8, "aug": 8,
+    "septiembre": 9, "setiembre": 9, "sep": 9, "sept": 9, "september": 9,
+    "octubre": 10, "oct": 10, "october": 10,
+    "noviembre": 11, "nov": 11, "november": 11,
+    "diciembre": 12, "dic": 12, "december": 12, "dec": 12,
+}
+_MON = "|".join(sorted(_MONTHS, key=len, reverse=True))
+_DATE_RES = [
+    ("iso", re.compile(r"(?<!\d)(20\d\d)-(\d{1,2})-(\d{1,2})(?!\d)")),
+    ("dmy", re.compile(r"(?<![\d/.-])(\d{1,2})[/.-](\d{1,2})(?:[/.-](\d{2,4}))?(?![\d/.-])")),
+    ("d_mon", re.compile(r"(?<!\d)(\d{1,2})(?:st|nd|rd|th)?\s*(?:de\s+|of\s+)?(" + _MON + r")\.?(?![a-z])(?:,?\s*(?:de(?:l)?\s+)?(20\d\d))?")),
+    ("mon_d", re.compile(r"(?<![a-z])(" + _MON + r")\.?\s+(\d{1,2})(?:st|nd|rd|th)?(?!\d)(?:,?\s*(20\d\d))?")),
+]
+
+
+def _mk(y, m, d, received):
+    import datetime as _dt
+    try:
+        m, d = int(m), int(d)
+        if y:
+            y = int(y)
+            y = y + 2000 if y < 100 else y
+            return _dt.date(y, m, d)
+        # no year: the one that puts the date nearest the email's own date
+        best = None
+        for yy in (received.year - 1, received.year, received.year + 1):
+            try:
+                c = _dt.date(yy, m, d)
+            except ValueError:
+                continue
+            if best is None or abs((c - received).days) < abs((best - received).days):
+                best = c
+        return best
+    except (ValueError, TypeError):
+        return None
+
+
+def dates_in(text: str, received) -> list:
+    """[(position, date)] of every date written in `text` (Mexican day/month
+    order for 12/09/2026)."""
+    t = _norm(text)
+    out = []
+    for kind, rx in _DATE_RES:
+        for m in rx.finditer(t):
+            if kind == "iso":
+                d = _mk(m.group(1), m.group(2), m.group(3), received)
+            elif kind == "dmy":
+                d = _mk(m.group(3), m.group(2), m.group(1), received)
+            elif kind == "d_mon":
+                d = _mk(m.group(3), _MONTHS[m.group(2)], m.group(1), received)
+            else:
+                d = _mk(m.group(3), _MONTHS[m.group(1)], m.group(2), received)
+            if d:
+                out.append((m.start(), d))
+    return out
+
+
+def date_for(text: str, need, received):
+    """(date, word) for the pack/load or delivery the email talks about: the date
+    written closest to the word (within ~120 characters), or (None, None).
+    Two different dates equally close = unclear = None."""
+    t = _norm(text)
+    found = dates_in(text, received)
+    if not found:
+        return None, None
+    words = _NEED_WORDS[need] if isinstance(need, str) else need
+    best = None
+    for w in words:
+        for m in _word_re(w).finditer(t):
+            for pos, d in found:
+                gap = pos - m.end() if pos >= m.start() else (m.start() - pos) + 15
+                if gap > 120:
+                    continue
+                if best is None or gap < best[0]:
+                    best = (gap, d, w)
+                elif gap == best[0] and d != best[1]:
+                    best = (gap, None, w)
+    if not best or best[1] is None:
+        return None, None
+    return best[1], best[2]
 
 
 def hint_for(text: str, need: str) -> str | None:
@@ -105,21 +202,75 @@ def _mailboxes_for(coord_email: str) -> list[str]:
     return list(MAILBOXES)     # former staff / unknown: look everywhere
 
 
+def email_steps() -> list:
+    """sit-shaped day lists for milestone_plan from the last finder run:
+    [(file, job_type, {"load"/"packing"/"delivery": {"date", "status": "done"}})]."""
+    st = state()
+    out = []
+    for r in st.get("results") or []:
+        d = r.get("email_dates") or {}
+        if d:
+            out.append((r["file"], r.get("type") or "",
+                        {k: {"date": v, "status": "done", "source": "email"} for k, v in d.items()}))
+    return out
+
+
+def delegated_mailboxes() -> dict:
+    """{email: user_id} of Thelsa people who connected their own mailbox in the
+    app (the read-only Mail.Read César granted works per person, through their own
+    sign-in). Empty if the assistant database isn't there."""
+    try:
+        from assistant import db
+        return {str(u["email"]).strip().lower(): u["id"]
+                for u in db.users_to_scan("microsoft") if u.get("email")}
+    except Exception:
+        return {}
+
+
+def _auth_for(mbx: str, app_h: dict | None, delegated: dict, diag: dict):
+    """(headers, url) to search this mailbox: the person's own connection first,
+    else the app-wide credential."""
+    uid = delegated.get(mbx)
+    if uid:
+        try:
+            from assistant import graph as ag
+            tok = ag.access_token(uid)
+            return ({"Authorization": f"Bearer {tok}", "ConsistencyLevel": "eventual",
+                     "Prefer": 'outlook.body-content-type="text"'},
+                    f"{ms_graph.GRAPH}/me/messages")
+        except Exception as e:
+            diag["reconnect"] = sorted(set(diag.get("reconnect", [])) | {mbx})
+            diag["first_error"] = diag["first_error"] or f"{mbx}: {e}"[:160]
+    if app_h:
+        return app_h, f"{ms_graph.GRAPH}/users/{mbx}/messages"
+    return None, None
+
+
 def _search(mbx: str, term: str, h: dict, diag: dict) -> list[dict]:
     params = {"$search": f'"{term}"',
               "$select": "subject,from,receivedDateTime,bodyPreview,webLink,body",
               "$top": "25"}
+    hh, url = _auth_for(mbx, h, diag.get("_delegated") or {}, diag)
+    if not hh:
+        diag["forbidden"] += 1
+        diag["searches"] += 1
+        return []
     try:
-        r = requests.get(f"{ms_graph.GRAPH}/users/{mbx}/messages",
-                         headers=h, params=params, timeout=25)
+        r = requests.get(url, headers=hh, params=params, timeout=25)
     except Exception as e:
         diag["errors"] += 1
         diag["first_error"] = diag["first_error"] or f"{mbx}: {e}"[:160]
         return []
     diag["searches"] += 1
-    if r.status_code == 403:
+    if r.status_code in (401, 403):
         diag["forbidden"] += 1
+        diag.setdefault("refused_mailboxes", [])
+        if mbx not in diag["refused_mailboxes"]:
+            diag["refused_mailboxes"].append(mbx)
         return []
+    diag.setdefault("read_mailboxes", [])
+    if mbx not in diag["read_mailboxes"]:
+        diag["read_mailboxes"].append(mbx)
     if r.status_code != 200:
         diag["errors"] += 1
         diag["first_error"] = diag["first_error"] or f"{mbx}: {r.status_code} {ms_graph._short(r)}"
@@ -127,7 +278,7 @@ def _search(mbx: str, term: str, h: dict, diag: dict) -> list[dict]:
     return r.json().get("value") or []
 
 
-def find_for_file(row: dict, client: str, h: dict, diag: dict) -> list[dict]:
+def find_for_file(row: dict, client: str, h: dict, diag: dict, keep_all: list | None = None) -> list[dict]:
     """Emails about what the file is missing (row["needs"]: survey / pack /
     delivery), best first (at most 2 per need)."""
     needs = row.get("needs") or ["survey"]
@@ -157,17 +308,35 @@ def find_for_file(row: dict, client: str, h: dict, diag: dict) -> list[dict]:
                     word = hint_for(text, need)
                     if not word:
                         continue
-                    hits.append({
+                    found = []          # (kind, date, word)
+                    if need in ("pack", "delivery") and by_number:
+                        import datetime as _dt
+                        try:
+                            rec_day = _dt.date.fromisoformat((m.get("receivedDateTime") or "")[:10])
+                        except ValueError:
+                            rec_day = _dt.date.today()
+                        groups = ([("load", LOAD_WORDS), ("packing", PACKING_WORDS)]
+                                  if need == "pack" else [("delivery", DELIVERY_WORDS)])
+                        for kind, words in groups:
+                            when, w2 = date_for(text, words, rec_day)
+                            if when:
+                                found.append((kind, when, w2))
+                    for kind, when, w2 in (found or [(need, None, word)]):
+                      hits.append({
+                        "found_date": when.isoformat() if when else "",
+                        "kind": kind,
                         "need": need,
                         "mailbox": mbx,
                         "date": (m.get("receivedDateTime") or "")[:10],
                         "subject": (m.get("subject") or "")[:140],
                         "from": ((m.get("from") or {}).get("emailAddress") or {}).get("address", ""),
-                        "word": word,
+                        "word": w2,
                         "matched_by": by,
                         "snippet": (m.get("bodyPreview") or "")[:220],
                         "link": m.get("webLink") or "",
-                    })
+                      })
+    if keep_all is not None:
+        keep_all.extend(hits)
     order = {"file number": 0, "customer name": 1, "surname": 2}
     out = []
     for need in needs:
@@ -180,6 +349,37 @@ def find_for_file(row: dict, client: str, h: dict, diag: dict) -> list[dict]:
     return out
 
 
+def chosen_dates(hits: list, today=None, key_date: str = "") -> dict:
+    """{"load"|"packing"|"delivery": date} worth writing to Moveware: from emails
+    matched by FILE NUMBER only, the latest such email's date, in the past, from
+    2025 on, and within 6 months of the file's move date."""
+    import datetime as _dt
+    today = today or _dt.date.today()
+    try:
+        anchor = _dt.date.fromisoformat(key_date[:10]) if key_date else None
+    except ValueError:
+        anchor = None
+    best = {}
+    for x in hits:
+        if x.get("matched_by") != "file number" or not x.get("found_date"):
+            continue
+        d = _dt.date.fromisoformat(x["found_date"])
+        if d > today or d < _dt.date(2025, 1, 1):
+            continue
+        if anchor and abs((d - anchor).days) > 183:
+            continue
+        k = x.get("kind")
+        if k not in ("load", "packing", "delivery"):
+            continue
+        if k not in best or x["date"] > best[k][0]:       # latest email wins
+            best[k] = (x["date"], d)
+    out = {k: v[1] for k, v in best.items()}
+    first_move = min([d for k, d in out.items() if k != "delivery"], default=None)
+    if "delivery" in out and first_move and out["delivery"] < first_move:
+        out.pop("delivery")                               # delivered before it left: unclear
+    return out
+
+
 def run(missing: list[dict], clients: dict[str, str]) -> None:
     """Background pass over `missing` (faim_snapshot()['missing_survey'])."""
     diag = {"searches": 0, "forbidden": 0, "errors": 0, "first_error": None, "token_ok": False}
@@ -189,14 +389,19 @@ def run(missing: list[dict], clients: dict[str, str]) -> None:
     try:
         tok = ms_graph._get_token()
         diag["token_ok"] = bool(tok)
-        if not tok:
+        diag["_delegated"] = delegated_mailboxes()
+        diag["connected"] = sorted(diag["_delegated"])
+        if not tok and not diag["_delegated"]:
             raise RuntimeError("could not sign in to Microsoft 365 (mail reading credential)")
-        h = {"Authorization": f"Bearer {tok}", "ConsistencyLevel": "eventual",
-             "Prefer": 'outlook.body-content-type="text"'}
+        h = ({"Authorization": f"Bearer {tok}", "ConsistencyLevel": "eventual",
+              "Prefer": 'outlook.body-content-type="text"'} if tok else None)
         out = []
         for row in missing:
-            hits = find_for_file(row, clients.get(row["file"], ""), h, diag)
-            out.append(dict(row, hits=hits))
+            every = []
+            hits = find_for_file(row, clients.get(row["file"], ""), h, diag, keep_all=every)
+            dates = chosen_dates(every, key_date=row.get("key_date", ""))
+            out.append(dict(row, hits=hits,
+                            email_dates={k: v.isoformat() for k, v in dates.items()}))
             with _LOCK:
                 _STATE["done"] += 1
                 _STATE["results"] = list(out)
@@ -206,6 +411,7 @@ def run(missing: list[dict], clients: dict[str, str]) -> None:
         with _LOCK:
             _STATE["error"] = str(e)[:200]
     finally:
+        diag.pop("_delegated", None)
         with _LOCK:
             _STATE.update(running=False, finished=time.time())
 

@@ -50,6 +50,7 @@ import datetime as dt
 import functools
 import os
 import re
+import time
 
 from flask import (
     Blueprint,
@@ -501,6 +502,17 @@ def _keeper_tick():
         audit_web.run_daily_coordinator_alerts()
     except Exception:
         pass
+    try:  # search the coordinators' email for missing surveys and dates, once a day
+        import survey_finder as sf
+        st = sf.state()
+        if not st["running"] and (not st["finished"] or time.time() - st["finished"] > 20 * 3600):
+            files, prog = mw_live.audited_in_window(), mw_live.audit_progress()
+            if files and (prog.get("window_complete") or prog.get("complete")):
+                missing, clients = _survey_inputs()
+                if missing:
+                    sf.start(missing, clients)
+    except Exception:
+        pass
     try:  # diary write-back from SIT's Plan de Viajes (on; MW_DIARY_WRITE=0 turns it off)
         import milestone_apply
         milestone_apply.run_once()
@@ -611,12 +623,18 @@ _DATE_ALERT_ADMINS = ("bbrill@thelsa.com", "bill.brill@inflectionpointnow.com", 
                       "sarareyes@thelsa.com")
 
 
-_NEED_LABEL = {"survey": "survey", "pack": "pack/load date", "delivery": "delivery date"}
+_NEED_LABEL = {"survey": "survey", "pack": "pack/load date", "delivery": "delivery date",
+               "load": "load", "packing": "packing"}
 
 
 def _survey_inputs():
-    files, _ = _book()
-    sit, _ = _sit()
+    # read what's loaded; never (re)start the book or the plan from here
+    files = mw_live.audited_in_window()
+    try:
+        import sit_milestones as sm
+        sit = sit_days(sm.state().get("jobs"))
+    except Exception:
+        sit = {}
     snap = faim_snapshot(files, sit=sit)
     clients = {str(f.get("job") or ""): str(f.get("client") or "") for f in files or []
                if isinstance(f, dict)}
@@ -675,6 +693,8 @@ def faim_survey_finder():
             hh = "".join(
                 f"<div class=hit><span class=tag>{e(_NEED_LABEL.get(x.get('need', 'survey')))}</span> "
                 f"<b>{e(x['date'])}</b> &middot; "
+                + (f"<span class=found>date in the email: {e(_NEED_LABEL.get(x.get('kind'), x.get('kind')))} "
+                   f"{e(x['found_date'])}</span> &middot; " if x.get("found_date") else "")
                 + (f"<a href='{e(x['link'])}' target=_blank>{e(x['subject']) or '(no subject)'}</a>"
                    if x["link"] else e(x["subject"]))
                 + f"<br><span class=m>{e(x['from'])} &middot; mailbox {e(x['mailbox'].split('@')[0])}"
@@ -684,6 +704,10 @@ def faim_survey_finder():
         else:
             hh = "<span class=m>No email found</span>"
         needs = ", ".join(_NEED_LABEL.get(n, n) for n in r.get("needs") or ["survey"])
+        if r.get("email_dates"):
+            hh = ("<div class=put>Going into Moveware: " + ", ".join(
+                f"{e(_NEED_LABEL.get(k, k))} {e(v)}" for k, v in sorted(r["email_dates"].items()))
+                + "</div>") + hh
         rows.append(f"<tr><td class=n>{e(r['file'])}</td><td>{e(r['coord'])}</td>"
                     f"<td>{e(needs)}</td><td>{e(r['key_date'])}</td><td>{hh}</td></tr>")
     d = st.get("diag") or {}
@@ -692,7 +716,18 @@ def faim_survey_finder():
               if st["running"] else
               (f"Could not finish: {e(st['error'])}" if st.get("error") else
                f"Done. {len(found)} of {len(res)} files have an email that may show what is missing."))
-    if d.get("searches") and d.get("forbidden") == d.get("searches"):
+    read_ok = d.get("read_mailboxes") or []
+    refused = [m for m in (d.get("refused_mailboxes") or []) if m not in read_ok]
+    if read_ok or refused:
+        status += (f" Mailboxes read: {e(', '.join(m.split('@')[0] for m in read_ok) or 'none')}."
+                   + (f" Not reachable yet: {e(', '.join(m.split('@')[0] for m in refused))} "
+                      "(each person can connect their mailbox once in the app, or IT can give the "
+                      "app read access)." if refused else ""))
+    n_dates = sum(1 for r in res if r.get("email_dates"))
+    if n_dates:
+        status += (f" {n_dates} files have a pack/load or delivery date in an email; those go into "
+                   "Moveware automatically (never over a date someone already entered).")
+    if False and d.get("searches") and d.get("forbidden") == d.get("searches"):
         status = ("Not possible yet: Microsoft 365 does not let the app read the coordinators' "
                   "mailboxes. IT (C&eacute;sar) needs to give the app read-only access to those "
                   "mailboxes; once that is done, press &ldquo;Search again&rdquo;.")
@@ -706,7 +741,7 @@ body{{font:14px/1.45 system-ui,sans-serif;margin:24px auto;max-width:1150px;padd
 table{{border-collapse:collapse;width:100%;background:#fff;margin:12px 0 28px}}
 td,th{{border-bottom:1px solid #e7e5e4;padding:8px;text-align:left;vertical-align:top}}
 th{{font-size:12px;text-transform:uppercase;color:#78716c}} .n{{white-space:nowrap}}
-.m{{color:#78716c;font-size:12px}} .s{{color:#44403c;font-size:12px}} .hit{{margin-bottom:8px}} .tag{{background:#f5f5f4;border-radius:4px;padding:1px 6px;font-size:11px}}
+.m{{color:#78716c;font-size:12px}} .s{{color:#44403c;font-size:12px}} .hit{{margin-bottom:8px}} .tag{{background:#f5f5f4;border-radius:4px;padding:1px 6px;font-size:11px}} .found{{color:#166534}} .put{{background:#ecfdf5;border:1px solid #bbf7d0;border-radius:6px;padding:4px 8px;margin-bottom:6px}}
 .box{{background:#eef4ff;border:1px solid #c9dafc;padding:10px 14px;border-radius:8px}}
 a{{color:#1d4ed8}}</style></head><body>
 <p><a href="/faim">&larr; Dashboard</a></p>

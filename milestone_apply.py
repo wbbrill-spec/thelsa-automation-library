@@ -154,6 +154,7 @@ def apply(steps: list, job_ids: dict, now=None) -> dict:
         job = str(s.get("job") or "")
         jid = job_ids.get(job)
         rec = {"at": now.isoformat(), "job": job, "milestone": s.get("milestone"), "action": s["action"],
+               "source": s.get("source", "plan de viajes"),
                "plan_date": s.get("plan_date"), "user": user}
         if not jid:
             out["skipped"] += 1
@@ -201,6 +202,43 @@ def _forget(job: str) -> None:
         pass
 
 
+def _email_steps(plan_steps: list) -> list:
+    """Pack/load and delivery dates the survey finder read from the coordinators'
+    emails (Bill, 31 Oct 2026: "if you find any of those dates, please update
+    moveware"). Same rules as the Plan de Viajes dates (milestone_plan): only past
+    dates, never over a date a person completed; Plan de Viajes wins where it has
+    the same milestone for the file."""
+    try:
+        import mw_live
+        import milestone_plan as mp
+        import sit_milestones as sm
+        import survey_finder as sf
+    except Exception:
+        return []
+    sit_jobs = (sm.state().get("jobs") or {})
+    out = []
+    for job, job_type, sj in sf.email_steps():
+        have = sit_jobs.get(job) or sit_jobs.get(job.upper()) or {}
+        mine = {k: v for k, v in sj.items()
+                if not ((have.get(k) or {}).get("status") == "done"
+                        or (k == "load" and (have.get("pack") or {}).get("status") == "done"))}
+        if not mine or any(s.get("job") == job for s in plan_steps
+                           if s.get("milestone") in ("load", "pack", "delivery")
+                           and s.get("action") in ("create", "update")):
+            continue
+        try:
+            body = mw_live._get_timed(f"/jobs/{job}/activities", 15) or {}
+            acts = body.get("activities") or []
+        except Exception:
+            continue
+        for st in mp.plan_for_job(job, mine, acts, job_type=job_type):
+            if st.get("action") == "create":
+                st["body"]["notes"] = "From the coordinator's email (automation)"
+            st["source"] = "email"
+            out.append(st)
+    return out
+
+
 _LAST = {"at": 0.0, "result": None}
 
 
@@ -215,12 +253,17 @@ def run_once(min_gap_s: int = 3 * 3600) -> dict | None:
         import mw_live
         audit_web._build_milestone_plan()
         steps = audit_web._MS_PLAN.get("steps") or []
-        if not steps or audit_web._MS_PLAN.get("error"):
+        plan_ready = bool(steps) and not audit_web._MS_PLAN.get("error")
+        if not plan_ready:
             # Plan not ready yet (book or Plan de Viajes still loading): don't use
             # up the 3-hour slot — try again on the next keeper tick (30 min).
+            # Dates read from emails can still go in.
             _LAST["at"] = 0.0
-            _LAST["result"] = {"skipped_reason": "plan not ready", "error": audit_web._MS_PLAN.get("error")}
-            return _LAST["result"]
+            steps = []
+            if not __import__("survey_finder").email_steps():
+                _LAST["result"] = {"skipped_reason": "plan not ready",
+                                   "error": audit_web._MS_PLAN.get("error")}
+                return _LAST["result"]
         ids = {}
         for f in mw_live.audited_files() or []:
             if f.get("job") and f.get("job_id"):
@@ -238,6 +281,7 @@ def run_once(min_gap_s: int = 3 * 3600) -> dict | None:
                     pass
             elif j.isdigit() and j not in ids:
                 ids[j] = j
+        steps = steps + _email_steps(steps)
         res = apply(steps, ids)
     except Exception as e:                               # noqa: BLE001
         res = {"error": f"{type(e).__name__}: {e}"[:300]}

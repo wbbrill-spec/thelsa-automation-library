@@ -1199,3 +1199,16 @@ def test_feed_is_private(monkeypatch):
     # Render private network (internal hostname, no forwarding headers) → allowed.
     r = c.get("/audit/feed.json", headers={"Host": "thelsa-automation-library:10000"})
     assert r.status_code == 200 and "to_invoice_worklist" in r.get_json()
+
+
+def test_lost_and_cancelled_never_ready_to_invoice(monkeypatch):
+    monkeypatch.setattr(aw, "_finance_invoice_view", lambda: {"invoiced": set(), "cutoff": "2099-12-31"})
+    past = TODAY - dt.timedelta(days=5)
+    files = [_mkfile(job=1, job_type="EXP", status="L", invoiced=False, sell=1000, pack=past),
+             _mkfile(job=2, job_type="EXP", status="C", invoiced=False, sell=1000, pack=past),
+             _mkfile(job=3, job_type="EXP", status="W", invoiced=False, sell=1000, pack=past,
+                     currency="USD", currency_src="USD")]
+    aw.check_calculations(files)
+    m = aw.compute_metrics(files, live_counts=LIVE_COUNTS, cost_available=False)
+    assert [r["job"] for r in m["to_invoice_worklist"]] == [3]
+    assert m["to_invoice_worklist"][0]["orig_currency"] == "USD" and m["to_invoice_worklist"][0]["orig_value"] == 1000

@@ -686,6 +686,20 @@ def _finance_invoice_view() -> dict:
     return {"invoiced": inv, "cutoff": cutoff}
 
 
+def _orig_money(f, value):
+    """The amount in the file's OWN currency (the page shows everything in the display
+    currency; the TMS dashboard shows each file in its own — pesos stay pesos)."""
+    src = f.get("currency_src")
+    if not src or src == f.get("currency"):
+        return {"orig_currency": str(f.get("currency") or ""), "orig_value": value}
+    try:
+        import fx
+        r = fx.rate(src, f.get("currency"))
+        return {"orig_currency": src, "orig_value": round(value / r, 2) if r else value}
+    except Exception:
+        return {"orig_currency": str(f.get("currency") or ""), "orig_value": value}
+
+
 def compute_metrics(files, live_counts=None, cost_available=True):
     today = dt.date.today()
     ms = today.replace(day=1)
@@ -753,13 +767,18 @@ def compute_metrics(files, live_counts=None, cost_available=True):
     def _priced(f):
         return _bill_value(f) > PLACEHOLDER_PRICE
 
-    to_invoice = [f for f in files if not f["invoiced"] and _invoiceable(f)
+    # Lost/lead (L) and cancelled (C) files are never billable (the executive view
+    # already applied this; the worklist did not — found 30 Oct 2026).
+    def _open(f):
+        return str(f.get("status") or "").strip().upper() not in ("L", "C")
+
+    to_invoice = [f for f in files if not f["invoiced"] and _invoiceable(f) and _open(f)
                   and not _billed_elsewhere(f) and _in_scope(f) and _priced(f)]
     invoiceable_n = len(to_invoice)
     invoiceable_val = round(sum(_bill_value(f) for f in to_invoice), 2)
 
     # US Embassy files packed but NOT yet delivered — in transit, not yet billable.
-    embassy_transit = [f for f in files if f.get("is_embassy") and _packed(f) and not _delivered(f)]
+    embassy_transit = [f for f in files if f.get("is_embassy") and _packed(f) and not _delivered(f) and _open(f)]
     embassy_transit_n = len(embassy_transit)
     embassy_transit_val = round(sum(_bill_value(f) for f in embassy_transit), 2)
 
@@ -778,6 +797,7 @@ def compute_metrics(files, live_counts=None, cost_available=True):
           "coordinator_email": f.get("coordinator_email") or "",
           "value": _bill_value(f), "embassy": bool(f.get("is_embassy")),
           "currency": str(f.get("currency") or ""),
+          **_orig_money(f, _bill_value(f)),
           "status": str(f.get("status") or "").strip().upper(),
           "pack": f["pack"].isoformat() if f.get("pack") else None,
           "delivery": f["delivery"].isoformat() if f.get("delivery") else None}
@@ -977,6 +997,7 @@ def compute_metrics(files, live_counts=None, cost_available=True):
         "embassy_transit_list": [{"job": f.get("job"), "client": f.get("client") or "",
                                   "coordinator": f.get("coordinator") or "",
                                   "value": _bill_value(f), "currency": str(f.get("currency") or ""),
+                                  **_orig_money(f, _bill_value(f)),
                                   "pack": f["pack"].isoformat() if f.get("pack") else None}
                                  for f in embassy_transit],
         "pct_billed": pct_billed, "to_invoice_worklist": to_invoice_worklist,

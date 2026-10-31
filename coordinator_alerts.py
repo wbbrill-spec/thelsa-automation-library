@@ -221,7 +221,7 @@ def _file_lines(rows):
         when = (f"packed {r['pack']}" if r.get("pack")
                 else (f"delivered {r['delivery']}" if r.get("delivery") else ""))
         out.append(f"  • Job {r['job']} — {r.get('client','')}{tag}  "
-                   f"(value {_fmt(r.get('value', 0))}{'; ' + when if when else ''})")
+                   f"(value {_fmt(r.get('value', 0))}{' ' + r['currency'] if r.get('currency') else ''}{'; ' + when if when else ''})")
     return out
 
 

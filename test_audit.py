@@ -1154,17 +1154,17 @@ def test_alert_emails_only_cover_booked_files_from_the_last_year():
     assert ca.recent_booked({"status": "W", "pack": None, "delivery": dt.date(2026, 1, 5)}, t)
 
 
-def test_ready_to_invoice_trusts_finance_and_skips_too_recent(monkeypatch):
-    # Bill, 30 Oct 2026: invoices are raised in CONTPAQi, not Moveware; 110887 was
-    # invoiced per Finance yet flagged. Finance-invoiced files and moves newer than
-    # the Finance report are never called unbilled.
-    old = TODAY - dt.timedelta(days=200)
-    files = [_mkfile(job="110887", status="W", invoiced=False, inv_amt=0, sell=100, pack=old),   # invoiced in Finance
-             _mkfile(job="110900", status="W", invoiced=False, inv_amt=0, sell=100, pack=old),   # really unbilled
-             _mkfile(job="111200", status="W", invoiced=False, inv_amt=0, sell=100,
-                     pack=TODAY - dt.timedelta(days=5))]                                        # newer than the report
-    cut = (TODAY - dt.timedelta(days=30)).isoformat()
-    monkeypatch.setattr(aw, "_finance_invoice_view", lambda: {"invoiced": {"110887"}, "cutoff": cut})
+def test_ready_to_invoice_rules_from_lupita(monkeypatch):
+    # Lupita, 30 Oct 2026: October's list was right; 2026 only; 123 = placeholder price
+    # (US Embassy, not yet packed). Finance-invoiced files (110887) are never listed.
+    monkeypatch.setenv("INVOICE_LIST_FROM", (TODAY - dt.timedelta(days=100)).isoformat())
+    recent = TODAY - dt.timedelta(days=10)
+    files = [_mkfile(job="110887", status="W", invoiced=False, inv_amt=0, sell=6705, pack=recent),  # Finance invoiced
+             _mkfile(job="111136", status="W", invoiced=False, inv_amt=0, sell=112197, pack=recent),  # really unbilled
+             _mkfile(job="111202", status="W", invoiced=False, inv_amt=0, sell=123, pack=recent),     # placeholder price
+             _mkfile(job="106306", status="W", invoiced=False, inv_amt=0, sell=900,
+                     pack=TODAY - dt.timedelta(days=400))]                                          # before the window
+    monkeypatch.setattr(aw, "_finance_invoice_view", lambda: {"invoiced": {"110887"}, "cutoff": ""})
     aw.check_calculations(files)
     m = aw.compute_metrics(files, live_counts=LIVE_COUNTS, cost_available=False)
-    assert [r["job"] for r in m["to_invoice_worklist"]] == ["110900"]
+    assert [r["job"] for r in m["to_invoice_worklist"]] == ["111136"]

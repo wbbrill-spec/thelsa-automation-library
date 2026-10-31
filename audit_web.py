@@ -662,6 +662,11 @@ def _in_month(day, ms, me):
     return bool(day and ms <= day < me)
 
 
+# A sale price at or below this is a placeholder, not a price (US Embassy files are
+# opened at 123 until weighed and packed — Lupita, 30 Oct 2026).
+PLACEHOLDER_PRICE = float(os.environ.get("INVOICE_PLACEHOLDER_MAX", "500"))
+
+
 def _finance_invoice_view() -> dict:
     """{'invoiced': set of base file numbers Finance shows as invoiced,
         'cutoff': 'YYYY-MM-DD' of the latest invoice in the report ('' if none)}."""
@@ -723,14 +728,25 @@ def compute_metrics(files, live_counts=None, cost_available=True):
     def _billed_elsewhere(f):
         return _base_file(f.get("job")) in fin["invoiced"]
 
-    def _too_recent(f):
-        if not fin["cutoff"]:
-            return True                                  # no Finance report loaded: can't tell
+    # Lupita, 30 Oct 2026, after checking October's list file by file: it was right
+    # (none already invoiced); "focus on 2026 only"; US Embassy files carrying the
+    # 123 placeholder have no sale price yet ("will be packed") and are not billable.
+    # Recent files are judged on Moveware's own invoices (the Finance report lags),
+    # older ones on Moveware OR Finance.
+    try:
+        _from = dt.date.fromisoformat(os.environ.get("INVOICE_LIST_FROM", "2026-01-01"))
+    except ValueError:
+        _from = dt.date(2026, 1, 1)
+
+    def _in_scope(f):
         d = max([x for x in (f.get("pack"), f.get("delivery")) if x and x <= today], default=None)
-        return bool(d and d.isoformat() > fin["cutoff"])
+        return bool(d and d >= _from)
+
+    def _priced(f):
+        return _bill_value(f) > PLACEHOLDER_PRICE
 
     to_invoice = [f for f in files if not f["invoiced"] and _invoiceable(f)
-                  and not _billed_elsewhere(f) and not _too_recent(f)]
+                  and not _billed_elsewhere(f) and _in_scope(f) and _priced(f)]
     invoiceable_n = len(to_invoice)
     invoiceable_val = round(sum(_bill_value(f) for f in to_invoice), 2)
 
@@ -753,6 +769,7 @@ def compute_metrics(files, live_counts=None, cost_available=True):
           "coordinator": f.get("coordinator") or "Unassigned",
           "coordinator_email": f.get("coordinator_email") or "",
           "value": _bill_value(f), "embassy": bool(f.get("is_embassy")),
+          "currency": str(f.get("currency") or ""),
           "status": str(f.get("status") or "").strip().upper(),
           "pack": f["pack"].isoformat() if f.get("pack") else None,
           "delivery": f["delivery"].isoformat() if f.get("delivery") else None}
@@ -2084,7 +2101,7 @@ TEMPLATE = r"""<!DOCTYPE html>
     <td class="num">{{ r.job }}{% if r.embassy %} <span class="pill rev" title="US Embassy or Consulate">EMB</span>{% endif %}</td>
     <td>{{ r.client }}</td><td>{{ r.coordinator }}</td>
     <td>{{ r.pack or '—' }}</td><td>{{ r.delivery or '—' }}</td>
-    <td class="num warn">{{ "{:,.0f}".format(r.value) }}</td></tr>{% endfor %}</table>
+    <td class="num warn">{{ "{:,.0f}".format(r.value) }} {{ r.currency }}</td></tr>{% endfor %}</table>
   {% if m.to_invoice_worklist|length > 40 %}<p class="sub" style="color:var(--muted)">Showing top 40 of {{ m.to_invoice_worklist|length }} by value.</p>{% endif %}
   {% endif %}
   {% if m.cost_available %}

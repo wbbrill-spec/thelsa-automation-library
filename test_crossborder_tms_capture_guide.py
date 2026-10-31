@@ -132,3 +132,56 @@ def test_a_job_with_no_rep_gets_no_stand_in():
 def test_the_branch_code_is_read_from_the_list_row_when_the_detail_is_silent():
     s = tms.build_shipment(row(), {}, today=TODAY)
     assert s.extra["branch_code"] == "SLU"
+
+
+# ── which dates a job type is actually supposed to have ──────────────────────
+# Bill, 31 Oct 2026: "inbound Mexico files where Thelsa is just doing the import
+# and delivery will NOT necessarily have a pack date… outbound agent bookings
+# from Mexico will NOT have a delivery date… domestic moves will have a delivery
+# date." Flagging those as gaps is how an alert list becomes noise and gets
+# switched off — which already happened once to Moveware's own reminders.
+def test_an_agent_import_is_not_asked_for_a_pack_date():
+    from crossborder.models import Stage
+    dates = {"uplift": None, "delivery": None, "clearance": None, "ops_complete": None}
+    flags = tms.date_gap_flags(dates, Stage.TO_BORDER, TODAY, "IMA")
+    assert "no_uplift_date" not in flags
+
+
+def test_an_agent_export_is_not_asked_for_a_delivery_date():
+    from crossborder.models import Stage
+    dates = {"uplift": dt.date(2026, 10, 1), "delivery": None,
+             "clearance": None, "ops_complete": None}
+    flags = tms.date_gap_flags(dates, Stage.ONWARD, TODAY, "EXA")
+    assert "no_delivery_date" not in flags
+
+
+def test_a_domestic_move_is_still_asked_for_both():
+    from crossborder.models import Stage
+    dates = {"uplift": None, "delivery": None, "clearance": None, "ops_complete": None}
+    flags = tms.date_gap_flags(dates, Stage.TO_BORDER, TODAY, "DIN")
+    assert "no_uplift_date" in flags
+
+
+def test_a_direct_import_still_owes_a_delivery_date():
+    """IMP is Thelsa's own client, door to door — both dates are ours."""
+    from crossborder.models import Stage
+    dates = {"uplift": dt.date(2026, 10, 1), "delivery": None,
+             "clearance": None, "ops_complete": None}
+    flags = tms.date_gap_flags(dates, Stage.AT_HUB, TODAY, "IMP")
+    assert "no_delivery_date" in flags
+
+
+def test_an_unknown_job_type_is_asked_for_everything():
+    """Better a flag we can dismiss than a date silently never chased."""
+    from crossborder.models import Stage
+    dates = {"uplift": None, "delivery": None, "clearance": None, "ops_complete": None}
+    flags = tms.date_gap_flags(dates, Stage.TO_BORDER, TODAY, "")
+    assert "no_uplift_date" in flags
+
+
+def test_the_job_type_combo_number_is_ignored():
+    """EXA1, EXA3 … are job-type combos of the same service code."""
+    from crossborder.models import Stage
+    dates = {"uplift": dt.date(2026, 10, 1), "delivery": None,
+             "clearance": None, "ops_complete": None}
+    assert "no_delivery_date" not in tms.date_gap_flags(dates, Stage.ONWARD, TODAY, "EXA3")

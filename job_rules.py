@@ -83,3 +83,35 @@ def confirmed_dates(activities) -> dict:
             out[m] = days[0] if m in ("pack", "load") else days[-1]
     out["has_load"] = any(is_milestone(a, "load") for a in activities or [])
     return out
+
+
+# ── When a file may be INVOICED (Bill, 30 Oct 2026) ─────────────────────────────
+#   * inbound — delivered somewhere in Mexico (IMP, IMA): invoice when it DELIVERS;
+#   * outbound (EXP, EXA) and domestic (DIN): invoice when it LOADS (uplift/pack);
+#   * US Embassy and consulates: only when the move is COMPLETED (delivered) —
+#     applied by the callers, who know whether a file is an embassy file;
+#   * any other type (EXT, STG…): whichever of load or delivery comes first.
+INVOICE_ON_DELIVERY_TYPES = _codes("INVOICE_ON_DELIVERY_TYPES", ["IMP", "IMA"])
+INVOICE_ON_LOAD_TYPES = _codes("INVOICE_ON_LOAD_TYPES", ["EXP", "EXA", "DIN"])
+
+
+def invoice_trigger(job_type) -> str:
+    """'delivery', 'load' or 'either' — the move milestone that makes a file billable."""
+    t = _base(job_type)
+    if t in INVOICE_ON_DELIVERY_TYPES:
+        return "delivery"
+    if t in INVOICE_ON_LOAD_TYPES:
+        return "load"
+    return "either"
+
+
+def invoice_due_date(job_type, load_date, delivery_date, embassy: bool = False):
+    """The date from which a file is billable (None if that milestone has no date)."""
+    if embassy:
+        return delivery_date
+    trig = invoice_trigger(job_type)
+    if trig == "delivery":
+        return delivery_date
+    if trig == "load":
+        return load_date
+    return min([d for d in (load_date, delivery_date) if d], default=None)

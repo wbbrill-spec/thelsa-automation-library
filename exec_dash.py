@@ -246,11 +246,40 @@ def build(files, finance: dict, today: dt.date | None = None, costing: dict | No
             pack, deliv = _d(f.get("pack")), _d(f.get("delivery"))
             packed = bool(pack and pack <= today)
             delivered = bool(deliv and deliv <= today)
-            milestone = max([x for x in (pack, deliv) if x and x <= today], default=None)
-            if not _in(milestone, p):
+            emb = _is_embassy(f, ftype(f.get("job")))
+            # Billable from the job type's trigger (Bill, 30 Oct 2026): inbound at
+            # delivery, outbound/domestic at load, embassy when delivered.
+            due = job_rules.invoice_due_date(f.get("job_type"), pack, deliv, embassy=emb)
+            due = due if (due and due <= today) else None
+            if emb and not delivered:
+                # Packed but not delivered: shown as in transit, never as ready.
+                if packed and _in(pack, p) and _invoiced(f):
+                    active_n += 1
+                    billed_n += 1
+                elif packed and _in(pack, p):
+                    active_n += 1
+                    q = pair(f.get("sell"), f.get("currency"))
+                    if to_mxn(q, s_rate) > qmax:   # a mis-keyed quote never reaches any total
+                        checks.append({"job": f.get("job"), "client": f.get("client") or "",
+                                       "coordinator": f.get("coordinator") or "",
+                                       "pack": pack.isoformat(), "delivery": None,
+                                       "job_type": f.get("job_type") or "", "status": st,
+                                       "embassy": True, "value": _r(q),
+                                       "ccy": fx.normalize(f.get("currency"), None) or "",
+                                       "value_mxn": round(to_mxn(q, s_rate))})
+                        continue
+                    emb_transit.append({"job": f.get("job"), "client": f.get("client") or "",
+                                        "coordinator": f.get("coordinator") or "",
+                                        "pack": pack.isoformat(), "delivery": None,
+                                        "job_type": f.get("job_type") or "", "status": st,
+                                        "embassy": True, "value": _r(q),
+                                        "ccy": fx.normalize(f.get("currency"), None) or "",
+                                        "value_mxn": round(to_mxn(q, s_rate))})
+                    _add(emb_val, q)
+                continue
+            if not _in(due, p):
                 continue
             active_n += 1
-            emb = _is_embassy(f, ftype(f.get("job")))
             if _invoiced(f):
                 billed_n += 1
                 continue
@@ -269,11 +298,6 @@ def build(files, finance: dict, today: dt.date | None = None, costing: dict | No
                    "value_mxn": round(to_mxn(q, s_rate))}
             if to_mxn(q, s_rate) > qmax:
                 checks.append(row)        # a mis-keyed quote never reaches any total
-                continue
-            if emb and not delivered:
-                if packed:
-                    emb_transit.append(row)
-                    _add(emb_val, q)
                 continue
             ready.append(row)
             _add(ready_val, q)

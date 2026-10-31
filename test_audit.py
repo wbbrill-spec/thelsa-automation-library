@@ -1168,3 +1168,34 @@ def test_ready_to_invoice_rules_from_lupita(monkeypatch):
     aw.check_calculations(files)
     m = aw.compute_metrics(files, live_counts=LIVE_COUNTS, cost_available=False)
     assert [r["job"] for r in m["to_invoice_worklist"]] == ["111136"]
+
+
+# ── Invoicing trigger by direction (Bill, 30 Oct 2026) ──────────────────────────
+def test_invoice_timing_inbound_at_delivery_outbound_at_load(monkeypatch):
+    monkeypatch.setattr(aw, "_finance_invoice_view", lambda: {"invoiced": set(), "cutoff": "2099-12-31"})
+    past = TODAY - dt.timedelta(days=5)
+    files = [
+        _mkfile(job=1, job_type="IMP", invoiced=False, sell=1000, pack=past),                 # inbound, not delivered
+        _mkfile(job=2, job_type="IMA", invoiced=False, sell=1000, delivery=past),             # inbound, delivered
+        _mkfile(job=3, job_type="EXP", invoiced=False, sell=1000, pack=past),                 # outbound, loaded
+        _mkfile(job=4, job_type="EXA", invoiced=False, sell=1000),                            # outbound, not loaded
+        _mkfile(job=5, job_type="DIN", invoiced=False, sell=1000, pack=past),                 # domestic, loaded
+        _mkfile(job=6, job_type="DIN", invoiced=False, sell=1000, delivery=past),             # domestic, no load date
+    ]
+    aw.check_calculations(files)
+    m = aw.compute_metrics(files, live_counts=LIVE_COUNTS, cost_available=False)
+    assert {r["job"] for r in m["to_invoice_worklist"]} == {2, 3, 5}
+
+
+def test_feed_is_private(monkeypatch):
+    import app as webapp
+    monkeypatch.setattr(aw, "_load_checked", lambda: ([], False, {}))
+    c = webapp.app.test_client()
+    # Public edge always adds X-Forwarded-For → refused.
+    r = c.get("/audit/feed.json", headers={"Host": "thelsa.inflectionpointnow.com", "X-Forwarded-For": "1.2.3.4"})
+    assert r.status_code == 404
+    r = c.get("/audit/feed.json", headers={"Host": "thelsa-automation-library:10000", "X-Forwarded-For": "1.2.3.4"})
+    assert r.status_code == 404
+    # Render private network (internal hostname, no forwarding headers) → allowed.
+    r = c.get("/audit/feed.json", headers={"Host": "thelsa-automation-library:10000"})
+    assert r.status_code == 200 and "to_invoice_worklist" in r.get_json()

@@ -65,3 +65,16 @@ def test_duplicate_cost_line():
     rows = [r for r in cs.supplier_checks(parsed, {}, T) if r["check"] == "duplicate_line"]
     assert len(rows) == 1 and rows[0]["times"] == 2 and rows[0]["pos"] == ["500", "501"]
     assert rows[0]["difference"] == 1000.0
+
+
+def test_invoice_trigger_by_direction():
+    import datetime as dt
+    import job_rules as jr
+    L, D = dt.date(2026, 10, 1), dt.date(2026, 10, 20)
+    assert jr.invoice_trigger("IMP") == "delivery" and jr.invoice_trigger("IMA") == "delivery"
+    assert jr.invoice_trigger("EXP") == "load" and jr.invoice_trigger("EXA1") == "load"
+    assert jr.invoice_trigger("DIN") == "load" and jr.invoice_trigger("STG") == "either"
+    assert jr.invoice_due_date("IMP", L, D) == D and jr.invoice_due_date("IMP", L, None) is None
+    assert jr.invoice_due_date("EXP", L, D) == L
+    assert jr.invoice_due_date("EXP", L, D, embassy=True) == D
+    assert jr.invoice_due_date("EXT", L, D) == L

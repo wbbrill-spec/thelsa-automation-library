@@ -22,6 +22,7 @@ dict shape returned below. Nothing else needs to change.
 """
 import datetime as dt
 import functools
+import job_rules
 import os
 
 from flask import (
@@ -713,10 +714,17 @@ def compute_metrics(files, live_counts=None, cost_available=True):
     def _delivered(f):
         return bool(f.get("delivery") and f["delivery"] <= today)
 
+    # When a file becomes billable (Bill, 30 Oct 2026 — job_rules.invoice_due_date):
+    # inbound (IMP/IMA) at DELIVERY, outbound (EXP/EXA) and domestic (DIN) at LOAD,
+    # US Embassy/Consulate only when delivered. `pack` here is the load date
+    # (MoveWare Uplift, else Pack — see mw_live._map_job).
+    def _due(f):
+        return job_rules.invoice_due_date(f.get("job_type"), f.get("pack"), f.get("delivery"),
+                                          embassy=bool(f.get("is_embassy")))
+
     def _invoiceable(f):
-        if f.get("is_embassy"):
-            return _delivered(f)          # embassy: not until delivered
-        return _packed(f) or _delivered(f)
+        d = _due(f)
+        return bool(d and d <= today)
 
     # Thelsa invoices in CONTPAQi, not Moveware (Bill, 30 Oct 2026), and the app
     # stays out of the accounting system. So a file also counts as invoiced when
@@ -739,8 +747,8 @@ def compute_metrics(files, live_counts=None, cost_available=True):
         _from = dt.date(2026, 1, 1)
 
     def _in_scope(f):
-        d = max([x for x in (f.get("pack"), f.get("delivery")) if x and x <= today], default=None)
-        return bool(d and d >= _from)
+        d = _due(f)
+        return bool(d and _from <= d <= today)
 
     def _priced(f):
         return _bill_value(f) > PLACEHOLDER_PRICE
@@ -966,6 +974,11 @@ def compute_metrics(files, live_counts=None, cost_available=True):
         "invoiced_m": invoiced_m, "invoiced_m_val": invoiced_m_val,
         "invoiceable_n": invoiceable_n, "invoiceable_val": invoiceable_val,
         "embassy_transit_n": embassy_transit_n, "embassy_transit_val": embassy_transit_val,
+        "embassy_transit_list": [{"job": f.get("job"), "client": f.get("client") or "",
+                                  "coordinator": f.get("coordinator") or "",
+                                  "value": _bill_value(f), "currency": str(f.get("currency") or ""),
+                                  "pack": f["pack"].isoformat() if f.get("pack") else None}
+                                 for f in embassy_transit],
         "pct_billed": pct_billed, "to_invoice_worklist": to_invoice_worklist,
         "avg_gaps": avg_gaps, "avg_gap_val": avg_gap_val,
         "recovered": recovered, "recoverable": round(recoverable, 2),
@@ -1244,6 +1257,45 @@ def audit_refresh():
                     "note": ("Re-auditing in-window files now (~1-3 min); reload the "
                              "dashboard shortly to see coordinators populate." if ran else
                              "A refresh is already running — reload in a minute.")})
+
+
+# ── Feed for the TMS Executive Dashboard (Bill, 30 Oct 2026) ─────────────────────
+# The dashboard shows "ready to invoice" by reading THIS app's list, so the two can
+# never disagree. Reachable only (a) from Render's private network — the dashboard
+# calls http://thelsa-automation-library:10000/audit/feed.json; Render's public edge
+# always adds X-Forwarded-For, a private-network call never carries it — or (b) by a
+# signed-in user, or (c) with LIBRARY_FEED_KEY in the X-Feed-Key header if that is set.
+def _feed_allowed() -> bool:
+    import hmac
+    if session.get("user_email"):
+        return True
+    key = os.environ.get("LIBRARY_FEED_KEY") or ""
+    if key and hmac.compare_digest(request.headers.get("X-Feed-Key", ""), key):
+        return True
+    if request.headers.get("X-Forwarded-For") or request.headers.get("X-Forwarded-Host"):
+        return False
+    host = (request.headers.get("Host") or "").split(":")[0].lower()
+    return host in ("thelsa-automation-library", "localhost", "127.0.0.1") or host.endswith(".internal")
+
+
+@audit_bp.route("/audit/feed.json")
+def audit_feed():
+    from flask import jsonify
+    if not _feed_allowed():
+        return jsonify({"error": "not available"}), 404
+    files, is_live, counts = _load_checked()
+    m = compute_metrics(files, live_counts=counts, cost_available=not is_live)
+    keep = ("invoiceable_n", "invoiceable_val", "embassy_transit_n", "embassy_transit_val",
+            "pct_billed", "to_invoice_worklist")
+    out = {k: m.get(k) for k in keep}
+    out["embassy_transit"] = m.get("embassy_transit_list") or []
+    out.update({"live": is_live, "as_of": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+                "list_from": os.environ.get("INVOICE_LIST_FROM", "2026-01-01"),
+                "rules": "Billable: inbound (IMP/IMA) at delivery; outbound (EXP/EXA) and domestic (DIN) at load; "
+                         "US Embassy/Consulate when delivered; other types at load or delivery. Already invoiced = any "
+                         "Moveware invoice or an invoice in Finance's report. 2026 moves only; prices of 500 or less "
+                         "are placeholders and left off."})
+    return jsonify(out)
 
 
 @audit_bp.route("/audit/invoice-alerts")

@@ -30,6 +30,27 @@ SURVEY_WORDS = (
 NOT_SURVEY = ("satisfaction", "satisfaccion", "encuesta", "quality survey",
               "customer feedback", "nps")
 
+# Words that show an email is about a pack/load or a delivery (Bill, 31 Oct 2026:
+# "also scan their emails for the missing pack/load and delivery dates")
+PACK_WORDS = ("empaque", "embalaje", "carga", "cargar", "packing", "pack date",
+              "loading", "uplift", "pick up", "pickup", "recoleccion", "huacal")
+DELIVERY_WORDS = ("entrega", "descarga", "delivery", "delivered", "entregado",
+                  "desempaque", "unpacking", "pod ", "proof of delivery")
+_NEED_WORDS = {"pack": PACK_WORDS, "delivery": DELIVERY_WORDS}
+
+
+def date_hint(text: str, need: str) -> str | None:
+    t = _norm(text)
+    for w in _NEED_WORDS[need]:
+        if w in t:
+            return w
+    return None
+
+
+def hint_for(text: str, need: str) -> str | None:
+    return survey_hint(text) if need == "survey" else date_hint(text, need)
+
+
 _STATE = {"running": False, "started": None, "finished": None, "error": None,
           "files": 0, "done": 0, "searches": 0, "forbidden": 0, "results": [],
           "diag": None}
@@ -107,7 +128,9 @@ def _search(mbx: str, term: str, h: dict, diag: dict) -> list[dict]:
 
 
 def find_for_file(row: dict, client: str, h: dict, diag: dict) -> list[dict]:
-    """Survey-looking emails for one file, newest first (at most 3)."""
+    """Emails about what the file is missing (row["needs"]: survey / pack /
+    delivery), best first (at most 2 per need)."""
+    needs = row.get("needs") or ["survey"]
     number = str(row.get("file") or "")
     base = re.match(r"\d{5,7}", number)
     terms = [base.group(0)] if base else []
@@ -123,30 +146,38 @@ def find_for_file(row: dict, client: str, h: dict, diag: dict) -> list[dict]:
                     continue
                 seen.add(key)
                 text = (m.get("subject") or "") + " " + ms_graph._plain(m)
-                word = survey_hint(text)
-                if not word:
-                    continue
-                # matched on the surname only: the file number or full client
-                # name must also be there, or it may be another customer
                 by_number = bool(base) and base.group(0) in text
-                if not by_number and term == sn and _norm(client) not in _norm(text):
-                    by = "surname"
+                if by_number:
+                    by = "file number"
+                elif _norm(client) and _norm(client) in _norm(text):
+                    by = "customer name"
                 else:
-                    by = "file number" if by_number else "customer name"
-                hits.append({
-                    "mailbox": mbx,
-                    "date": (m.get("receivedDateTime") or "")[:10],
-                    "subject": (m.get("subject") or "")[:140],
-                    "from": ((m.get("from") or {}).get("emailAddress") or {}).get("address", ""),
-                    "word": word,
-                    "matched_by": by,
-                    "snippet": (m.get("bodyPreview") or "")[:220],
-                    "link": m.get("webLink") or "",
-                })
+                    by = "surname"
+                for need in needs:
+                    word = hint_for(text, need)
+                    if not word:
+                        continue
+                    hits.append({
+                        "need": need,
+                        "mailbox": mbx,
+                        "date": (m.get("receivedDateTime") or "")[:10],
+                        "subject": (m.get("subject") or "")[:140],
+                        "from": ((m.get("from") or {}).get("emailAddress") or {}).get("address", ""),
+                        "word": word,
+                        "matched_by": by,
+                        "snippet": (m.get("bodyPreview") or "")[:220],
+                        "link": m.get("webLink") or "",
+                    })
     order = {"file number": 0, "customer name": 1, "surname": 2}
-    hits.sort(key=lambda x: (order[x["matched_by"]], x["date"]), reverse=False)
-    # best match first: by file number, then the earliest email (a survey comes early)
-    return hits[:3]
+    out = []
+    for need in needs:
+        mine = [x for x in hits if x["need"] == need]
+        # best match first; a survey comes early (oldest first), a pack/delivery
+        # date is best confirmed by the latest email
+        mine.sort(key=lambda x: x["date"], reverse=(need != "survey"))
+        mine.sort(key=lambda x: order[x["matched_by"]])
+        out += mine[:2]
+    return out
 
 
 def run(missing: list[dict], clients: dict[str, str]) -> None:

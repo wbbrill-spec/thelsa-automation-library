@@ -611,13 +611,25 @@ _DATE_ALERT_ADMINS = ("bbrill@thelsa.com", "bill.brill@inflectionpointnow.com", 
                       "sarareyes@thelsa.com")
 
 
+_NEED_LABEL = {"survey": "survey", "pack": "pack/load date", "delivery": "delivery date"}
+
+
 def _survey_inputs():
     files, _ = _book()
     sit, _ = _sit()
     snap = faim_snapshot(files, sit=sit)
     clients = {str(f.get("job") or ""): str(f.get("client") or "") for f in files or []
                if isinstance(f, dict)}
-    return snap.get("missing_survey") or [], clients
+    rows = {}
+    for r in snap.get("missing_survey") or []:
+        rows[r["file"]] = dict(r, needs=["survey"])
+    for g in snap.get("date_gaps") or []:
+        r = rows.setdefault(g["file"], {"file": g["file"], "status": g["status"],
+                                        "type": g["type"], "coord": g["coord"],
+                                        "coord_email": g["coord_email"],
+                                        "key_date": g.get("key_date", ""), "needs": []})
+        r["needs"] += [m for m in g["missing"] if m not in r["needs"]]
+    return list(rows.values()), clients
 
 
 @faim_bp.route("/faim/survey-finder.json")
@@ -661,7 +673,8 @@ def faim_survey_finder():
     for r in sorted(res, key=lambda r: (not r["hits"], r["coord"], r["file"])):
         if r["hits"]:
             hh = "".join(
-                f"<div class=hit><b>{e(x['date'])}</b> &middot; "
+                f"<div class=hit><span class=tag>{e(_NEED_LABEL.get(x.get('need', 'survey')))}</span> "
+                f"<b>{e(x['date'])}</b> &middot; "
                 + (f"<a href='{e(x['link'])}' target=_blank>{e(x['subject']) or '(no subject)'}</a>"
                    if x["link"] else e(x["subject"]))
                 + f"<br><span class=m>{e(x['from'])} &middot; mailbox {e(x['mailbox'].split('@')[0])}"
@@ -669,15 +682,16 @@ def faim_survey_finder():
                   f"<br><span class=s>{e(x['snippet'])}</span></div>"
                 for x in r["hits"])
         else:
-            hh = "<span class=m>No survey email found</span>"
+            hh = "<span class=m>No email found</span>"
+        needs = ", ".join(_NEED_LABEL.get(n, n) for n in r.get("needs") or ["survey"])
         rows.append(f"<tr><td class=n>{e(r['file'])}</td><td>{e(r['coord'])}</td>"
-                    f"<td>{e(r['key_date'])}</td><td>{hh}</td></tr>")
+                    f"<td>{e(needs)}</td><td>{e(r['key_date'])}</td><td>{hh}</td></tr>")
     d = st.get("diag") or {}
     status = ("Searching the coordinators' email&hellip; "
               f"{st['done']} of {st['files']} files checked. This page refreshes by itself."
               if st["running"] else
               (f"Could not finish: {e(st['error'])}" if st.get("error") else
-               f"Done. {len(found)} of {len(res)} files have an email that looks like a survey."))
+               f"Done. {len(found)} of {len(res)} files have an email that may show what is missing."))
     if d.get("searches") and d.get("forbidden") == d.get("searches"):
         status = ("Not possible yet: Microsoft 365 does not let the app read the coordinators' "
                   "mailboxes. IT (C&eacute;sar) needs to give the app read-only access to those "
@@ -687,24 +701,25 @@ def faim_survey_finder():
     refresh = "<meta http-equiv=refresh content=15>" if st["running"] else ""
     return f"""<!doctype html><html><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">{refresh}
-<title>Missing surveys</title><style>
+<title>Missing surveys and dates</title><style>
 body{{font:14px/1.45 system-ui,sans-serif;margin:24px auto;max-width:1150px;padding:0 16px;color:#1d1d1f;background:#fafaf9}}
 table{{border-collapse:collapse;width:100%;background:#fff;margin:12px 0 28px}}
 td,th{{border-bottom:1px solid #e7e5e4;padding:8px;text-align:left;vertical-align:top}}
 th{{font-size:12px;text-transform:uppercase;color:#78716c}} .n{{white-space:nowrap}}
-.m{{color:#78716c;font-size:12px}} .s{{color:#44403c;font-size:12px}} .hit{{margin-bottom:8px}}
+.m{{color:#78716c;font-size:12px}} .s{{color:#44403c;font-size:12px}} .hit{{margin-bottom:8px}} .tag{{background:#f5f5f4;border-radius:4px;padding:1px 6px;font-size:11px}}
 .box{{background:#eef4ff;border:1px solid #c9dafc;padding:10px 14px;border-radius:8px}}
 a{{color:#1d4ed8}}</style></head><body>
 <p><a href="/faim">&larr; Dashboard</a></p>
-<h1>Missing surveys &mdash; what the coordinators' email shows</h1>
-<p>Files in the dashboard with <b>no survey date in Moveware</b>. For each one the app searched the coordinators'
-mailboxes (by file number and by the customer's surname) for an email about a survey, inspection or visit.
-Read-only: nothing is sent. Where an email is found, the survey date can be entered in Moveware.</p>
+<h1>Missing surveys and dates &mdash; what the coordinators' email shows</h1>
+<p>Files in the dashboard with <b>no survey, pack/load date or delivery date in Moveware</b>
+(no survey is expected on an agent inbound move). For each one the app searches the coordinators'
+mailboxes, by file number and by the customer's surname, for emails about the survey, the packing or loading,
+or the delivery. Read-only: nothing is sent. Where an email shows the date, it can be entered in Moveware.</p>
 <p class=box>{status}</p>
 <h2>By coordinator</h2>
-<table><tr><th>Coordinator</th><th>Files missing a survey</th><th>Survey email found</th></tr>{coord_rows}</table>
+<table><tr><th>Coordinator</th><th>Files missing something</th><th>Email found</th></tr>{coord_rows}</table>
 <h2>Files</h2>
-<table><tr><th>File</th><th>Coordinator</th><th>Move date</th><th>Survey emails found</th></tr>{''.join(rows)}</table>
+<table><tr><th>File</th><th>Coordinator</th><th>Missing</th><th>Move date</th><th>Emails found</th></tr>{''.join(rows)}</table>
 <p class=m><a href="/faim/survey-finder?run=1">Search again</a></p>
 </body></html>"""
 

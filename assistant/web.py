@@ -894,7 +894,7 @@ never anyone's emails or to-dos.</p>
   Reminder email:
   {% if h.alerts.enabled and h.alerts.auto %}<span class="ok">{{ 'sending' if h.alerts.send else 'drafts only' }}</span>,
     weekdays from {{ h.alerts.hour }}:00 Mexico City, cc {{ h.alerts.cc }}
-  {% else %}<span class="bad">off</span> (on Render remove DATE_ALERTS_ENABLED=0 / DATE_ALERTS_AUTO=0 / DRY_RUN=1){% endif %}
+  {% else %}<span class="bad">paused</span> (paused 29 Oct; to resume set DATE_ALERTS_ENABLED=1 on Render — the dashboard keeps showing the gaps meanwhile){% endif %}
   · Diary write-back: {% if h.writeback and h.writeback.on %}<span class="ok">on</span> as {{ h.writeback.user }},
     {{ h.writeback.written }} written{% if h.writeback.failed %}, <span class="bad">{{ h.writeback.failed }} failed</span>{% endif %} (last 200)
   {% else %}off{% if h.writeback %} — {{ h.writeback.blocked }}{% endif %}{% endif %}

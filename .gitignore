@@ -2,6 +2,8 @@
 web_credentials.json
 data/tokens/
 *.json
+# Company settings for the AI Assistant: no secrets (tokens stay in the environment)
+!assistant/tenants/*.json
 
 # Python
 __pycache__/

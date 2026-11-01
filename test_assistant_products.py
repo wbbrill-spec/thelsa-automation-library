@@ -230,3 +230,13 @@ def test_part_that_cannot_be_read_keeps_its_last_list(monkeypatch):
 def test_feed_for_another_company_is_refused():
     p = todo.parse_feed("quoterelay", todo.feed_payload("quoterelay", [item()], tenant="classicmoving"))
     assert not p["ok"] and "classicmoving" in p["error"]
+
+
+def test_company_settings_file_is_tracked_by_git():
+    """1 Nov 2026: *.json in .gitignore kept the settings file off the server, so the
+    live app saw no products and no key users. It must be in the repository."""
+    import subprocess, os
+    root = os.path.dirname(os.path.abspath(__file__))
+    out = subprocess.run(["git", "ls-files", "assistant/tenants/thelsa.json"], cwd=root,
+                         capture_output=True, text=True).stdout.strip()
+    assert out == "assistant/tenants/thelsa.json"

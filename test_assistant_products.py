@@ -207,3 +207,26 @@ def test_auditrack_build_runs_on_real_calculations(monkeypatch):
 def test_product_team_used_when_nobody_named():
     it = todo.clean_item("wa_leads", item(role="advisor", team=["team@thelsa.com", "not-an-address"]))
     assert todo.owners(it) == {"team@thelsa.com"}
+
+
+def test_part_that_cannot_be_read_keeps_its_last_list(monkeypatch):
+    first = [item(id="openinv:A1", kind="open_invoice", owner_email="m@thelsa.com"),
+             item(id="inv:9", kind="invoice_ready", owner_email="m@thelsa.com")]
+    monkeypatch.setattr(auditrack, "build", lambda: (first, True))
+    auditrack.BUILD_FAILED.clear()
+    auditrack.refresh()
+
+    def second():
+        auditrack.BUILD_FAILED.clear()
+        auditrack.BUILD_FAILED.add("open_invoice")          # Finance report unreadable this time
+        return [item(id="inv:9", kind="invoice_ready", owner_email="m@thelsa.com")], True
+    monkeypatch.setattr(auditrack, "build", second)
+    assert "kept from the last read" in auditrack.refresh()
+    kinds = sorted(i["kind"] for i in db.get_feed("auditrack")[0])
+    assert kinds == ["invoice_ready", "open_invoice"]
+    auditrack.BUILD_FAILED.clear()
+
+
+def test_feed_for_another_company_is_refused():
+    p = todo.parse_feed("quoterelay", todo.feed_payload("quoterelay", [item()], tenant="classicmoving"))
+    assert not p["ok"] and "classicmoving" in p["error"]

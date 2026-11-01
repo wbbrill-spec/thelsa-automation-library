@@ -32,6 +32,7 @@ import hashlib
 from . import db, todo
 
 PRODUCT = "auditrack"
+BUILD_FAILED: set = set()      # kinds whose source could not be read on the last build
 
 
 def _cfg() -> dict:
@@ -283,25 +284,35 @@ def build() -> tuple:
         raw = exec_dash.overlay_plan_dates(raw, sm.state().get("jobs"))
     except Exception:
         pass
+    # A part that cannot be read this time keeps its last list (from the saved
+    # snapshot) instead of vanishing from everyone's dashboard — the
+    # "a partial read never replaces the list" rule, per part (review, 1 Nov 2026).
+    failed = set()
     try:
         import commission_feed as cf
         if cfg.get("price_checks", True):
             items += price_items(cf.price_differences(raw), directory)
+    except Exception:
+        failed.add("price_check")
+    try:
+        import commission_feed as cf
         items += open_invoice_items((cf.open_invoices() or {}).get("open") or [], file_owner,
                                     int(cfg.get("open_invoice_min_days", 30)))
     except Exception:
-        pass
+        failed.add("open_invoice")
     if cfg.get("supplier_checks", True):
         try:
             v = audit_web._supplier_checks_view(raw)
             items += supplier_items(v.get("rows") or [], v.get("labels") or {})
         except Exception:
-            pass
+            failed.add("supplier_check")
     if cfg.get("plan_reviews", True):
         try:
             items += plan_items(audit_web._MS_PLAN.get("steps") or [], directory)
         except Exception:
-            pass
+            failed.add("plan_review")
+    BUILD_FAILED.clear()
+    BUILD_FAILED.update(failed)
     return items, complete
 
 
@@ -316,8 +327,18 @@ def refresh() -> str:
         return "error"
     parsed = todo.parse_feed(PRODUCT, todo.feed_payload(PRODUCT, raw, complete))
     if complete:
-        db.save_feed(PRODUCT, items=parsed["items"], ok=True)
-        return f"{len(parsed['items'])} to-dos"
+        items = parsed["items"]
+        kept = 0
+        if BUILD_FAILED:
+            prev, _at = db.get_feed(PRODUCT)
+            carry = [i for i in (prev or []) if i.get("kind") in BUILD_FAILED]
+            have = {i["id"] for i in items}
+            items += [i for i in carry if i["id"] not in have]
+            kept = len(carry)
+        db.save_feed(PRODUCT, items=items, ok=not BUILD_FAILED,
+                     error=(f"could not read {', '.join(sorted(BUILD_FAILED))}; kept their last list"
+                            if BUILD_FAILED else None))
+        return f"{len(items)} to-dos" + (f" ({kept} kept from the last read)" if kept else "")
     db.save_feed(PRODUCT, items=None, ok=False,
                  error="the file book is still being read; kept the last complete list")
     return "partial"

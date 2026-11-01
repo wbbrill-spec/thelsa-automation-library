@@ -103,7 +103,7 @@ def owner_ok(name: str, email: str) -> bool:
         import coordinator_alerts as ca
         return ca.name_matches(name, email)
     except Exception:
-        return True
+        return False                 # cannot check → not trusted (fail closed)
 
 
 def people_directory(files=None) -> dict:
@@ -228,6 +228,11 @@ def parse_feed(product: str, payload) -> dict:
         return {"ok": False, "error": "not a JSON object", "items": [], "complete": False}
     if payload.get("contract") != CONTRACT:
         return {"ok": False, "error": f"unknown contract {payload.get('contract')!r}",
+                "items": [], "complete": False}
+    if payload.get("tenant") and str(payload["tenant"]).lower() != tenant_id():
+        # A misconfigured URL or token must never put another company's
+        # to-dos on this company's dashboards.
+        return {"ok": False, "error": f"feed is for company {payload['tenant']!r}, not {tenant_id()!r}",
                 "items": [], "complete": False}
     items, seen, bad = [], set(), 0
     for raw in payload.get("items") or []:

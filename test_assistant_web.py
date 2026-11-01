@@ -689,3 +689,17 @@ def test_admin_shows_connected_products(client):
     login(client, "boss@thelsa.com")
     html = client.get("/assistant/admin").data.decode()
     assert "Connected products" in html and "QuoteRelay" in html and "waiting for its token" in html
+
+
+def test_double_click_save_makes_one_outlook_draft(client, monkeypatch):
+    from assistant import graph
+    u = consent("ana@thelsa.com")
+    db.replace_items(u["id"], "auditrack", [_prod_row("inv:5", "5", draft={"channel": "email", "to": "b@thelsa.com"})])
+    it = db.list_items(u["id"], "auditrack")[0]
+    did = db.save_draft(u["id"], it["id"], "texto", subject="S")
+    calls = []
+    monkeypatch.setattr(graph, "create_new_draft", lambda *a, **k: calls.append(1) or {"id": "D"})
+    login(client, "ana@thelsa.com")
+    client.post(f"/assistant/draft/{did}/save", data={"csrf": "tok", "body": "texto"})
+    client.post(f"/assistant/draft/{did}/save", data={"csrf": "tok", "body": "texto"})
+    assert calls == [1]

@@ -627,6 +627,8 @@ def draft_save(u, draft_id):
     if not d:
         abort(404)
     it = db.get_item(u["id"], d["item_id"])
+    if d["status"] == "saved" or d["provider_draft_id"]:
+        return redirect(f"/assistant#i-{it['id']}")      # double-click: already in Outlook
     body = (request.form.get("body") or d["body"]).strip()
     db.update_draft(u["id"], draft_id, body=body)
     if it["source"] != "microsoft":
@@ -657,8 +659,12 @@ def _save_followup(u, it, d, body):
                 res = graph.create_reply_draft(u["id"], dr["reply_to_message_id"], body)
             except PermissionError:
                 raise
-            except Exception:
-                res = None                      # not in this mailbox: a new message instead
+            except Exception as exc:
+                # Only "that message is not in this mailbox" falls back to a new
+                # message; any other error is reported, so no second draft appears.
+                if "404" not in str(exc) and "Not Found" not in str(exc):
+                    raise
+                res = None
         if res is None:
             res = graph.create_new_draft(u["id"], dr.get("to") or "", subject, body, dr.get("cc") or [])
         db.update_draft(u["id"], d["id"], status="saved", provider_draft_id=res.get("id"))

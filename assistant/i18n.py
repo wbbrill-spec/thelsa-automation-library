@@ -169,6 +169,20 @@ KIND = {
     "enter_dates": ("Enter Moveware dates", "Capturar fechas en Moveware"),
     "confirm_done": ("Confirm in Moveware", "Confirmar en Moveware"),
     "assign_coord": ("Assign coordinator", "Asignar coordinador"),
+    "invoice_ready": ("Invoice", "Facturar"),
+    "cost_check": ("Cost check", "Revisar costo"),
+    "price_check": ("Price check", "Revisar precio"),
+    "open_invoice": ("Unpaid invoice", "Factura sin pagar"),
+    "supplier_check": ("Supplier cost", "Costo de proveedor"),
+    "plan_review": ("Date to decide", "Fecha por decidir"),
+    "quote_followup": ("Quote follow-up", "Seguimiento de cotización"),
+    "quote_no_answer": ("Quote unanswered", "Cotización sin respuesta"),
+    "rate_request": ("Rate request", "Solicitud de tarifa"),
+    "wa_unanswered": ("WhatsApp lead", "Lead de WhatsApp"),
+    "wa_handoff": ("Wants a person", "Pide un asesor"),
+    "wa_waiting": ("Customer waiting", "Cliente esperando"),
+    "wa_estimate": ("Estimate follow-up", "Seguimiento de estimado"),
+    "wa_status": ("Update status", "Actualizar estado"),
     "tim_docs": ("Documents pending", "Documentos pendientes"),
     "tim_stalled": ("Stalled", "Detenido"),
     "tim_step": ("Next step", "Siguiente paso"),
@@ -178,6 +192,9 @@ SOURCE = {
     "moveware": ("Moveware (TMS)", "Moveware (TMS)"),
     "clickup": ("ClickUp (TIM)", "ClickUp (TIM)"),
     "whatsapp": ("WhatsApp", "WhatsApp"),
+    "auditrack": ("AuditTrack", "AuditTrack"),
+    "quoterelay": ("QuoteRelay", "QuoteRelay"),
+    "wa_leads": ("WhatsApp leads", "Leads WhatsApp"),
 }
 STAGE = {
     "booked": ("Booked", "Reservado"),
@@ -273,6 +290,10 @@ def item_text(item, lang):
     es = norm(lang) == "es"
     kind, m = item.get("kind"), item.get("meta") or {}
     subj, snip = item.get("subject") or "", item.get("snippet") or ""
+    if isinstance(m.get("title"), dict) and m.get("feed"):
+        # Product to-dos (assistant/todo.py) carry their own text in both languages.
+        pick = (lambda d: (d.get("es") or d.get("en") or "")) if es else (lambda d: (d.get("en") or d.get("es") or ""))
+        return pick(m["title"]) or subj, pick(m.get("detail") or {}) or snip
     try:
         if kind == "invoice_file" and "job" in m and "days" in m:
             client = m.get("client") or item.get("from_name") or ""

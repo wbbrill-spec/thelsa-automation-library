@@ -114,6 +114,19 @@ runs = Table(
     Column("note", Text),
 )
 
+# Last good to-do list from each product (AuditTrack, QuoteRelay, WhatsApp
+# leads …), shared by every user's scan. Kept in the database so a deploy or
+# restart shows the last list instead of an empty one (integration guide A4).
+feed_snapshots = Table(
+    "asst_feed_snapshots", metadata,
+    Column("source", String(20), primary_key=True),
+    Column("items", Text),                                   # JSON list (assistant/todo.py shape)
+    Column("good_at", DateTime(timezone=True)),              # last complete read
+    Column("tried_at", DateTime(timezone=True)),
+    Column("ok", Boolean, nullable=False, default=False),    # last attempt succeeded
+    Column("error", Text),
+    Column("count", Integer, default=0),
+)
 
 # ── Engine ─────────────────────────────────────────────────────────────────────
 _engine = None
@@ -510,3 +523,39 @@ def connection_health():
              .select_from(users.outerjoin(connections, connections.c.user_id == users.c.id))
              .order_by(users.c.email))
         return list(c.execute(q).mappings())
+
+
+# ── Product feeds ──────────────────────────────────────────────────────────────
+def save_feed(source: str, items=None, ok: bool = True, error: str = None):
+    """Record a feed attempt. Items are replaced only on a complete good read
+    (items not None); a failed attempt keeps the last good list."""
+    with engine().begin() as c:
+        row = c.execute(select(feed_snapshots).where(feed_snapshots.c.source == source)).mappings().first()
+        vals = {"tried_at": now(), "ok": ok, "error": (error or None) and str(error)[:500]}
+        if items is not None:
+            vals.update(items=json.dumps(items, default=str), good_at=now(), count=len(items))
+        if row:
+            c.execute(update(feed_snapshots).where(feed_snapshots.c.source == source).values(**vals))
+        else:
+            c.execute(insert(feed_snapshots).values(source=source, **{"count": 0, **vals}))
+
+
+def get_feed(source: str):
+    """(items, good_at) of the last good read, or (None, None) if never read."""
+    with engine().connect() as c:
+        row = c.execute(select(feed_snapshots).where(feed_snapshots.c.source == source)).mappings().first()
+    if not row or row["items"] is None:
+        return None, None
+    try:
+        return json.loads(row["items"]), row["good_at"]
+    except ValueError:
+        return None, None
+
+
+def feed_health():
+    """Admin view: one row per product feed. Counts and errors only."""
+    with engine().connect() as c:
+        return [dict(r) for r in c.execute(
+            select(feed_snapshots.c.source, feed_snapshots.c.good_at, feed_snapshots.c.tried_at,
+                   feed_snapshots.c.ok, feed_snapshots.c.error, feed_snapshots.c.count)
+            .order_by(feed_snapshots.c.source)).mappings()]

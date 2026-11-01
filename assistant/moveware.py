@@ -257,6 +257,15 @@ def tasks_for_user(user) -> list:
     emails = watched_emails(user)
     mine = [f for f in files if wants_file(f, user, emails)]
     items = tasks_for_files(mine)
+    # "Invoice this file" now comes from AuditTrack's own worklist (booked moves
+    # only, drafts not counted, Embassy files after delivery, Finance's invoice
+    # register) so the dashboard matches AuditTrack and its emails exactly.
+    try:
+        from . import auditrack, db as _db
+        if auditrack.enabled() and _db.get_feed(auditrack.PRODUCT)[0] is not None:
+            items = [i for i in items if i["kind"] != "invoice_file"]
+    except Exception:
+        pass
     try:
         import underbilling
         rows = (underbilling.get_underbilling() or {}).get("rows") or []

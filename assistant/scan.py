@@ -16,7 +16,7 @@ import os
 import threading
 import time
 
-from . import clickup_tim, db, graph, moveware, triage
+from . import auditrack, clickup_tim, db, feeds, graph, moveware, todo, triage
 
 log = logging.getLogger("assistant.scan")
 TZ = "America/Mexico_City"
@@ -66,6 +66,20 @@ def scan_user(user_id: str) -> dict:
                 report["moveware"] = len(tasks)
         except Exception as exc:
             report["errors"].append(f"moveware: {exc}")
+        # Product to-dos (AuditTrack, QuoteRelay, WhatsApp leads): the lists were
+        # read once for everyone at the start of the run; here each user gets
+        # their share. A product never read yet leaves that user's items as they were.
+        try:
+            emails = moveware.watched_emails(user)
+            au = auditrack.items_for(emails)
+            if au is not None:
+                db.replace_items(user_id, "auditrack", au)
+                report["auditrack"] = len(au)
+            for src, rows in feeds.items_for(user, emails).items():
+                db.replace_items(user_id, src, rows)
+                report[src] = len(rows)
+        except Exception as exc:
+            report["errors"].append(f"products: {exc}")
         try:
             tim_tasks = clickup_tim.tasks_for_user(user)
             if tim_tasks is not None:
@@ -85,6 +99,15 @@ def scan_user_async(user_id: str):
 
 def run_all(trigger: str = "schedule") -> dict:
     run_id = db.start_run(trigger)
+    product_notes = []
+    try:  # AuditTrack's findings and the other products' lists: once per run, for everyone
+        product_notes.append(f"auditrack: {auditrack.refresh()}")
+    except Exception as exc:
+        product_notes.append(f"auditrack: {exc}")
+    try:
+        product_notes += [f"{k}: {v}" for k, v in feeds.refresh_all().items()]
+    except Exception as exc:
+        product_notes.append(f"feeds: {exc}")
     try:  # read due files' Moveware diaries first, so "did it happen?" is current
         from . import mw_confirm
         mw_confirm.prewarm()
@@ -101,7 +124,7 @@ def run_all(trigger: str = "schedule") -> dict:
             errors += 1
             notes.append(f"{uid[:8]}: {'; '.join(rep['errors'])[:200]}")
         time.sleep(float(os.environ.get("ASSISTANT_STAGGER_SECONDS", "2")))
-    db.finish_run(run_id, scanned, errors, "\n".join(notes)[:4000] or None)
+    db.finish_run(run_id, scanned, errors, "\n".join(product_notes + notes)[:4000] or None)
     log.info("assistant run %s: %s users, %s errors", trigger, scanned, errors)
     return {"run_id": run_id, "users_scanned": scanned, "errors": errors}
 

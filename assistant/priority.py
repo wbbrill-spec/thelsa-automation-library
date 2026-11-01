@@ -35,6 +35,12 @@ def _age_hours(item, now):
 def score(item, now=None) -> int:
     now = now or _dt.datetime.now(_dt.timezone.utc)
     kind, m = item.get("kind"), _meta(item)
+    if m.get("feed") and m.get("urgency") is not None:
+        # Product to-dos rank by the product's own judgement (assistant/todo.py).
+        s = int(m.get("urgency") or 0)
+        if item.get("seen") and not m.get("sticky"):
+            s -= 20
+        return max(0, min(100, s))
     value = float(m.get("value") or 0)
     if kind == "invoice_file":
         s = 60 + min(int(m.get("days") or 0) * 2, 30) + (5 if value >= 5000 else 0)

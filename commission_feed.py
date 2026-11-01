@@ -211,8 +211,9 @@ def booked_prices() -> dict:
     out = {}
     for r in rem["jobs"]:
         b = base(r.job)
-        d = out.setdefault(b, {"value": 0.0, "currency": Q.currency_of(r.job, r.branch)})
+        d = out.setdefault(b, {"value": 0.0, "value_inc": 0.0, "currency": Q.currency_of(r.job, r.branch)})
         d["value"] += r.value_ex or 0.0
+        d["value_inc"] += r.value_inc or 0.0
     return out
 
 
@@ -220,23 +221,37 @@ def price_differences(files) -> list:
     """Files whose Moveware sale price (as the audit reads it) differs from the
     Removals Summary's booked price by more than 5 % and 500 — e.g. 111154
     (Moveware 17,880 vs 9,790.74 booked). `files` = audit records with job,
-    sell, currency. Same currency only."""
+    sell, currency. Lettered lots (110873A …) are added to their file, and a
+    Moveware price that matches the booked price WITH IVA is not a difference
+    (Moveware often shows taxed files with IVA). Same currency only."""
     prices = booked_prices()
-    out = []
+    per = {}
     for f in files or []:
         b = base(f.get("job"))
-        p = prices.get(b)
-        if not p or not p["value"]:
+        if b not in prices:
             continue
-        sell = float(f.get("sell") or 0)
-        ccy = str(f.get("currency_src") or f.get("currency") or "")
-        if not sell or (p["currency"] and ccy and p["currency"] != ccy):
+        d = per.setdefault(b, {"sell": 0.0, "ccy": set(), "coordinator": ""})
+        d["sell"] += float(f.get("sell") or 0)
+        c = str(f.get("currency_src") or f.get("currency") or "")
+        if c:
+            d["ccy"].add(c)
+        d["coordinator"] = d["coordinator"] or (f.get("coordinator") or "")
+    out = []
+    for b, d in per.items():
+        p = prices[b]
+        if not p["value"] or not d["sell"]:
             continue
-        diff = sell - p["value"]
-        if abs(diff) > max(PRICE_MIN_DIFF, p["value"] * PRICE_TOLERANCE):
-            out.append({"job": b, "moveware": round(sell, 2), "booked": round(p["value"], 2),
-                        "currency": p["currency"] or ccy, "difference": round(diff, 2),
-                        "coordinator": f.get("coordinator") or "Unassigned"})
+        ccy = next(iter(d["ccy"])) if len(d["ccy"]) == 1 else ""
+        if len(d["ccy"]) > 1 or (p["currency"] and ccy and p["currency"] != ccy):
+            continue
+        tol = lambda v: max(PRICE_MIN_DIFF, v * PRICE_TOLERANCE)
+        if abs(d["sell"] - p["value"]) <= tol(p["value"]):
+            continue
+        if p["value_inc"] and abs(d["sell"] - p["value_inc"]) <= tol(p["value_inc"]):
+            continue
+        out.append({"job": b, "moveware": round(d["sell"], 2), "booked": round(p["value"], 2),
+                    "currency": p["currency"] or ccy, "difference": round(d["sell"] - p["value"], 2),
+                    "coordinator": d["coordinator"] or "Unassigned"})
     out.sort(key=lambda r: -abs(r["difference"]))
     return out
 

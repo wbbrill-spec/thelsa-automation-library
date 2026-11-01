@@ -81,7 +81,7 @@ def test_booked_price_difference_is_flagged():
                                                "control": {"listed": 2, "listed_ex": 10790.74,
                                                            "total_files": 2, "total_ex": 10790.74}}})
     files = [{"job": "111154", "sell": 17880.0, "currency": "USD", "coordinator": "Sara Reyes"},
-             {"job": "111155", "sell": 1020.0, "currency": "USD"}]                     # within tolerance
+             {"job": "111155", "sell": 1160.0, "currency": "USD"}]                     # = booked price with IVA
     got = cf.price_differences(files)
     assert got == [{"job": "111154", "moveware": 17880.0, "booked": 9790.74, "currency": "USD",
                     "difference": 8089.26, "coordinator": "Sara Reyes"}]
@@ -110,3 +110,14 @@ def test_a_bad_costing_sheet_never_breaks_the_commission_upload(monkeypatch):
     from commissions import web as W
     monkeypatch.setattr(costing_sheet, "parse", lambda data: (_ for _ in ()).throw(ValueError("not a sheet")))
     W._feed_audittrack("costing_sheet", b"junk", "lupita@thelsa.com")          # no exception
+
+
+def test_lettered_lots_are_added_to_their_file_before_comparing():
+    rem = [Removal("110873", "IMP", "MEM", "Company", "2026-10-01", "W", 104976.53, 121772.77, 5)]
+    store.put("removals_summary", {"records": {"jobs": [asdict(r) for r in rem],
+                                               "control": {"listed": 1, "listed_ex": 104976.53,
+                                                           "total_files": 1, "total_ex": 104976.53}}})
+    files = [{"job": "110873", "sell": 21140.43, "currency": "MXN"},
+             {"job": "110873A", "sell": 47684.70, "currency": "MXN"},
+             {"job": "110873B", "sell": 36151.40, "currency": "MXN"}]
+    assert cf.price_differences(files) == []

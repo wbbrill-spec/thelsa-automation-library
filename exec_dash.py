@@ -117,9 +117,11 @@ def _active_invoices(f):
 
 
 def _invoiced(f):
+    """Issued = a numbered, non-cancelled invoice. A draft (unnumbered) is not billed yet
+    (Bill, 31 Oct 2026)."""
     if "inv_list" in f:
-        num, unnum = _active_invoices(f)
-        return bool(num or unnum)
+        num, _unnum = _active_invoices(f)
+        return bool(num)
     return bool(f.get("invoiced"))
 
 
@@ -242,6 +244,9 @@ def build(files, finance: dict, today: dt.date | None = None, costing: dict | No
                     unnum_files.add(f.get("job"))
 
             if st in (LEAD, CANCELLED):
+                continue
+            # Only booked moves (W or a Date Won) are billable — a quote with a pack date is not.
+            if st != "W" and not _d(f.get("booked")):
                 continue
             pack, deliv = _d(f.get("pack")), _d(f.get("delivery"))
             packed = bool(pack and pack <= today)

@@ -525,22 +525,27 @@ def test_revenue_sums_invoiced_where_billed_else_quoted():
 
 def test_ready_to_invoice_by_move_dates_not_status(monkeypatch):
     monkeypatch.setattr(aw, "_finance_invoice_view", lambda: {"invoiced": set(), "cutoff": "2099-12-31"})
-    """'Ready to invoice' = a real move (pack OR delivery date passed) not yet
-    invoiced — keyed on milestone dates, NOT status code (packed/invoiced files
-    can show status 'Pending'). Files with no move dates (leads) are excluded."""
+    """'Ready to invoice' = a BOOKED move (status W, or a Date Won even if the status
+    still reads P) whose move date has passed and that has no ISSUED invoice. A quote
+    (P, no Date Won) with a pack date is not a move (Bill, 31 Oct 2026). A draft
+    (unnumbered) invoice keeps the file on the list, marked as a draft."""
     past = TODAY - dt.timedelta(days=10)
     files = [
-        _mkfile(job=1, status="P", invoiced=False, inv_amt=0, sell=7723, pack=past),        # packed -> ready
-        _mkfile(job=2, status="P", invoiced=False, inv_amt=0, sell=12000, delivery=past),   # delivered -> ready
-        _mkfile(job=3, status="W", invoiced=True, inv_amt=8000, sell=8000, pack=past),       # already invoiced
-        _mkfile(job=4, status="W", invoiced=False, inv_amt=0, sell=9999),                    # no dates -> lead, excluded
-        _mkfile(job=5, status="P", invoiced=False, inv_amt=0, sell=5000, pack=TODAY + dt.timedelta(days=5)),  # future pack -> not yet
+        _mkfile(job=1, status="P", booked=past, invoiced=False, sell=7723, pack=past),       # won, status not updated -> ready
+        _mkfile(job=2, status="W", invoiced=False, sell=12000, delivery=past),               # delivered -> ready
+        _mkfile(job=3, status="W", invoiced=True, inv_amt=8000, sell=8000, pack=past,
+                inv_list=[{"n": "505900", "d": "2026-10-01", "c": "MXN", "net": 8000, "st": "N"}]),  # issued
+        _mkfile(job=4, status="W", invoiced=False, sell=9999),                               # no dates -> not yet
+        _mkfile(job=5, status="W", invoiced=False, sell=5000, pack=TODAY + dt.timedelta(days=5)),  # future pack
+        _mkfile(job=6, status="P", invoiced=False, sell=4000, pack=past),                    # quote only -> never
+        _mkfile(job=7, status="W", invoiced=True, inv_amt=6000, sell=6000, pack=past, currency="USD",
+                currency_src="MXN", inv_list=[{"n": "", "d": "", "c": "USD", "net": 6000, "st": "N"}]),  # draft
     ]
     aw.check_calculations(files)
     m = aw.compute_metrics(files, live_counts=LIVE_COUNTS, cost_available=False)
-    assert m["invoiceable_n"] == 2
-    assert m["invoiceable_val"] == 19723            # 7723 + 12000
-    assert {r["job"] for r in m["to_invoice_worklist"]} == {1, 2}
+    assert {r["job"] for r in m["to_invoice_worklist"]} == {1, 2, 7}
+    row7 = next(r for r in m["to_invoice_worklist"] if r["job"] == 7)
+    assert row7["draft"] is True and row7["orig_currency"] == "USD" and row7["orig_value"] == 6000
 
 
 def test_us_embassy_bills_only_after_delivery(monkeypatch):

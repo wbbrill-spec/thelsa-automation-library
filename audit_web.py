@@ -686,9 +686,38 @@ def _finance_invoice_view() -> dict:
     return {"invoiced": inv, "cutoff": cutoff}
 
 
+def _inv_rows(f):
+    return [i for i in (f.get("inv_list") or [])
+            if (i.get("st") or "").upper() != "C" and (i.get("net") or 0) > 0]
+
+
+def _issued(f):
+    """True when the file has an ISSUED invoice: numbered and not cancelled."""
+    if "inv_list" not in f:
+        return bool(f.get("invoiced"))
+    return any((i.get("n") or "").strip() for i in _inv_rows(f))
+
+
+def _drafts(f):
+    """Unnumbered (draft) invoices — prepared in Moveware but not issued."""
+    return [i for i in _inv_rows(f) if not (i.get("n") or "").strip()]
+
+
 def _orig_money(f, value):
     """The amount in the file's OWN currency (the page shows everything in the display
-    currency; the TMS dashboard shows each file in its own — pesos stay pesos)."""
+    currency; the TMS dashboard shows each file in its own — pesos stay pesos).
+    A draft invoice, when there is one, is the most exact figure: its net amount and
+    currency are what will be billed (31 Oct 2026: the job-level currency is often blank,
+    so a USD quote was being labelled MXN)."""
+    d = _drafts(f)
+    if d:
+        ccy = {}
+        for i in d:
+            ccy[i.get("c") or "?"] = ccy.get(i.get("c") or "?", 0.0) + float(i.get("net") or 0)
+        if len(ccy) == 1:
+            c, v = next(iter(ccy.items()))
+            if c != "?":
+                return {"orig_currency": c, "orig_value": round(v, 2)}
     src = f.get("currency_src")
     if not src or src == f.get("currency"):
         return {"orig_currency": str(f.get("currency") or ""), "orig_value": value}
@@ -772,13 +801,23 @@ def compute_metrics(files, live_counts=None, cost_available=True):
     def _open(f):
         return str(f.get("status") or "").strip().upper() not in ("L", "C")
 
-    to_invoice = [f for f in files if not f["invoiced"] and _invoiceable(f) and _open(f)
+    # Only BOOKED moves are billable (Bill, 31 Oct 2026): status W or a booked (Date Won)
+    # date. A pending quote (P) that merely carries a pack date is not a move — the 31 Oct
+    # list was 37 such quotes and none of Lupita's real files.
+    def _booked(f):
+        return _open(f) and (str(f.get("status") or "").strip().upper() == "W" or bool(f.get("booked")))
+
+    # Invoiced = an ISSUED invoice (numbered, not cancelled) in Moveware, or Finance's report.
+    # An unnumbered invoice is a draft: the file stays on the list, marked "draft ready"
+    # (Bill, 31 Oct 2026 — Lupita's 19 real files all got drafts and vanished from the list).
+    to_invoice = [f for f in files if not _issued(f) and _invoiceable(f) and _booked(f)
                   and not _billed_elsewhere(f) and _in_scope(f) and _priced(f)]
     invoiceable_n = len(to_invoice)
     invoiceable_val = round(sum(_bill_value(f) for f in to_invoice), 2)
 
     # US Embassy files packed but NOT yet delivered — in transit, not yet billable.
-    embassy_transit = [f for f in files if f.get("is_embassy") and _packed(f) and not _delivered(f) and _open(f)]
+    embassy_transit = [f for f in files if f.get("is_embassy") and _packed(f) and not _delivered(f)
+                       and _booked(f) and not _issued(f) and _priced(f)]
     embassy_transit_n = len(embassy_transit)
     embassy_transit_val = round(sum(_bill_value(f) for f in embassy_transit), 2)
 
@@ -798,6 +837,7 @@ def compute_metrics(files, live_counts=None, cost_available=True):
           "value": _bill_value(f), "embassy": bool(f.get("is_embassy")),
           "currency": str(f.get("currency") or ""),
           **_orig_money(f, _bill_value(f)),
+          "draft": bool(_drafts(f)),
           "status": str(f.get("status") or "").strip().upper(),
           "pack": f["pack"].isoformat() if f.get("pack") else None,
           "delivery": f["delivery"].isoformat() if f.get("delivery") else None}
@@ -1072,6 +1112,19 @@ def _load_checked():
                 counts["underbilling_rows"] = []
                 counts["underbilling_have_creds"] = False
                 counts["underbilling_error"] = str(_e)
+            # Pack / delivery dates MoveWare lacks come from SIT's Plan de Viajes (done moves
+            # only) — the executive view already did this; the worklist and the TMS dashboard
+            # feed now do too (Bill, 31 Oct 2026).
+            try:
+                import exec_dash as _ex
+                import sit_milestones as _sm
+                _sm.ensure_built()
+                _jobs = _sm.state().get("jobs")
+                if _jobs:
+                    audited = [dict(g, pack=_ex._d(g.get("pack")), delivery=_ex._d(g.get("delivery")))
+                               for g in _ex.overlay_plan_dates(audited, _jobs)]
+            except Exception:
+                pass
             try:
                 audited = _normalize_and_cost(audited)
             except Exception:
@@ -1310,12 +1363,21 @@ def audit_feed():
             "pct_billed", "to_invoice_worklist")
     out = {k: m.get(k) for k in keep}
     out["embassy_transit"] = m.get("embassy_transit_list") or []
+    # How far Finance's invoice report runs: files invoiced up to this date are already
+    # crossed off the list (Bill, 31 Oct 2026: compare with the September invoicing list).
+    try:
+        _fv = _finance_invoice_view()
+        out["finance_cutoff"] = _fv.get("cutoff") or None
+        out["finance_files"] = len(_fv.get("invoiced") or ())
+    except Exception:
+        out["finance_cutoff"], out["finance_files"] = None, None
     out.update({"live": is_live, "as_of": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
                 "list_from": os.environ.get("INVOICE_LIST_FROM", "2026-01-01"),
-                "rules": "Billable: inbound (IMP/IMA) at delivery; outbound (EXP/EXA) and domestic (DIN) at load; "
-                         "US Embassy/Consulate when delivered; other types at load or delivery. Already invoiced = any "
-                         "Moveware invoice or an invoice in Finance's report. 2026 moves only; prices of 500 or less "
-                         "are placeholders and left off."})
+                "rules": "Booked moves only (status W or a Date Won). Billable: inbound (IMP/IMA) at delivery; outbound "
+                         "(EXP/EXA) and domestic (DIN) at load; US Embassy/Consulate when delivered; other types at load "
+                         "or delivery. Move dates from Moveware, else Plan de Viajes (done moves). Already invoiced = an "
+                         "issued (numbered) Moveware invoice or an invoice in Finance's report; a draft keeps the file "
+                         "listed, marked as a draft. 2026 moves only; prices of 500 or less are placeholders."})
     return jsonify(out)
 
 

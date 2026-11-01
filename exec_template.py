@@ -94,6 +94,7 @@ EXEC_TEMPLATE = r"""<!DOCTYPE html>
     <a class="tab-btn" data-tab="overview" href="#overview">{{ t('Overview', 'Resumen') }}</a>
     <a class="tab-btn" data-tab="underbilling" href="#underbilling">{{ t('Under-billing', 'Facturación incompleta') }}</a>
     {% if ex.pc %}<a class="tab-btn" data-tab="checks" href="#checks">{{ t('Supplier cost checks', 'Revisión de costos') }}{% if ex.pc.rows %} ({{ ex.pc.rows|length }}){% endif %}</a>{% endif %}
+    {% if ex.fr %}<a class="tab-btn" data-tab="finrep" href="#finrep">{{ t('Open invoices & prices', 'Facturas abiertas y precios') }}{% if ex.fr.open.open or ex.fr.prices %} ({{ ex.fr.open.open|length + ex.fr.prices|length }}){% endif %}</a>{% endif %}
     {% if ex.sc %}<a class="tab-btn" data-tab="costs" href="#costs">{{ t('Supplier costs', 'Costos de proveedores') }}{% if ex.sc.n_open %} ({{ ex.sc.n_open }}){% endif %}</a>{% endif %}
   </nav>
 
@@ -223,6 +224,34 @@ EXEC_TEMPLATE = r"""<!DOCTYPE html>
   </section>
   {% endif %}
 
+  {% if ex.fr %}{% set R = ex.fr %}
+  <section class="tab" data-tab="finrep">
+    <h2>{{ t('From the reports uploaded on the Commission Report', 'De los reportes cargados en el Reporte de Comisiones') }}</h2>
+    <p class="meta">{{ t('Nothing to upload here: AuditTrack reads the same reports Lupita and Finance upload each month for commissions.', 'Nada que cargar aquí: AuditTrack lee los mismos reportes que Lupita y Finanzas cargan cada mes para las comisiones.') }}
+      {{ t('Invoice register', 'Registro de facturas') }}: {{ R.status.invoice_register.to or t('not uploaded', 'no cargado') }} ·
+      {{ t('Payments', 'Pagos') }}: {% for p in R.status.payments %}{{ p.company }} {{ t('to', 'al') }} {{ p.to }}{% if not loop.last %}, {% endif %}{% else %}{{ t('none uploaded', 'ninguno cargado') }}{% endfor %} ·
+      Removals Summary: {{ R.status.removals_summary.uploaded or t('not uploaded', 'no cargado') }} ·
+      Move Costing Sheet: {{ t('won to', 'ganados al') }} {{ R.status.costing_sheet.won_to or '?' }}.</p>
+
+    <h2>{{ t('Invoices still open', 'Facturas por cobrar') }} ({{ R.open.open|length }})</h2>
+    <p class="meta">{{ t('Invoices in Finance\'s register that the payments reports do not show as collected in full.', 'Facturas del registro de Finanzas que los reportes de pagos no muestran cobradas completas.') }}
+      {% if R.open.not_covered %}{{ t('Not judged (no payments report for that company yet):', 'Sin juzgar (aún no hay reporte de pagos de esa empresa):') }} {% for co, n in R.open.not_covered.items() %}{{ co }} {{ n }}{% if not loop.last %}, {% endif %}{% endfor %}.{% endif %}</p>
+    {% if R.open.open %}
+    <div class="tbl"><table><tr><th>{{ t('Invoice', 'Factura') }}</th><th>{{ t('Company', 'Empresa') }}</th><th>{{ t('Files', 'Expedientes') }}</th><th>{{ t('Date', 'Fecha') }}</th><th class="r">{{ t('Total', 'Total') }}</th><th class="r">{{ t('Collected', 'Cobrado') }}</th><th class="r">{{ t('Days', 'Días') }}</th></tr>
+    {% for r in R.open.open[:300] %}<tr><td class="num">{{ r.series }} {{ r.folio }}</td><td>{{ r.company }}</td><td class="num">{{ r.jobs|join(', ') or '—' }}</td><td>{{ r.date }}</td>
+      <td class="r num">{{ '{:,.2f}'.format(r.total) }} {{ r.currency }}</td><td class="r num">{{ (r.paid_share * 100)|round|int }}%</td><td class="r num">{{ r.days if r.days is not none else '—' }}</td></tr>{% endfor %}</table></div>
+    {% elif R.open.ready %}<p class="meta good">{{ t('Every invoice the payments reports cover is collected.', 'Todas las facturas que cubren los reportes de pagos están cobradas.') }}</p>
+    {% else %}<p class="meta">{{ t('Upload Finance\'s invoice register on the Commission Report to see this.', 'Cargue el registro de facturas de Finanzas en el Reporte de Comisiones para ver esto.') }}</p>{% endif %}
+
+    <h2>{{ t('Sale price in Moveware differs from the booked price', 'El precio de venta en Moveware difiere del precio reservado') }} ({{ R.prices|length }})</h2>
+    <p class="meta">{{ t('Moveware\'s current sale price against the Removals Summary (booked, without IVA). Shown when they differ by more than 5% and 500.', 'Precio de venta actual en Moveware contra el Removals Summary (reservado, sin IVA). Se muestra cuando difieren más de 5% y 500.') }}</p>
+    {% if R.prices %}
+    <div class="tbl"><table><tr><th>{{ t('File', 'Expediente') }}</th><th>{{ t('Coordinator', 'Coordinador') }}</th><th class="r">Moveware</th><th class="r">{{ t('Booked', 'Reservado') }}</th><th class="r">{{ t('Difference', 'Diferencia') }}</th></tr>
+    {% for r in R.prices[:200] %}<tr><td class="num">{{ r.job }}</td><td>{{ r.coordinator }}</td><td class="r num">{{ '{:,.2f}'.format(r.moveware) }} {{ r.currency }}</td><td class="r num">{{ '{:,.2f}'.format(r.booked) }}</td><td class="r num">{{ '{:+,.2f}'.format(r.difference) }}</td></tr>{% endfor %}</table></div>
+    {% else %}<p class="meta good">{{ t('No differences.', 'Sin diferencias.') }}</p>{% endif %}
+  </section>
+  {% endif %}
+
   {% if ex.pc %}{% set C = ex.pc %}
   <section class="tab" data-tab="checks">
     <h2>{{ t('Supplier cost checks — MoveWare Move Costing Sheet', 'Revisión de costos de proveedores — Move Costing Sheet de MoveWare') }}</h2>
@@ -257,7 +286,7 @@ EXEC_TEMPLATE = r"""<!DOCTYPE html>
     <h2>{{ t('Load a new Move Costing Sheet', 'Cargar un Move Costing Sheet nuevo') }}</h2>
     <form method="post" action="/audit/upload-costing" enctype="multipart/form-data" class="row">
       <input type="file" name="file" accept=".xlsx" required> <button type="submit">{{ t('Upload', 'Subir') }}</button></form>
-    <p class="meta">{{ t('The workbook is read and not kept; customer names are never stored.', 'El archivo se lee y no se guarda; los nombres de clientes nunca se almacenan.') }}</p>
+    <p class="meta">{{ t('The workbook is read and not kept; customer names are never stored. A sheet uploaded on the Commission Report is picked up here automatically.', 'El archivo se lee y no se guarda; los nombres de clientes nunca se almacenan. Una hoja cargada en el Reporte de Comisiones se toma aquí automáticamente.') }}</p>
   </section>
   {% endif %}
 

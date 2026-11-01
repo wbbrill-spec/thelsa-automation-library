@@ -265,6 +265,25 @@ def _log_upload(email: str, what: str, count: int, digest: str) -> None:
     store.put("uploads", log[-50:], by=email)
 
 
+def _feed_audittrack(key: str, data: bytes, email: str) -> None:
+    """The same upload keeps AuditTrack current (Bill, 31 Oct 2026). The Move
+    Costing Sheet is read again line by line (supplier, PO, actual cost) for the
+    audit's supplier checks; the other reports are read straight from this
+    page's store (commission_feed). Never blocks or fails the upload."""
+    try:
+        import commission_feed
+        commission_feed.clear_cache()
+    except Exception:
+        pass
+    if key != "costing_sheet":
+        return
+    try:
+        import costing_sheet
+        costing_sheet.save(costing_sheet.parse(data), by=email)
+    except Exception:
+        pass
+
+
 def _upload_moveware(email: str, key: str, load, to_records, name_en: str, name_es: str):
     """Read one Moveware report in memory and keep its names-free records."""
     _check_csrf()
@@ -285,6 +304,7 @@ def _upload_moveware(email: str, key: str, load, to_records, name_en: str, name_
     digest = hashlib.sha256(data).hexdigest()
     store.put(key, {"records": to_records(jobs, extra), "sha256": digest}, by=email)
     _log_upload(email, key, len(jobs), digest)
+    _feed_audittrack(key, data, email)
     _say(f"{name_en} loaded: {len(jobs):,} jobs. Customer names in it were not kept.",
          f"{name_es} cargado: {len(jobs):,} expedientes. No se guardaron los nombres de clientes.")
     return home
@@ -331,6 +351,7 @@ def commissions_upload_payments(email):
     doc["sources"][name] = {"records": P.to_records(ps, info), "sha256": digest, "by": email,
                             "at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")}
     store.put("payment_reports", doc, by=email)
+    _feed_audittrack("other", b"", email)
     _log_upload(email, f"payment_report {name}", len(ps), digest)
     who = (name, name) if info["company"] else ("a company this page does not know by name",
                                                 "una empresa que esta página no conoce por nombre")
@@ -362,6 +383,7 @@ def commissions_upload_invoices(email):
         return home
     digest = hashlib.sha256(data).hexdigest()
     store.put("invoice_register", {"records": I.to_records(invoices), "sha256": digest}, by=email)
+    _feed_audittrack("other", b"", email)
     _log_upload(email, "invoice_register", len(invoices), digest)
     _say(f"Invoice register loaded: {info['invoices']:,} invoices from {info['from']} to {info['to']}. "
          "Customer and staff names in it were not kept.",
@@ -393,6 +415,7 @@ def commissions_upload(email):
         store.put("finance_report_previous", previous, by=email)
     digest = hashlib.sha256(data).hexdigest()
     store.put("finance_report", {"records": F.to_records(lines), "sha256": digest}, by=email)
+    _feed_audittrack("other", b"", email)
     _log_upload(email, "finance_report", len(lines), digest)
     src = rep["source"]
     _say(f"Report loaded: {src['lines']:,} lines dated {src['from']} to {src['to']}, "

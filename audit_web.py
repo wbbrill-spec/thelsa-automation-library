@@ -683,6 +683,15 @@ def _finance_invoice_view() -> dict:
     for b, r in (fin.get("files") or {}).items():
         if (r.get("net_sales") or 0) > 0:
             inv.add(str(b))
+    # Finance's invoice register, uploaded on the commission page (Bill, 31 Oct
+    # 2026: AuditTrack reads the same reports): every file it lists was invoiced.
+    try:
+        import commission_feed
+        reg = commission_feed.invoiced_files()
+        inv |= reg["files"]
+        cutoff = max(cutoff, reg["to"] or "")
+    except Exception:
+        pass
     return {"invoiced": inv, "cutoff": cutoff}
 
 
@@ -1277,6 +1286,15 @@ def audit():
         ex["pc"] = _supplier_checks_view(raw_dated)
     except Exception:
         ex["pc"] = None
+    # Reports the team uploads on the Commission Report (Bill, 31 Oct 2026):
+    # unpaid invoices and booked-price differences.
+    try:
+        import commission_feed as cf
+        oi = cf.open_invoices()
+        ex["fr"] = {"status": cf.status(), "open": oi,
+                    "prices": cf.price_differences(raw_dated)}
+    except Exception:
+        ex["fr"] = None
     try:
         import threading as _th
         import time as _time

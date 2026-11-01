@@ -433,9 +433,15 @@ def test_moveware_reports_are_loaded_without_their_names_and_fill_the_quotes(cli
     assert "Move Costing Sheet loaded: 1 jobs." in page and "Removals Summary in use: uploaded" in page
     assert "2026-01-01" in page and "2026-10-09" in page and "Files first invoiced" in page and "the booked quotes" in page
     with store.engine().connect() as c:
-        everything = " ".join(str(v) for row_ in c.exec_driver_sql("select * from commission_docs") for v in row_)
+        rows = list(c.exec_driver_sql("select * from commission_docs"))
+    # AuditTrack's line-level copy of the costing sheet (fed by this same upload,
+    # 31 Oct 2026) keeps SUPPLIER names for its supplier checks; never customers'.
+    audit = " ".join(str(v) for row_ in rows if "audit_costing_lines" in map(str, row_) for v in row_)
+    everything = " ".join(str(v) for row_ in rows if "audit_costing_lines" not in map(str, row_) for v in row_)
     for name in names + tuple(NAMES):
         assert name not in everything and name not in page
+        if name not in "Supplier Shadow":          # the supplier, and words of its name
+            assert name not in audit
     # the page, the stored report and the Excel download agree
     rep = W._report(F.from_records(store.get("finance_report")[0]["records"]), W.settings())
     assert rep["quotes_loaded"] and any(m["bookings_source"] == "quotes" for m in rep["months"])

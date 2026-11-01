@@ -552,6 +552,16 @@ def _role_entity_type(roles_obj, name: str) -> str:
     return t if isinstance(t, str) and len(t) <= 20 and t.replace(" ", "").replace("-", "").isalpha() else ""
 
 
+def _role_name(roles_obj, name: str) -> str:
+    """Name of the company/party in a role (bill-to, corporate account). Used only to
+    recognise US Embassy / Consulate files; the name itself is not stored."""
+    r = roles_obj.get(name) if isinstance(roles_obj, dict) else None
+    if not isinstance(r, dict):
+        return ""
+    ent = r.get("entity") if isinstance(r.get("entity"), dict) else {}
+    return str(ent.get("name") or ent.get("lastName") or r.get("name") or r.get("description") or "")
+
+
 _STAFF_CODE = re.compile(r"^[A-Z]{1,3}[0-9]{0,2}$")
 
 
@@ -931,7 +941,11 @@ def _map_job(job: dict, prefetched: dict | None = None) -> dict | None:
         "mode": mode,
         "job_type": _code_text(_first(src, "type", "jobType", default="")),   # EXP / IMP / DOM … (code only)
         "status": status,
-        "is_embassy": _is_embassy(client or ""),
+        # US Embassy / Consulate: the client is often the diplomat, so the bill-to and the
+        # corporate account count too (Bill, 31 Oct 2026: embassy files bill only once
+        # DELIVERED; 110945 and 110991 were listed while packed, not delivered).
+        "is_embassy": _is_embassy(client or "") or _is_embassy(_role_name(roles_obj, "billTo"))
+                      or _is_embassy(_role_name(roles_obj, "corporateAccount")),
         "est": round(est_cost, 2),
         "act": round(actual_cost, 2),
         "sell": round(sell, 2),

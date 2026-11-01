@@ -1217,3 +1217,25 @@ def test_lost_and_cancelled_never_ready_to_invoice(monkeypatch):
     m = aw.compute_metrics(files, live_counts=LIVE_COUNTS, cost_available=False)
     assert [r["job"] for r in m["to_invoice_worklist"]] == [3]
     assert m["to_invoice_worklist"][0]["orig_currency"] == "USD" and m["to_invoice_worklist"][0]["orig_value"] == 1000
+
+
+def test_embassy_by_handler_or_finance_type_waits_for_delivery(monkeypatch):
+    monkeypatch.setattr(aw, "_finance_invoice_view", lambda: {"invoiced": set(), "cutoff": "2099-12-31"})
+    monkeypatch.setattr(aw, "_load_finance_cost", lambda: {"files": {"8": {"type": "DIPLOM"}}, "ledger": {}})
+    past = TODAY - dt.timedelta(days=5)
+    files = [
+        _mkfile(job=7, client="John Doe", coordinator="Edgarespino", job_type="DIN", invoiced=False, sell=50000, pack=past),
+        _mkfile(job=8, client="Jane Roe", job_type="DIN", invoiced=False, sell=60000, pack=past),
+        _mkfile(job=9, client="Jane Roe", job_type="DIN", invoiced=False, sell=70000, pack=past),
+    ]
+    aw.check_calculations(files)
+    m = aw.compute_metrics(files, live_counts=LIVE_COUNTS, cost_available=False)
+    assert {r["job"] for r in m["to_invoice_worklist"]} == {9}
+    assert m["embassy_transit_n"] == 2
+
+
+def test_embassy_recognised_by_bill_to():
+    import mw_live
+    roles = {"billTo": {"entity": {"name": "EMBAJADA DE LOS ESTADOS UNIDOS DE AMERICA"}}}
+    assert mw_live._is_embassy(mw_live._role_name(roles, "billTo"))
+    assert mw_live._role_name({}, "billTo") == ""

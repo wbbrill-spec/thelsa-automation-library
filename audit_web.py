@@ -761,6 +761,22 @@ def compute_metrics(files, live_counts=None, cost_available=True):
     # inbound (IMP/IMA) at DELIVERY, outbound (EXP/EXA) and domestic (DIN) at LOAD,
     # US Embassy/Consulate only when delivered. `pack` here is the load date
     # (MoveWare Uplift, else Pack — see mw_live._map_job).
+    # US Embassy / Consulate files bill only once DELIVERED. Recognised by client, bill-to or
+    # corporate account name (mw_live), by Finance's DIPLOM type, or by the embassy handler —
+    # the same test the executive view uses (Bill, 31 Oct 2026).
+    import exec_dash as _ex
+    _fin = _load_finance_cost()
+    _fin_files, _ledger = _fin.get("files") or {}, _fin.get("ledger") or {}
+
+    def _emb(f):
+        b = _base_file(f.get("job"))
+        ftype = (_fin_files.get(b) or {}).get("type") or (_ledger.get(b) or {}).get("type") or ""
+        return _ex._is_embassy(f, ftype)
+
+    for f in files:
+        if not f.get("is_embassy") and _emb(f):
+            f["is_embassy"] = True
+
     def _due(f):
         return job_rules.invoice_due_date(f.get("job_type"), f.get("pack"), f.get("delivery"),
                                           embassy=bool(f.get("is_embassy")))

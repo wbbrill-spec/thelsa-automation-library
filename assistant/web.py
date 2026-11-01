@@ -170,6 +170,13 @@ h1{font-size:24px;margin:0 0 4px}h2{font-size:17px;margin:0 0 10px}
 .card form{display:inline}
 textarea{width:100%;min-height:130px;border:1px solid var(--line);border-radius:9px;padding:10px;font:inherit;font-size:13px}
 .draft{background:#fafbfc;border:1px dashed #cfd5dd;border-radius:10px;padding:10px;margin-top:10px}
+.draft .meta{font-size:12px;color:var(--muted);margin-bottom:6px}.draft input.subj{width:100%;margin-bottom:6px}
+.group{background:#fff;border:1px solid var(--line);border-radius:14px;padding:10px 10px 2px;margin-bottom:12px}
+.group>.gh{font-size:13px;font-weight:700;margin:2px 4px 8px;display:flex;gap:8px;align-items:center}
+.group>.gh .n{font-size:11px;color:var(--muted);font-weight:600}
+.group .card{border-radius:10px}
+.note{font-size:12px;color:var(--muted);margin-top:6px}.warn-t{color:#8a5a00}
+.tag.auditrack{background:#fdecea;color:#9b2c20}.tag.quoterelay{background:#e8f6f8;color:#16606e}.tag.wa_leads{background:#e6f6ec;color:#1e7a3c}
 .empty{color:var(--muted);font-size:14px;background:#fff;border:1px dashed #dfe3e8;border-radius:12px;padding:22px;text-align:center}
 .banner{background:#fff;border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:14px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
 .banner.warn{border-color:#f0c36d;background:#fffaf0}
@@ -343,42 +350,46 @@ DASH_TPL = """
   {% if has.moveware %}<button class="chip" data-f="moveware">Moveware</button>{% endif %}
   {% if has.clickup %}<button class="chip" data-f="clickup">ClickUp</button>{% endif %}
   {% if wa_on %}<button class="chip" data-f="whatsapp">WhatsApp</button>{% endif %}
+  {% for src in ('auditrack', 'quoterelay', 'wa_leads') %}{% if has[src] %}<button class="chip" data-f="{{ src }}">{{ source_label(src) }}</button>{% endif %}{% endfor %}
   <span class="spacer"></span>
   <form method="post" action="/assistant/refresh"><input type="hidden" name="csrf" value="{{ csrf }}">
     <button class="btn light" type="submit">{{ t('refresh_now') }}</button></form>
 </div>
 
-{% if not items %}
-  <div class="empty">{{ t('empty') }}</div>
-{% endif %}
-{% for key, color in tiers %}
-  {% set group = items | selectattr('tier', 'equalto', key) | list %}
-  {% if group %}
-  <div class="tier-h" style="color:{{ color }}"><span class="dot" style="background:{{ color }}"></span>{{ t(key) }} ({{ group|length }})</div>
-  {% for it in group %}
+{% macro card(it, in_group=False) %}
   <div class="card {{ it.tier }} {% if it.seen %}seen{% endif %}" data-src="{{ it.source }}" id="i-{{ it.id }}">
     <div class="row"><div class="body">
       <span class="tag {{ it.source }}">{{ source_label(it.source) }}</span>{% if it.kind != 'whatsapp' %}<span class="tag kind">{{ kind_label(it.kind) }}</span>{% endif %}
+      {% if it.meta.job and not in_group %}<span class="tag">{{ t('file_label') }} {{ it.meta.job }}</span>{% endif %}
       <div class="title">{{ it.subject }}</div>
-      <div class="who">{{ it.from_name or '' }}{% if it.from_addr %} &lt;{{ it.from_addr }}&gt;{% endif %}</div>
-      {% if it.snippet %}<div class="snip">{{ it.snippet[:260] }}</div>{% endif %}
+      <div class="who">{{ it.from_name or '' }}{% if it.from_addr %} &lt;{{ it.from_addr }}&gt;{% endif %}{% if it.meta.unowned %} · <span class="warn-t">{{ t('unowned_note') }}</span>{% endif %}</div>
+      {% if it.snippet %}<div class="snip">{{ it.snippet[:300] }}</div>{% endif %}
     </div>
-    <div class="side" title="{{ t('urgency_title', score=it.score) }}">{% if it.received_at %}{% if it.source == 'moveware' %}{{ t('side_pack') if it.kind == 'request_docs' else t('side_since') }} {% elif it.source == 'clickup' %}{{ t('side_last_step') }} {% endif %}{% endif %}{{ when(it.received_at) }}</div></div>
+    <div class="side" title="{{ t('urgency_title', score=it.score) }}">{% if it.meta.due %}{{ t('side_due') }} {{ it.meta.due }}{% elif it.received_at %}{% if it.source == 'moveware' %}{{ t('side_pack') if it.kind == 'request_docs' else t('side_since') }} {% elif it.source == 'clickup' %}{{ t('side_last_step') }} {% endif %}{{ when(it.received_at) }}{% endif %}</div></div>
     <div class="acts">
       {% if it.url %}<a class="btn small light" href="/assistant/item/{{ it.id }}/open" target="_blank" rel="noopener">{{ t('open') }}</a>{% endif %}
       {% if it.source == 'microsoft' and draft_on %}
       <form method="post" action="/assistant/item/{{ it.id }}/draft"><input type="hidden" name="csrf" value="{{ csrf }}">
         <button class="btn small light" type="submit">{{ t('suggest_reply') }}</button></form>{% endif %}
+      {% set dr = it.meta.draft %}
+      {% if dr and not dr.handled_by_product and draft_ok %}
+      <form method="post" action="/assistant/item/{{ it.id }}/followup"><input type="hidden" name="csrf" value="{{ csrf }}">
+        <button class="btn small" type="submit">{{ t('draft_whatsapp') if dr.channel == 'whatsapp' else t('draft_email') }}</button></form>{% endif %}
       <form method="post" action="/assistant/item/{{ it.id }}/seen"><input type="hidden" name="csrf" value="{{ csrf }}">
         <input type="hidden" name="seen" value="{{ '0' if it.seen else '1' }}">
         <button class="btn small light" type="submit">{{ t('undo_done') if it.seen else t('done') }}</button></form>
     </div>
+    {% if dr and dr.handled_by_product %}<div class="note">{{ t('handled_by_product') }}</div>{% endif %}
     {% for d in drafts.get(it.id, []) %}
     <div class="draft">
       <form method="post" action="/assistant/draft/{{ d.id }}/save"><input type="hidden" name="csrf" value="{{ csrf }}">
+        {% if dr and dr.channel == 'email' %}<div class="meta">{{ t('draft_to') }}: <b>{{ dr.to or t('draft_to_blank') }}</b></div>
+        <input class="subj" type="text" name="subject" value="{{ d.subject or '' }}">{% endif %}
+        {% if dr and dr.channel == 'whatsapp' and not dr.window_open %}<div class="meta warn-t">{{ t('wa_window_closed') }}</div>{% endif %}
         <textarea name="body">{{ d.body }}</textarea>
         <div class="acts">
           {% if d.status == 'saved' %}<span class="ok">{{ t('draft_saved') }}</span>
+          {% elif dr and dr.channel == 'whatsapp' %}<span class="sub" style="margin:0">{{ t('wa_copy_hint') }}</span>
           {% elif can_write %}<button class="btn small" type="submit">{{ t('draft_save') }}</button>
           {% else %}<span class="sub" style="margin:0">{{ t('draft_copy_hint') }}</span>{% endif %}
           <button class="btn small light" type="button" data-copied="{{ t('copied') }}" onclick="navigator.clipboard.writeText(this.form.body.value);this.textContent=this.dataset.copied">{{ t('copy') }}</button>
@@ -386,6 +397,22 @@ DASH_TPL = """
     </div>
     {% endfor %}
   </div>
+{% endmacro %}
+
+{% if not items %}
+  <div class="empty">{{ t('empty') }}</div>
+{% endif %}
+{% for key, color in tiers %}
+  {% set group = entries | selectattr('tier', 'equalto', key) | list %}
+  {% if group %}
+  <div class="tier-h" style="color:{{ color }}"><span class="dot" style="background:{{ color }}"></span>{{ t(key) }} ({{ group | sum(attribute='n') }})</div>
+  {% for e in group %}
+    {% if e.todos|length > 1 %}
+    <div class="group card-wrap" data-src="{{ e.sources }}">
+      <div class="gh">{{ t('file_label') }} {{ e.file }} <span class="n">· {{ t('n_todos', n=e.todos|length) }}</span></div>
+      {% for it in e.todos %}{{ card(it, True) }}{% endfor %}
+    </div>
+    {% else %}{{ card(e.todos[0]) }}{% endif %}
   {% endfor %}
   {% endif %}
 {% endfor %}
@@ -404,8 +431,11 @@ document.querySelectorAll('.chip').forEach(function(c){c.onclick=function(){
   document.querySelectorAll('.chip').forEach(function(x){x.classList.remove('on')});c.classList.add('on');
   var f=c.dataset.f;document.querySelectorAll('.card').forEach(function(k){
     k.style.display=(f==='all'||k.dataset.src===f)?'':'none'});
+  document.querySelectorAll('.group').forEach(function(g){var any=false;
+    g.querySelectorAll('.card').forEach(function(k){if(k.style.display!=='none')any=true});
+    g.style.display=any?'':'none'});
   document.querySelectorAll('.tier-h').forEach(function(h){var n=h.nextElementSibling,any=false;
-    while(n&&n.classList.contains('card')){if(n.style.display!=='none')any=true;n=n.nextElementSibling}
+    while(n&&(n.classList.contains('card')||n.classList.contains('group'))){if(n.style.display!=='none')any=true;n=n.nextElementSibling}
     h.style.display=any?'':'none'});
 }});
 </script>"""
@@ -445,7 +475,8 @@ def dashboard(u):
     if not ms:
         fresh["microsoft"] = i18n.t(lang, "not_connected")
     # Only show a source's box / filter / "as of" line if this person has items from it.
-    has = {src: any(i["source"] == src for i in ranked) for src in ("moveware", "clickup")}
+    has = {src: any(i["source"] == src for i in ranked)
+           for src in ("moveware", "clickup", "auditrack", "quoterelay", "wa_leads")}
     counts = {t: sum(1 for i in ranked if i["tier"] == t and not i["seen"])
               for t in ("urgent", "today", "soon")}
     counts["moveware"] = sum(1 for i in ranked if i["source"] == "moveware" and not i["seen"])
@@ -456,6 +487,7 @@ def dashboard(u):
     return _render(i18n.t(lang, "nav_dashboard"), DASH_TPL, u, lang=lang,
                    first=(u["name"] or u["email"]).split(" ")[0].split("@")[0],
                    greeting=greeting, ms=ms, items=ranked, drafts=drafts, counts=counts,
+                   entries=group_by_file(ranked), draft_ok=drafting.enabled(),
                    fresh=fresh, wa_on=wa_on, next_run=_next_run_label(lang), has=has,
                    refreshing=request.args.get("refreshing") or request.args.get("connected"),
                    tiers=[("urgent", "#c0392b"), ("today", "#d68910"), ("soon", "#7f8c8d")],
@@ -465,6 +497,52 @@ def dashboard(u):
                    draft_on=drafting.enabled() and ms is not None,
                    ready=vault.is_configured(),
                    can_write=graph.can_write_drafts())
+
+
+def group_by_file(ranked) -> list:
+    """Dashboard entries: one per to-do, except that to-dos about the same move
+    file (any source) sit together under that file, placed where the most
+    urgent of them ranks. A sequel (110873A) groups under its file (110873)
+    and keeps its own number on its card."""
+    from . import todo
+    entries, by_file = [], {}
+    for it in ranked:
+        job = str((it.get("meta") or {}).get("job") or "").strip()
+        key = todo.base_file(job) if job else ""
+        if key and key in by_file:
+            e = by_file[key]
+            e["todos"].append(it)
+            e["n"] += 1
+            if it["source"] not in e["sources"].split():
+                e["sources"] += " " + it["source"]
+            continue
+        e = {"file": key, "tier": it["tier"], "todos": [it], "n": 1, "sources": it["source"]}
+        entries.append(e)
+        if key:
+            by_file[key] = e
+    return entries
+
+
+@bp.route("/assistant/item/<item_id>/followup", methods=["POST"])
+@login_required
+def item_followup(u, item_id):
+    """Draft a follow-up for a product to-do from its facts only. Never sends."""
+    _check_csrf()
+    it = db.get_item(u["id"], item_id)
+    if not it:
+        abort(404)
+    meta = json.loads(it["meta"] or "{}") if isinstance(it["meta"], str) else (it["meta"] or {})
+    dr = meta.get("draft")
+    if not dr or dr.get("handled_by_product"):
+        abort(404)
+    lang = user_lang(u)
+    title, _snip = i18n.item_text({**dict(it), "meta": meta}, lang)
+    try:
+        subject, text = drafting.draft_followup(u["name"] or u["email"], dr, title)
+    except Exception as exc:
+        subject, text = "", i18n.t(lang, "draft_error", err=exc)
+    db.save_draft(u["id"], item_id, text, subject=subject)
+    return redirect(f"/assistant#i-{item_id}")
 
 
 @bp.route("/assistant/refresh", methods=["POST"])
@@ -551,11 +629,41 @@ def draft_save(u, draft_id):
     it = db.get_item(u["id"], d["item_id"])
     body = (request.form.get("body") or d["body"]).strip()
     db.update_draft(u["id"], draft_id, body=body)
+    if it["source"] != "microsoft":
+        return _save_followup(u, it, d, body)
     try:
         res = graph.create_reply_draft(u["id"], it["external_id"], body)
         db.update_draft(u["id"], draft_id, status="saved", provider_draft_id=res.get("id"))
     except Exception as exc:
         db.update_draft(u["id"], draft_id,
+                        body=f"{body}\n\n" + i18n.t(user_lang(u), "draft_not_saved", err=exc))
+    return redirect(f"/assistant#i-{it['id']}")
+
+
+def _save_followup(u, it, d, body):
+    """A product to-do's draft → the user's Outlook Drafts: as a reply inside the
+    thread when the product named the message (it lives in this user's own
+    mailbox), else as a new message. WhatsApp drafts are copied, never saved."""
+    meta = json.loads(it["meta"] or "{}") if isinstance(it["meta"], str) else (it["meta"] or {})
+    dr = meta.get("draft") or {}
+    subject = (request.form.get("subject") or d.get("subject") or "").strip()
+    db.update_draft(u["id"], d["id"], subject=subject)
+    if dr.get("channel") != "email":
+        return redirect(f"/assistant#i-{it['id']}")
+    try:
+        res = None
+        if dr.get("reply_to_message_id"):
+            try:
+                res = graph.create_reply_draft(u["id"], dr["reply_to_message_id"], body)
+            except PermissionError:
+                raise
+            except Exception:
+                res = None                      # not in this mailbox: a new message instead
+        if res is None:
+            res = graph.create_new_draft(u["id"], dr.get("to") or "", subject, body, dr.get("cc") or [])
+        db.update_draft(u["id"], d["id"], status="saved", provider_draft_id=res.get("id"))
+    except Exception as exc:
+        db.update_draft(u["id"], d["id"],
                         body=f"{body}\n\n" + i18n.t(user_lang(u), "draft_not_saved", err=exc))
     return redirect(f"/assistant#i-{it['id']}")
 
@@ -765,6 +873,15 @@ never anyone's emails or to-dos.</p>
   <form method="post" action="/assistant/admin/run"><input type="hidden" name="csrf" value="{{ csrf }}">
     <button class="btn" type="submit">Run all now</button></form></div>
 
+<h2>Connected products</h2>
+<table><tr><th>Product</th><th>Status</th><th>Last complete list</th><th>To-dos</th><th>Last attempt</th></tr>
+{% for f in products %}<tr><td><b>{{ f.name }}</b></td>
+  <td>{% if not f.has_token %}<span class="bad">waiting for its token</span> <span class="sub" style="margin:0">(Render: {{ f.token_env }})</span>
+      {% elif f.ok %}<span class="ok">ok</span>{% elif f.ok is none %}not read yet{% else %}<span class="bad">{{ (f.error or 'failed')[:140] }}</span>{% endif %}</td>
+  <td>{{ stamp(f.good_at) if f.good_at else '—' }}</td><td>{{ f.count }}</td><td>{{ stamp(f.tried_at) if f.tried_at else '—' }}</td></tr>
+{% else %}<tr><td colspan="5" class="sub">No products configured.</td></tr>{% endfor %}</table>
+<p class="sub">Each product sends its current list once per run; a failed or partial read keeps the last complete list. Counts only — never a customer.</p>
+
 <h2>Moveware data entry</h2>
 {% set h = health %}
 <div class="banner"><div style="flex:1">
@@ -864,7 +981,15 @@ def admin(u):
                    db_kind="Postgres" if db._db_url().startswith("postgresql") else "SQLite (temporary!)",
                    draft_on=drafting.enabled(), can_write=graph.can_write_drafts(),
                    wa_ai=wa_triage.enabled(),
-                   sched=scan._sched is not None, health=_health())
+                   sched=scan._sched is not None, health=_health(), products=_products())
+
+
+def _products():
+    try:
+        from . import feeds
+        return feeds.health()
+    except Exception:
+        return []
 
 
 def _health():

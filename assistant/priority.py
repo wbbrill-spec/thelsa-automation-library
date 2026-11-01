@@ -67,6 +67,11 @@ def score(item, now=None) -> int:
         s = 55 + min(int(m.get("days") or 0) * 2, 35)
     elif kind == "tim_step":
         s = 30 + min(int(m.get("days") or 0) * 4, 25)
+    elif kind == "chased":
+        # Someone is asking again and you haven't answered: Urgent, and more so the
+        # more they chase and the longer it waits. Opening it doesn't hide it.
+        s = 76 + min(int(_age_hours(item, now) / 12), 10) + min((int(m.get("chases") or 1) - 1) * 4, 10)
+        return max(0, min(100, s))
     elif kind == "needs_reply":
         s = 45 + min(int(_age_hours(item, now) / 6), 25)
         if m.get("importance") == "high":

@@ -92,10 +92,24 @@ def fetch_inbox(user_id: str) -> list:
     since = (_dt.datetime.now(_dt.timezone.utc)
              - _dt.timedelta(days=LOOKBACK_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
     data = _get(token, "/me/mailFolders/inbox/messages", {
-        "$select": "id,subject,from,receivedDateTime,isRead,webLink,bodyPreview,flag,importance",
+        "$select": "id,subject,from,receivedDateTime,isRead,webLink,bodyPreview,flag,importance,conversationId",
         "$top": str(MAX_MESSAGES),
         "$orderby": "receivedDateTime desc",
         "$filter": f"receivedDateTime ge {since}",
+    })
+    return data.get("value", [])
+
+
+def fetch_sent(user_id: str) -> list:
+    """The user's own sent mail over the same look-back: only which conversation
+    and when (no bodies) — to know which chasers they have already answered."""
+    token = access_token(user_id)
+    since = (_dt.datetime.now(_dt.timezone.utc)
+             - _dt.timedelta(days=LOOKBACK_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    data = _get(token, "/me/mailFolders/sentitems/messages", {
+        "$select": "conversationId,sentDateTime",
+        "$top": "200", "$orderby": "sentDateTime desc",
+        "$filter": f"sentDateTime ge {since}",
     })
     return data.get("value", [])
 
@@ -119,6 +133,22 @@ def create_reply_draft(user_id: str, message_id: str, body_text: str) -> dict:
     h = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     r = requests.post(f"{GRAPH}/me/messages/{message_id}/createReply", headers=h,
                       json={"comment": body_text}, timeout=30)
+    if r.status_code in (401, 403):
+        raise PermissionError("Your mailbox connection doesn't allow creating drafts yet "
+                              "(Mail.ReadWrite not granted).")
+    r.raise_for_status()
+    d = r.json()
+    return {"id": d.get("id"), "webLink": d.get("webLink")}
+
+
+def create_new_draft(user_id: str, to: str, subject: str, body_text: str, cc=None) -> dict:
+    """Create a NEW message in the user's Outlook Drafts. Never sends."""
+    token = access_token(user_id)
+    h = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    msg = {"subject": subject or "", "body": {"contentType": "Text", "content": body_text},
+           "toRecipients": [{"emailAddress": {"address": to}}] if to and "@" in to else [],
+           "ccRecipients": [{"emailAddress": {"address": a}} for a in (cc or []) if "@" in a]}
+    r = requests.post(f"{GRAPH}/me/messages", headers=h, json=msg, timeout=30)
     if r.status_code in (401, 403):
         raise PermissionError("Your mailbox connection doesn't allow creating drafts yet "
                               "(Mail.ReadWrite not granted).")

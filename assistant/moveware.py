@@ -122,8 +122,27 @@ def tasks_for_files(files: list, today=None) -> list:
                         "snippet": f"Pack in {left} day(s) and no declared value or insurance "
                                    "on file.",
                         "received_at": _dt_utc(pack),
-                        "meta": {"job": job, "days_left": left, "due": pack, "client": client}})
+                        "meta": {"job": job, "days_left": left, "due": pack, "client": client,
+                                 "draft": {"channel": "email", "to": "", "language": "es",
+                                           "purpose": "ask the customer for the valued inventory and the "
+                                                      "insurance form before the pack date",
+                                           "facts": {"file": job, "customer": client,
+                                                     "pack_date": str(pack), "days_to_pack": left}}}})
     return out
+
+
+def _billing_draft(job, approved, invoiced, gap):
+    try:
+        from . import todo
+        to = ((todo.settings().get("drafts") or {}).get("invoice_request_to") or "").strip()
+    except Exception:
+        to = ""
+    if not to:
+        return None
+    return {"channel": "email", "to": to, "language": "es",
+            "purpose": "ask billing to invoice the extra charges the customer approved by email",
+            "facts": {"file": job, "approved_by_email": approved, "invoiced_so_far": invoiced,
+                      "not_yet_billed": gap}}
 
 
 def tasks_for_underbilling(rows: list) -> list:
@@ -142,7 +161,7 @@ def tasks_for_underbilling(rows: list) -> list:
                                f"({_money(gap)} not billed)",
                     "url": _url(job), "received_at": None,
                     "meta": {"job": job, "value": gap, "approved": approved,
-                             "invoiced": invoiced}})
+                             "invoiced": invoiced, "draft": _billing_draft(job, approved, invoiced, gap)}})
     return out
 
 

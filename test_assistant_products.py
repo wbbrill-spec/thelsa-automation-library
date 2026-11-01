@@ -202,3 +202,8 @@ def test_auditrack_build_runs_on_real_calculations(monkeypatch):
     assert complete
     inv = [i for i in items if i["kind"] == "invoice_ready"]
     assert inv and inv[0]["owner_email"] == "sarareyes@thelsa.com" and inv[0]["file"] == "111501"
+
+
+def test_product_team_used_when_nobody_named():
+    it = todo.clean_item("wa_leads", item(role="advisor", team=["team@thelsa.com", "not-an-address"]))
+    assert todo.owners(it) == {"team@thelsa.com"}

@@ -121,7 +121,7 @@ def test_whatsapp_sync_flow(client):
     client.post("/assistant/whatsapp/optin", data={"csrf": "tok", "agree": "on"})
     client.post("/assistant/whatsapp/key", data={"csrf": "tok"})
     page = client.get("/assistant/whatsapp").data.decode()
-    key = re.search(r"(wa_[A-Za-z0-9_\-]+)", page).group(1)
+    key = re.search(r"<code>(wa_[A-Za-z0-9_\-]+)</code>", page).group(1)
     assert client.post("/api/assistant/whatsapp/sync", json={"chats": []},
                        headers={"Authorization": "Bearer wa_wrong"}).status_code == 401
     r = client.post("/api/assistant/whatsapp/sync", headers={"Authorization": f"Bearer {key}"},
@@ -150,7 +150,7 @@ def _wa_setup(client, monkeypatch, chats, verdicts=None, watch=None):
     client.post("/assistant/whatsapp/optin", data={"csrf": "tok", "agree": "on"})
     client.post("/assistant/whatsapp/key", data={"csrf": "tok"})
     page = client.get("/assistant/whatsapp").data.decode()
-    key = re.search(r"(wa_[A-Za-z0-9_\-]+)", page).group(1)
+    key = re.search(r"<code>(wa_[A-Za-z0-9_\-]+)</code>", page).group(1)
     r = client.post("/api/assistant/whatsapp/sync",
                     headers={"Authorization": f"Bearer {key}"}, json={"chats": chats})
     assert r.status_code == 200
@@ -626,3 +626,66 @@ def test_health_job_types_and_gap_rollup():
         {"coord": "Unassigned", "coord_email": ""}])
     assert rows[0] == {"coord": "Sara", "files": 2, "no_dates": 1, "wrong_year": 1}
     assert rows[1]["coord"] == "Unassigned"
+
+
+# ── product to-dos: grouping by file, follow-up drafts, admin panel ───────────
+def _prod_row(eid, job, kind="invoice_ready", draft=None, urgency=80, src="auditrack"):
+    from assistant import todo
+    it = todo.clean_item(src, {"id": eid, "kind": kind, "file": job, "urgency": urgency,
+                               "owner_email": "ana@thelsa.com",
+                               "title": {"en": f"Do {eid}", "es": f"Hacer {eid}"},
+                               "detail": {"en": "detail", "es": "detalle"}, "draft": draft})
+    return todo.to_row(it)
+
+
+def test_dashboard_groups_todos_by_file_and_drafts_followups(client, monkeypatch):
+    from assistant import drafting, graph
+    u = consent("ana@thelsa.com")
+    db.replace_items(u["id"], "auditrack", [
+        _prod_row("inv:110873", "110873", draft={"channel": "email", "to": "billing@thelsa.com",
+                                                 "purpose": "invoice", "facts": {"file": "110873"}}),
+        _prod_row("price:110873A", "110873A", kind="price_check", urgency=55)])
+    db.replace_items(u["id"], "quoterelay", [
+        _prod_row("q1", "", kind="quote_followup", src="quoterelay",
+                  draft={"channel": "email", "to": "agent@x.com", "handled_by_product": True})])
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    login(client, "ana@thelsa.com")
+    html = client.get("/assistant").data.decode()
+    assert html.count('class="group') == 1 and "File 110873" in html and "2 to-dos" in html
+    assert "QuoteRelay puts this follow-up in your Outlook Drafts" in html     # no second draft button
+    inv = next(i for i in db.list_items(u["id"], "auditrack") if i["kind"] == "invoice_ready")
+    seen = {}
+
+    def fake(user_name, dr, title):
+        seen["facts"] = dr["facts"]
+        return "Factura 110873", "Hola, por favor facturen el expediente 110873."
+    monkeypatch.setattr(drafting, "draft_followup", fake)
+    r = client.post(f"/assistant/item/{inv['id']}/followup", data={"csrf": "tok"})
+    assert r.status_code == 302 and seen["facts"] == {"file": "110873"}
+    d = db.list_drafts(u["id"], inv["id"])[0]
+    assert d["subject"] == "Factura 110873"
+    made = {}
+    monkeypatch.setattr(graph, "create_new_draft",
+                        lambda uid, to, subj, body, cc=None: made.update(to=to, subj=subj) or {"id": "D1"})
+    client.post(f"/assistant/draft/{d['id']}/save", data={"csrf": "tok", "subject": "Facturar 110873",
+                                                          "body": "texto"})
+    assert made == {"to": "billing@thelsa.com", "subj": "Facturar 110873"}
+    assert db.list_drafts(u["id"], inv["id"])[0]["status"] == "saved"
+    q = db.list_items(u["id"], "quoterelay")[0]
+    assert client.post(f"/assistant/item/{q['id']}/followup", data={"csrf": "tok"}).status_code == 404
+
+
+def test_followup_is_scoped_to_the_signed_in_user(client):
+    a = consent("ana@thelsa.com")
+    consent("bob@thelsa.com")
+    db.replace_items(a["id"], "auditrack", [_prod_row("inv:1", "1", draft={"channel": "email"})])
+    it = db.list_items(a["id"], "auditrack")[0]
+    login(client, "bob@thelsa.com")
+    assert client.post(f"/assistant/item/{it['id']}/followup", data={"csrf": "tok"}).status_code == 404
+
+
+def test_admin_shows_connected_products(client):
+    consent("boss@thelsa.com")
+    login(client, "boss@thelsa.com")
+    html = client.get("/assistant/admin").data.decode()
+    assert "Connected products" in html and "QuoteRelay" in html and "waiting for its token" in html

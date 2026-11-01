@@ -91,6 +91,7 @@ drafts = Table(
     Column("user_id", String(36), ForeignKey("asst_users.id", ondelete="CASCADE"), nullable=False),
     Column("item_id", String(36), ForeignKey("asst_items.id", ondelete="CASCADE"), nullable=False),
     Column("body", Text, nullable=False),
+    Column("subject", Text),                                 # follow-up drafts (product to-dos)
     Column("status", String(20), nullable=False, default="suggested"),  # suggested | saved | dismissed
     Column("provider_draft_id", String(512)),                # id of the draft in Outlook/Gmail
     Column("created_at", DateTime(timezone=True), default=now),
@@ -469,12 +470,13 @@ def sync_times(user_id: str) -> dict:
 
 # ── Drafts ─────────────────────────────────────────────────────────────────────
 def save_draft(user_id: str, item_id: str, body: str, status: str = "suggested",
-               provider_draft_id: str = None) -> str:
+               provider_draft_id: str = None, subject: str = None) -> str:
     if not get_item(user_id, item_id):
         raise PermissionError("Item does not belong to this user")
     did = _uuid()
     with engine().begin() as c:
         c.execute(insert(drafts).values(id=did, user_id=user_id, item_id=item_id, body=body,
+                                        subject=subject,
                                         status=status, provider_draft_id=provider_draft_id,
                                         created_at=now()))
     return did
@@ -489,7 +491,7 @@ def list_drafts(user_id: str, item_id: str = None):
 
 
 def update_draft(user_id: str, draft_id: str, **vals):
-    allowed = {k: v for k, v in vals.items() if k in ("body", "status", "provider_draft_id")}
+    allowed = {k: v for k, v in vals.items() if k in ("body", "subject", "status", "provider_draft_id")}
     with engine().begin() as c:
         c.execute(update(drafts).where(and_(drafts.c.user_id == user_id, drafts.c.id == draft_id))
                   .values(**allowed))

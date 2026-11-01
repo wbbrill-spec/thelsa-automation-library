@@ -49,6 +49,13 @@ def scan_user(user_id: str) -> dict:
             try:
                 msgs = [triage.normalize_graph(m) for m in graph.fetch_inbox(user_id)]
                 found = triage.triage(msgs, conn["account_email"] or user["email"])
+                try:   # chasers waiting on the user, read or not (needs only Mail.Read)
+                    ch = triage.chasers(msgs, graph.fetch_sent(user_id),
+                                        conn["account_email"] or user["email"])
+                    dup = {c["external_id"] for c in ch}
+                    found = [f for f in found if not (f["kind"] == "needs_reply" and f["external_id"] in dup)] + ch
+                except Exception as exc:
+                    report["errors"].append(f"chasers: {exc}")
                 db.replace_items(user_id, "microsoft", found)
                 db.mark_connection(user_id, "microsoft", ok=True)
                 report["mail"] = len(found)

@@ -37,6 +37,9 @@ ITEM:
     sticky       true: opening it does not lower it; only fixing it clears it
     link         where it gets fixed (https only)
     customer     the customer / agent name, shown to the owner only
+    team         addresses the PRODUCT says handle its to-dos when nobody is
+                 named (e.g. the WhatsApp inbox's notify list); used before
+                 the company's role list
     draft        null, or the facts for a follow-up message:
                  {channel: email|whatsapp, to, cc, language, purpose,
                   facts: {...}, reply_to_message_id, handled_by_product,
@@ -214,6 +217,7 @@ def clean_item(product: str, raw: dict) -> dict | None:
         "urgency": urgency, "sticky": bool(raw.get("sticky")),
         "link": _link(raw.get("link")),
         "customer": str(raw.get("customer") or "").strip()[:160],
+        "team": [str(e).strip().lower() for e in (raw.get("team") or []) if "@" in str(e)][:10],
         "draft": _draft(raw.get("draft")),
     }
 
@@ -244,6 +248,8 @@ def owners(item: dict, directory: dict | None = None) -> set:
     em = resolve_owner(item.get("owner_name"), item.get("owner_email"), directory)
     if em:
         return {em}
+    if item.get("team"):
+        return set(item["team"])
     if item.get("role"):
         found = set(people(item["role"]))
         if found:

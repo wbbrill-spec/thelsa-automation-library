@@ -883,7 +883,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>FAIM AuditTrack — Coordinator Dashboard</title>
+<title>AuditTrack — Coordinator Dashboard</title>
 <style>
 :root{color-scheme:light;--surface-1:#fcfcfb;--page:#f9f9f7;--text-primary:#0b0b0b;--text-secondary:#52514e;--muted:#898781;
 --grid:#e1e0d9;--baseline:#c3c2b7;--border:rgba(11,11,11,0.10);--series-1:#2a78d6;--series-1-soft:#cde2fb;
@@ -939,7 +939,7 @@ td.num{font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
 <div class="wrap">
 <header class="top">
 <div>
-<h1>FAIM AuditTrack — Coordinator Dashboard</h1>
+<h1>AuditTrack — Coordinator Dashboard</h1>
 <p class="sub">Thelsa Mobility Solutions · FAIM 3.4 move-file evidence coverage · <span id="window">—</span></p>
 </div>
 <div class="topright">

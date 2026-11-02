@@ -504,12 +504,19 @@ def create_invoice_drafts(worklist, live=False):
 
 
 def alerts_enabled():
-    # OFF again (Bill, 30 Oct 2026 evening): "ready to invoice" only sees invoices
-    # raised IN Moveware, but Thelsa also invoices outside it (Finance's ledger) —
-    # 110887 was emailed as unbilled though Finance invoiced it in Nov 2025. Stays
-    # off until the list is checked against Finance. AUDIT_ALERTS_ENABLED=1 = on.
-    return (os.environ.get("AUDIT_ALERTS_ENABLED", "0") == "1"
+    # Ready-to-invoice alerts ON again (Bill, 2 Nov 2026), now addressed to the
+    # invoicing team (Fer, Monica; Lupita cc) and checked against Finance's invoice
+    # register, which fixed the 30 Oct problem (110887 emailed as unbilled though
+    # Finance had invoiced it). AUDIT_ALERTS_ENABLED=0 turns them off.
+    return (os.environ.get("AUDIT_ALERTS_ENABLED", "1") == "1"
             and os.environ.get("DRY_RUN", "0") != "1")
+
+
+def cost_alerts_enabled():
+    # Cost-problem emails to coordinators stay OFF until their data is verified
+    # (Bill, 30 Oct 2026). Their own switch, so turning invoice alerts on does not
+    # turn these on: COST_ALERTS_ENABLED=1.
+    return alerts_enabled() and os.environ.get("COST_ALERTS_ENABLED", "0") == "1"
 
 
 def _d(v):
@@ -571,7 +578,7 @@ def send_cost_alerts(files, live=False):
     import datetime as _dt
     import hashlib
     alerts = build_alerts(files)
-    status = {"enabled": alerts_enabled(), "live": bool(live), "alert_count": len(alerts),
+    status = {"enabled": cost_alerts_enabled(), "live": bool(live), "alert_count": len(alerts),
               "sent": [], "skipped": 0, "skipped_reason": None}
     if not alerts:
         status["skipped_reason"] = "no discrepancies"
@@ -579,8 +586,8 @@ def send_cost_alerts(files, live=False):
     if not live:
         status["skipped_reason"] = "demo data — never off non-live data"
         return status
-    if not alerts_enabled():
-        status["skipped_reason"] = "AUDIT_ALERTS_ENABLED=0 (or DRY_RUN=1)"
+    if not cost_alerts_enabled():
+        status["skipped_reason"] = "cost alerts off (COST_ALERTS_ENABLED != 1)"
         return status
     try:
         repeat = max(1, int(os.environ.get("COST_ALERTS_REPEAT_DAYS", "7")))

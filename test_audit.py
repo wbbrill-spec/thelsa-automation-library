@@ -606,8 +606,9 @@ def test_no_invoice_alert_when_nothing_is_ready():
     assert ca.build_invoice_alerts([]) == []
 
 
-def test_invoice_drafts_gated_off_by_default():
+def test_invoice_drafts_gated_off_by_the_switch(monkeypatch):
     import coordinator_alerts as ca
+    monkeypatch.setenv("AUDIT_ALERTS_ENABLED", "0")
     wl = [{"job": 1, "client": "X", "coordinator": "Y", "value": 100}]
     st = ca.create_invoice_drafts(wl, live=True)   # enabled flag not set in tests
     assert st["drafts"] == [] and st["skipped_reason"]
@@ -1241,3 +1242,13 @@ def test_mailer_takes_one_or_several_recipients():
     assert _addresses("a@x.com") == ["a@x.com"]
     assert _addresses("a@x.com, b@x.com") == ["a@x.com", "b@x.com"]
     assert _addresses(["a@x.com", "b@x.com"]) == ["a@x.com", "b@x.com"]
+
+
+def test_invoice_alerts_on_but_cost_alerts_stay_off_by_default(monkeypatch):
+    """Bill, 2 Nov 2026: invoice alerts on; cost emails off until verified (30 Oct)."""
+    import coordinator_alerts as ca
+    monkeypatch.delenv("AUDIT_ALERTS_ENABLED", raising=False)
+    monkeypatch.delenv("COST_ALERTS_ENABLED", raising=False)
+    monkeypatch.delenv("DRY_RUN", raising=False)
+    assert ca.alerts_enabled() is True
+    assert ca.cost_alerts_enabled() is False

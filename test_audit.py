@@ -575,41 +575,35 @@ def test_embassy_regex_matches_expected_names():
     assert not mw_live._is_embassy("BMW Group")
 
 
-def test_invoice_alerts_group_by_coordinator_and_cc_both():
+def test_invoice_alerts_go_to_the_invoicing_team_in_one_email():
+    """Lupita, 2 Nov 2026: alerts go to Fer (Maria Fernanda Carrasco) and Monica
+    Escalante, Lupita in copy — not to the coordinators or sales."""
     import coordinator_alerts as ca
     worklist = [
         {"job": 1, "client": "HSBC", "coordinator": "Maria", "value": 7723,
          "embassy": False, "pack": "2026-07-13", "delivery": None},
-        {"job": 2, "client": "Bayer", "coordinator": "Maria", "value": 12000,
+        {"job": 2, "client": "Bayer", "coordinator": "Daniela Martínez", "value": 12000,
+         "coordinator_email": "danielamartinez@thelsa.com",
          "embassy": False, "pack": None, "delivery": "2026-08-01"},
         {"job": 3, "client": "EMBAJADA", "coordinator": "Wendy", "value": 60000,
          "embassy": True, "pack": "2026-07-01", "delivery": "2026-08-10"},
     ]
     alerts = ca.build_invoice_alerts(worklist)
-    assert len(alerts) == 2                       # grouped by coordinator
-    top = alerts[0]                               # Wendy first (highest value)
-    assert top["coordinator"] == "Wendy" and top["total"] == 60000
-    assert "maria.gonzalez@thelsa.com" in top["cc"] and "bbrill@thelsa.com" in top["cc"]
-    assert "US EMBASSY" in top["body"]
-    maria = [a for a in alerts if a["coordinator"] == "Maria"][0]
-    assert maria["file_count"] == 2 and maria["total"] == 19723
+    assert len(alerts) == 1
+    a = alerts[0]
+    assert a["to"] == ["mariacarrasco@thelsa.com", "monicaescalante@thelsa.com"]
+    assert a["cc"] == ["maria.gonzalez@thelsa.com"]
+    assert "danielamartinez@thelsa.com" not in a["to"] + a["cc"]
+    assert a["file_count"] == 3 and a["total"] == 79723
+    assert "Hi Fer and Monica" in a["body"] and "Hola Fer y Mónica" in a["body"]
+    assert "coordinator Daniela Martínez" in a["body"] and "US EMBASSY" in a["body"]
+    assert a["body"].index("Job 3") < a["body"].index("Job 2") < a["body"].index("Job 1")   # highest value first
+    assert "[FAIM Audit Assistant]" in a["subject"] or "[" in a["subject"]
 
 
-def test_invoice_alert_uses_coordinator_email_from_file():
-    """The coordinator's email travels on the file (from MoveWare quote roles), so
-    the alert addresses the right person without a name→email map."""
+def test_no_invoice_alert_when_nothing_is_ready():
     import coordinator_alerts as ca
-    worklist = [{"job": 1, "client": "HSBC", "coordinator": "Sara Reyes",
-                 "coordinator_email": "sarareyes@thelsa.com", "value": 5000}]
-    alerts = ca.build_invoice_alerts(worklist)
-    assert alerts[0]["to"] == "sarareyes@thelsa.com" and alerts[0]["resolved"] is True
-
-
-def test_invoice_alert_falls_back_when_no_email():
-    import coordinator_alerts as ca
-    worklist = [{"job": 1, "client": "X", "coordinator": "Unassigned", "value": 5000}]
-    alerts = ca.build_invoice_alerts(worklist)
-    assert alerts[0]["resolved"] is False          # routed to fallback, not a guess
+    assert ca.build_invoice_alerts([]) == []
 
 
 def test_invoice_drafts_gated_off_by_default():
@@ -647,6 +641,7 @@ def test_invoice_alerts_send_and_dedupe_within_48h(tmp_path, monkeypatch):
           {"job": 2, "client": "B", "coordinator": "Maria", "value": 200, "status": "W", "pack": __import__("datetime").date.today().isoformat()}]
     st1 = ca.dispatch_invoice_alerts(wl, live=True)          # send=None -> uses flags -> SEND
     assert st1["mode"] == "send" and len(st1["sent"]) == 1   # grouped into one email
+    assert log[0][1] == ["mariacarrasco@thelsa.com", "monicaescalante@thelsa.com"]
     assert log[0][0] == "send"
     st2 = ca.dispatch_invoice_alerts(wl, live=True)          # immediate re-run
     assert st2["alert_count"] == 0                            # de-duped within 48h
@@ -1239,3 +1234,10 @@ def test_embassy_recognised_by_bill_to():
     roles = {"billTo": {"entity": {"name": "EMBAJADA DE LOS ESTADOS UNIDOS DE AMERICA"}}}
     assert mw_live._is_embassy(mw_live._role_name(roles, "billTo"))
     assert mw_live._role_name({}, "billTo") == ""
+
+
+def test_mailer_takes_one_or_several_recipients():
+    from engine.mailer import _addresses
+    assert _addresses("a@x.com") == ["a@x.com"]
+    assert _addresses("a@x.com, b@x.com") == ["a@x.com", "b@x.com"]
+    assert _addresses(["a@x.com", "b@x.com"]) == ["a@x.com", "b@x.com"]

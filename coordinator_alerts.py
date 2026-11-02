@@ -206,11 +206,24 @@ def build_alerts(files):
 # When the audit finds files that can be billed (packed/delivered) but are not
 # yet invoiced, the coordinator is alerted, cc the supervisor AND bbrill. Same
 # draft-only, gated discipline as the discrepancy alerts above.
-INVOICE_CC = "maria.gonzalez@thelsa.com,bbrill@thelsa.com"
+# Ready-to-invoice alerts go to the team that ISSUES invoices, not to the
+# coordinators or sales (Lupita, 2 Nov 2026: "All alerts for all services ready to
+# be invoiced should go to Maria Fernanda Carrasco or Monica Escalante, in copy my
+# email. We are the responsible for issuing the invoice, not the sales or the MC").
+# One email per run listing every file, each with its coordinator.
+INVOICE_TO = "mariacarrasco@thelsa.com,monicaescalante@thelsa.com"
+INVOICE_TO_NAMES = "Fer and Monica"
+INVOICE_TO_NAMES_ES = "Fer y Mónica"
+INVOICE_CC = "maria.gonzalez@thelsa.com"
 
 
 def _invoice_cc_list():
     raw = os.environ.get("INVOICE_ALERT_CC", INVOICE_CC)
+    return [a.strip() for a in raw.split(",") if a.strip()]
+
+
+def _invoice_to_list():
+    raw = os.environ.get("INVOICE_ALERT_TO", INVOICE_TO)
     return [a.strip() for a in raw.split(",") if a.strip()]
 
 
@@ -220,12 +233,13 @@ def _file_lines(rows):
         tag = " [US EMBASSY]" if r.get("embassy") else ""
         when = (f"packed {r['pack']}" if r.get("pack")
                 else (f"delivered {r['delivery']}" if r.get("delivery") else ""))
+        coord = f"; coordinator {r['coordinator']}" if r.get("coordinator") else ""
         out.append(f"  • Job {r['job']} — {r.get('client','')}{tag}  "
-                   f"(value {_fmt(r.get('value', 0))}{' ' + r['currency'] if r.get('currency') else ''}{'; ' + when if when else ''})")
+                   f"(value {_fmt(r.get('value', 0))}{' ' + r['currency'] if r.get('currency') else ''}{'; ' + when if when else ''}{coord})")
     return out
 
 
-def _invoice_body(coordinator, rows, resolved, followup=False):
+def _invoice_body(coordinator, rows, resolved, followup=False, coordinator_es=None):
     """Bilingual (English + Spanish) alert explaining WHY the file was flagged and
     WHAT to do. Sent from bbrill@thelsa.com; a human can reply to the thread.
     When `followup` is set, it is a 48-hour reminder for files still not invoiced."""
@@ -233,25 +247,26 @@ def _invoice_body(coordinator, rows, resolved, followup=False):
     files = _file_lines(rows)
     en_reminder = ([
         "FOLLOW-UP / REMINDER: the file(s) below were flagged earlier and are STILL "
-        "not invoiced in Moveware after 48 hours. Please action them or reply with "
+        "not invoiced after 48 hours. Please issue the invoice(s) or reply with "
         "the reason for the hold.", "",
     ] if followup else [])
     es_reminder = ([
         "SEGUIMIENTO / RECORDATORIO: el/los expediente(s) de abajo se marcaron antes "
-        "y AÚN no están facturados en Moveware después de 48 horas. Por favor "
-        "atiéndelos o responde con el motivo de la espera.", "",
+        "y AÚN no están facturados después de 48 horas. Por favor emite la(s) "
+        "factura(s) o responde con el motivo de la espera.", "",
     ] if followup else [])
     en = [
         f"Hi {coordinator or 'team'},",
         "",
         *en_reminder,
         "The automated Move-File Audit flagged the following move(s) as READY TO "
-        "INVOICE: they have a pack or delivery date that has already passed, but no "
-        "invoice has been raised in Moveware yet. (US Embassy files are only flagged "
-        "once they have been DELIVERED.)",
+        "INVOICE: the move has happened (loaded, or delivered for inbound moves), but "
+        "no invoice shows in Moveware or in Finance's register yet. (US Embassy files "
+        "are only flagged once they have been DELIVERED.)",
         "",
-        "Please raise the invoice(s) in Moveware, or reply to this email if a file "
-        "is on hold or should not be billed yet.",
+        "Please issue the invoice(s), or reply to this email if a file is on hold or "
+        "should not be billed yet. Each file shows its coordinator, in case you need "
+        "details.",
         "",
         "Files ready to invoice:",
         *files,
@@ -259,16 +274,18 @@ def _invoice_body(coordinator, rows, resolved, followup=False):
         f"Total ready to invoice: {total}",
     ]
     es = [
-        f"Hola {coordinator or 'equipo'},",
+        f"Hola {coordinator_es or coordinator or 'equipo'},",
         "",
         *es_reminder,
         "La auditoría automática de expedientes marcó la(s) siguiente(s) mudanza(s) "
-        "como LISTA(S) PARA FACTURAR: ya tienen fecha de empaque o de entrega "
-        "cumplida, pero aún no se ha generado la factura en Moveware. (Los "
-        "expedientes de la Embajada de EE. UU. se marcan solo una vez ENTREGADOS.)",
+        "como LISTA(S) PARA FACTURAR: la mudanza ya se realizó (cargada, o entregada "
+        "si es de importación), pero aún no aparece factura en Moveware ni en el "
+        "registro de Finanzas. (Los expedientes de la Embajada de EE. UU. se marcan "
+        "solo una vez ENTREGADOS.)",
         "",
-        "Por favor genera la(s) factura(s) en Moveware, o responde a este correo si "
-        "algún expediente está en espera o no debe facturarse todavía.",
+        "Por favor emite la(s) factura(s), o responde a este correo si algún "
+        "expediente está en espera o no debe facturarse todavía. Cada expediente "
+        "indica su coordinador, por si necesitas detalles.",
         "",
         "Expedientes listos para facturar:",
         *files,
@@ -285,30 +302,26 @@ def _invoice_body(coordinator, rows, resolved, followup=False):
 
 
 def build_invoice_alerts(worklist):
-    """Group 'ready to invoice' worklist rows (from compute_metrics) by
-    coordinator into draft payloads. Pure — creates nothing."""
-    by_coord = {}
-    for r in (worklist or []):
-        by_coord.setdefault(r.get("coordinator") or "Unassigned", []).append(r)
-    cc = _invoice_cc_list()
-    alerts = []
-    for coord, rows in sorted(by_coord.items(),
-                              key=lambda kv: -sum(r.get("value", 0) for r in kv[1])):
-        rows.sort(key=lambda r: -r.get("value", 0))
-        direct = next((r.get("coordinator_email") for r in rows if r.get("coordinator_email")), None)
-        to_email, resolved = resolve_email(coord, direct_email=direct)
-        total = round(sum(r.get("value", 0) for r in rows), 2)
-        n = len(rows)
-        followup = any(r.get("_followup") for r in rows)
-        tag = "[To Invoice – REMINDER]" if followup else "[To Invoice]"
-        subject = (f"{tag} {n} file{'s' if n != 1 else ''} ready to bill — "
-                   f"{coord} ({_fmt(total)})")
-        alerts.append({
-            "coordinator": coord, "to": to_email, "cc": cc, "resolved": resolved,
-            "subject": app_subject(subject), "body": _invoice_body(coord, rows, resolved, followup),
-            "file_count": n, "total": total, "followup": followup,
-        })
-    return alerts
+    """ONE email to the invoicing team (Fer and Monica, Lupita in copy — Lupita,
+    2 Nov 2026) listing every file ready to invoice, highest value first, each with
+    its coordinator. Pure — creates nothing. Returns a list (empty or one alert)."""
+    rows = sorted(list(worklist or []), key=lambda r: -r.get("value", 0))
+    if not rows:
+        return []
+    to = _invoice_to_list()
+    total = round(sum(r.get("value", 0) for r in rows), 2)
+    n = len(rows)
+    followup = any(r.get("_followup") for r in rows)
+    tag = "[To Invoice – REMINDER]" if followup else "[To Invoice]"
+    subject = f"{tag} {n} file{'s' if n != 1 else ''} ready to bill ({_fmt(total)})"
+    names = os.environ.get("INVOICE_ALERT_TO_NAMES", INVOICE_TO_NAMES)
+    names_es = os.environ.get("INVOICE_ALERT_TO_NAMES_ES", INVOICE_TO_NAMES_ES)
+    return [{
+        "coordinator": "Invoicing team", "to": to, "cc": _invoice_cc_list(), "resolved": True,
+        "subject": app_subject(subject),
+        "body": _invoice_body(names, rows, True, followup, coordinator_es=names_es),
+        "file_count": n, "total": total, "followup": followup,
+    }]
 
 
 def send_enabled():
@@ -403,7 +416,8 @@ def _due(job, state, now):
 
 
 def dispatch_invoice_alerts(worklist, live=False, send=None):
-    """Alert coordinators about files ready to invoice — SEND or DRAFT.
+    """Alert the invoicing team (Fer and Monica, Lupita in copy) about files ready
+    to invoice — SEND or DRAFT.
 
     Gating (nothing goes out unless all hold):
       • AUDIT_ALERTS_ENABLED=1 and DRY_RUN!=1   (master switch)
@@ -412,7 +426,7 @@ def dispatch_invoice_alerts(worklist, live=False, send=None):
     Safeguards: de-dupes by job (a file is not re-alerted within
     INVOICE_ALERTS_REDISPATCH_DAYS, default 7) and caps emails per run
     (INVOICE_ALERTS_MAX, default 25). Sends from GRAPH_SENDER (default
-    bbrill@thelsa.com), cc maria.gonzalez + bbrill.
+    bbrill@thelsa.com), to INVOICE_ALERT_TO, cc INVOICE_ALERT_CC (maria.gonzalez).
     """
     import datetime as _dt
     now = _dt.datetime.now()
@@ -473,10 +487,9 @@ def dispatch_invoice_alerts(worklist, live=False, send=None):
             # Mark this coordinator's jobs alerted (bump count) so the next touch
             # is a 48h follow-up, not an immediate re-send.
             for r in fresh:
-                if (r.get("coordinator") or "Unassigned") == a["coordinator"]:
-                    prev = _entry(state, r.get("job")) or {"count": 0}
-                    state[str(r.get("job"))] = {"last": now.isoformat(),
-                                                "count": int(prev.get("count", 0)) + 1}
+                prev = _entry(state, r.get("job")) or {"count": 0}
+                state[str(r.get("job"))] = {"last": now.isoformat(),
+                                            "count": int(prev.get("count", 0)) + 1}
         except Exception as e:
             rec["ok"] = False
             rec["error"] = str(e)

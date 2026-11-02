@@ -25,6 +25,16 @@ def render_body(template_body):
     return (template_body or "").replace("\\n", "\n")
 
 
+
+def _addresses(to):
+    """One address, a comma-separated string, or a list -> list of addresses."""
+    if isinstance(to, (list, tuple, set)):
+        items = list(to)
+    else:
+        items = str(to or "").split(",")
+    return [a.strip() for a in items if str(a).strip()]
+
+
 class GraphMailer:
     def __init__(self, mailbox=None):
         # .strip() guards against a stray space/newline pasted into the env var.
@@ -109,7 +119,7 @@ class GraphMailer:
         msg = {
             "subject": subject,
             "body": {"contentType": "Text", "content": render_body(body_text)},
-            "toRecipients": [{"emailAddress": {"address": to_email}}],
+            "toRecipients": [{"emailAddress": {"address": a}} for a in _addresses(to_email)],
         }
         if cc_list:
             msg["ccRecipients"] = [{"emailAddress": {"address": a}} for a in cc_list]
@@ -137,7 +147,7 @@ class GraphMailer:
             "subject": subject,
             "body": {"contentType": "HTML" if html else "Text",
                      "content": body_text if html else render_body(body_text)},
-            "toRecipients": [{"emailAddress": {"address": to_email}}],
+            "toRecipients": [{"emailAddress": {"address": a}} for a in _addresses(to_email)],
         }
         if cc_list:
             msg["ccRecipients"] = [{"emailAddress": {"address": a}} for a in cc_list]

@@ -125,3 +125,23 @@ def test_the_report_is_sent_once_per_rules_version(tmp_path, monkeypatch):
     mc._mark_reported()
     assert mc._reported()
     assert mc.report({}) is False                        # already sent: nothing goes out
+
+
+def test_a_marker_left_by_a_dead_process_does_not_block(tmp_path, monkeypatch):
+    monkeypatch.setattr(mc, "_path", lambda: str(tmp_path / "mw_costs.json"))
+    (tmp_path / "mw_costs.json.building").write_text("999999 1")      # no such process
+    assert mc._building_elsewhere() is False
+    mc._mark_building()                                                 # this process
+    assert mc._building_elsewhere() is False
+
+
+def test_a_failed_send_is_retried_later(tmp_path, monkeypatch):
+    import engine.mailer as em
+    monkeypatch.setattr(mc, "_path", lambda: str(tmp_path / "mw_costs.json"))
+    class Boom:
+        def __init__(self, mailbox=None): pass
+        def send_mail(self, *a, **k): raise RuntimeError("graph down")
+    monkeypatch.setattr(em, "GraphMailer", Boom)
+    monkeypatch.setattr("costing_sheet.costs", lambda: {})
+    assert mc.report({}) is False
+    assert not mc._reported()                                           # claim released

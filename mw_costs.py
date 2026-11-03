@@ -229,6 +229,7 @@ def build(files: list, pause: float = 0.05) -> dict:
     except Exception as e:                       # noqa: BLE001
         with _LOCK:
             _STATE["error"] = f"{type(e).__name__}: {e}"[:300]
+        _email_problem(f"The line-item cost read from Moveware stopped: {_STATE['error']}")
         return {}
     finally:
         with _LOCK:
@@ -264,6 +265,10 @@ def ensure_built(max_age_h: float = 20.0) -> bool:
             return False
         fresh = _STATE["built_at"] and time.time() - _STATE["built_at"] < max_age_h * 3600
     if fresh:
+        with _LOCK:
+            files_now = dict(_STATE["files"])
+        if files_now and not _reported():
+            threading.Thread(target=report, args=(files_now,), daemon=True, name="mw-costs-report").start()
         return False
     if _building_elsewhere():
         return False                        # another worker is reading Moveware now
@@ -294,8 +299,19 @@ def _mark_reported() -> None:
 
 
 def _building_elsewhere(max_age_s: int = 2 * 3600) -> bool:
+    """Another worker of THIS deploy is reading Moveware now: its marker is recent
+    and the process that wrote it is still alive (a marker left by a process a
+    restart killed doesn't block — 3 Nov 2026)."""
     try:
-        return time.time() - os.path.getmtime(_path() + ".building") < max_age_s
+        p = _path() + ".building"
+        if time.time() - os.path.getmtime(p) >= max_age_s:
+            return False
+        with open(p) as fh:
+            pid = int((fh.read().split() or ["0"])[0])
+        if pid == os.getpid() or pid <= 0:
+            return False
+        os.kill(pid, 0)                        # raises if that process is gone
+        return True
     except Exception:
         return False
 
@@ -303,7 +319,7 @@ def _building_elsewhere(max_age_s: int = 2 * 3600) -> bool:
 def _mark_building() -> None:
     try:
         with open(_path() + ".building", "w") as fh:
-            fh.write(str(time.time()))
+            fh.write(f"{os.getpid()} {time.time()}")
     except Exception:
         pass
 
@@ -413,4 +429,19 @@ def report(api: dict) -> bool:
     except Exception as e:                       # noqa: BLE001
         with _LOCK:
             _STATE["error"] = f"report: {type(e).__name__}: {e}"[:300]
+        try:
+            os.remove(_path() + ".reported")     # not sent: try again next time
+        except Exception:
+            pass
         return False
+
+
+def _email_problem(text: str) -> None:
+    to = os.environ.get("MW_COSTS_REPORT_EMAIL", "bill.brill@inflectionpointnow.com")
+    try:
+        import coordinator_alerts as ca
+        from engine.mailer import GraphMailer
+        GraphMailer(mailbox=ca._sender()).send_mail(
+            to, "[FAIM Audit Assistant] Moveware API costs: problem", text)
+    except Exception:
+        pass

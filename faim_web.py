@@ -539,6 +539,11 @@ def _keeper_tick():
                     dc.start(rows)
     except Exception:
         pass
+    try:  # Moveware API probe (cost endpoints), emailed to Bill once per deploy
+        import mw_probe
+        mw_probe.run_once_per_deploy()
+    except Exception:
+        pass
     try:  # diary write-back from SIT's Plan de Viajes (on; MW_DIARY_WRITE=0 turns it off)
         import milestone_apply
         milestone_apply.run_once()
@@ -987,6 +992,21 @@ def _shape(v, depth=0):
             return v
         return f"text({len(v)})"
     return v
+
+
+@faim_bp.route("/faim/mw-probe")
+@_login_required
+def faim_mw_probe():
+    """What Moveware's V2 API exposes (cost endpoints first). ?run=1 probes again.
+    Read-only; shapes only."""
+    import mw_probe
+    if request.args.get("run"):
+        import threading as _th
+        _th.Thread(target=mw_probe.run, daemon=True, name="mw-probe").start()
+    st = mw_probe.state()
+    return jsonify({"running": st["running"], "error": st["error"], "emailed": st["emailed"],
+                    "summary": mw_probe.summary_text(st["result"]) if st["result"] else None,
+                    "result": st["result"]})
 
 
 @faim_bp.route("/faim/check")

@@ -29,6 +29,9 @@ import os
 import threading
 import time
 
+# Bump when the reading rules change, so a build saved by older rules is redone.
+RULES_VERSION = 2
+
 WON_WORDS = ("w", "won", "accepted", "selected", "confirmed", "booked")
 LOST_WORDS = ("c", "l", "cancelled", "canceled", "lost", "declined")
 
@@ -204,7 +207,7 @@ def build(files: list, pause: float = 0.05) -> dict:
             report(out)
         try:
             with open(_path() + ".tmp", "w") as fh:
-                json.dump({"built_at": time.time(), "files": out}, fh)
+                json.dump({"built_at": time.time(), "rules": RULES_VERSION, "files": out}, fh)
             os.replace(_path() + ".tmp", _path())
         except Exception:
             pass
@@ -226,6 +229,8 @@ def load_saved() -> None:
     try:
         with open(_path()) as fh:
             d = json.load(fh)
+        if d.get("rules") != RULES_VERSION:
+            return                                  # built by older rules: rebuild
         with _LOCK:
             _STATE.update(files=d.get("files") or {}, built_at=d.get("built_at"))
     except Exception:

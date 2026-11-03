@@ -71,3 +71,17 @@ def test_report_text_reads_plainly():
     sheet = {"1": {"est": 80.0, "act": 60.0}}
     t = mc.report_text(api, sheet)
     assert "Files read from the API: 2" in t and "actual cost agrees: 0 of 1" in t and "1: est 80.00 vs 80.00 | act 70.00 vs 60.00" in t
+
+
+def test_a_build_saved_by_older_rules_is_not_reused(tmp_path, monkeypatch):
+    import json
+    p = tmp_path / "mw_costs.json"
+    p.write_text(json.dumps({"built_at": 1, "files": {"1": {"lines": 1}}}))        # no rules version
+    monkeypatch.setattr(mc, "_path", lambda: str(p))
+    monkeypatch.setitem(mc._STATE, "files", {})
+    mc.load_saved()
+    assert mc._STATE["files"] == {}
+    p.write_text(json.dumps({"built_at": 1, "rules": mc.RULES_VERSION, "files": {"1": {"lines": 1}}}))
+    mc.load_saved()
+    assert mc._STATE["files"] == {"1": {"lines": 1}}
+    monkeypatch.setitem(mc._STATE, "files", {})

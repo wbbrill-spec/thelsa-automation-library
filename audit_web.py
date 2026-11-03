@@ -688,8 +688,9 @@ def _finance_invoice_view() -> dict:
     try:
         import commission_feed
         reg = commission_feed.invoiced_files()
-        inv |= reg["files"]
-        lots |= set(reg.get("lots") or ())
+        # Matched file by file, letter included: 111135 and 111135A are billed
+        # separately (Lupita, 3 Nov 2026 — 111135 invoiced, 111135A still to bill).
+        lots |= set(reg["files"]) | set(reg.get("lots") or ())
         cutoff = max(cutoff, reg["to"] or "")
     except Exception:
         pass
@@ -1425,7 +1426,7 @@ def audit_feed():
     try:
         _fv = _finance_invoice_view()
         out["finance_cutoff"] = _fv.get("cutoff") or None
-        out["finance_files"] = len(_fv.get("invoiced") or ())
+        out["finance_files"] = len(set(_fv.get("invoiced") or ()) | set(_fv.get("lots") or ()))
     except Exception:
         out["finance_cutoff"], out["finance_files"] = None, None
     out.update({"live": is_live, "as_of": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),

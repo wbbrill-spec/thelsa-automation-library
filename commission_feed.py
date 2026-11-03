@@ -134,9 +134,9 @@ def invoiced_files() -> dict:
     on the commission page) and the monthly invoicing reports Finance emails
     (invoice_mail). Cancelled invoices and credit notes don't count.
 
-    An invoice on a lettered lot (110741A) covers that lot only, not the main
-    file: Lupita, 3 Nov 2026, still had 110741 to bill after 110741A was invoiced.
-    An invoice on the main number covers the file and its lots."""
+    Each invoice covers the file number it names, letter included: Lupita,
+    3 Nov 2026, still had 110741 to bill after 110741A was invoiced, and
+    111135A after 111135."""
     reg = register()
     invs = list(reg["invoices"]) if reg else []
     to = str(reg["info"].get("to") or "") if reg else ""

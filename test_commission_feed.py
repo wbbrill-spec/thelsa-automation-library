@@ -92,7 +92,7 @@ def test_the_ready_to_invoice_view_uses_the_register(monkeypatch):
     import audit_web
     monkeypatch.setattr(audit_web, "_load_finance_cost", lambda: {})
     put_register([inv("110887", "TRS", "100", 11600.0)])
-    assert "110887" in audit_web._finance_invoice_view()["invoiced"]
+    assert "110887" in audit_web._finance_invoice_view()["lots"]
 
 
 def test_a_costing_sheet_uploaded_for_commissions_also_feeds_the_supplier_checks(monkeypatch):
@@ -151,3 +151,12 @@ def test_wendys_monthly_report_with_a_sum_row_reads(tmp_path):
     wb.save(p)
     invs, info = I.load(str(p))
     assert [(x.job, x.folio) for x in invs] == [("110741A", "2532")]
+
+
+def test_main_file_and_its_lot_are_billed_separately(monkeypatch):
+    import audit_web
+    monkeypatch.setattr(audit_web, "_load_finance_cost", lambda: {})
+    put_register([inv("111135", "AGTS", "2528", 11830.98), inv("110741A", "AGTS", "2532", 3888.54)])
+    v = audit_web._finance_invoice_view()
+    assert {"111135", "110741A"} <= v["lots"]
+    assert "111135" not in v["invoiced"]        # so 111135A is not taken as billed

@@ -24,7 +24,7 @@ def test_only_won_options_count():
     opts = [{"id": 1, "costStatus": "W"}, {"id": 2, "costStatus": "C"}, {"id": 3, "costStatus": "W"}]
     assert [o["id"] for o in mc.won_options(opts)] == [1, 3]
     assert [o["id"] for o in mc.won_options([{"id": 1}, {"id": 2}])] == [1, 2]       # no status: all
-    assert [o["id"] for o in mc.won_options([{"id": 1, "status": "P"}, {"id": 2, "status": "L"}])] == [1]
+    assert mc.won_options([{"id": 1, "status": "P"}, {"id": 2, "status": "L"}]) == []
 
 
 def test_customer_name_is_scrubbed_from_line_descriptions():
@@ -44,3 +44,30 @@ def test_merged_prefers_the_api_where_it_has_the_file(monkeypatch):
     monkeypatch.setattr(mc, "costs", lambda: {"1": {"lines": 3, "source": "moveware_api"}, "9": {"lines": 0}})
     got = mc.merged({"1": {"source": "sheet"}, "2": {"source": "sheet"}})
     assert got["1"]["source"] == "moveware_api" and got["2"]["source"] == "sheet" and "9" not in got
+
+
+def _ln(sell, est, act):
+    return {"id": 0, "desc": "", "sell": sell, "est": est, "act": act, "currency": "MXN"}
+
+
+def test_a_first_line_that_repeats_the_total_is_dropped():
+    # 111136 as Moveware returned it on 3 Nov 2026 (option 57328)
+    rest = [_ln(4350, 4350, 0), _ln(7665, 7665, 0), _ln(67280, 67280, 58000), _ln(1450, 1450, 0), _ln(25256.3, 2936, 0)]
+    lines = [_ln(106001.3, 83681.0, 58000.0)] + rest
+    assert mc.drop_total_line(lines, 106001.3) == rest
+    # 111108: the first line is a real line (the option total is the sum WITHOUT it is
+    # not the case here: all lines together make the option value)
+    real = [_ln(100, 80, 0), _ln(50, 40, 0)]
+    assert mc.drop_total_line(real, 150) == real
+
+
+def test_quoted_alternatives_never_count():
+    assert mc.won_options([{"id": 1, "status": "Q"}, {"id": 2, "status": "C"}]) == []
+    assert [o["id"] for o in mc.won_options([{"id": 1, "status": "W"}, {"id": 2, "status": "Q"}])] == [1]
+
+
+def test_report_text_reads_plainly():
+    api = {"1": mc.summarize_file("1", ["1"], [_ln(100, 80, 70)]), "2": mc.summarize_file("2", ["2"], [_ln(50, 40, 0)])}
+    sheet = {"1": {"est": 80.0, "act": 60.0}}
+    t = mc.report_text(api, sheet)
+    assert "Files read from the API: 2" in t and "actual cost agrees: 0 of 1" in t and "1: est 80.00 vs 80.00 | act 70.00 vs 60.00" in t

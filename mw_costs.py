@@ -33,7 +33,7 @@ WON_WORDS = ("w", "won", "accepted", "selected", "confirmed", "booked")
 LOST_WORDS = ("c", "l", "cancelled", "canceled", "lost", "declined")
 
 _STATE = {"running": False, "built_at": None, "error": None, "done": 0, "total": 0,
-          "files": {}, "status_field": None}
+          "files": {}, "status_field": None, "reported": False}
 _LOCK = threading.Lock()
 
 
@@ -80,7 +80,9 @@ def won_options(options: list) -> list:
     if won:
         return won
     if any(s for _, s in marked):
-        return [o for o, s in marked if s and s not in LOST_WORDS]
+        # Options carry a status (W won, Q quoted alternative, C cancelled — seen
+        # live 3 Nov 2026) and none is won: no booked cost yet.
+        return []
     return opts
 
 
@@ -96,10 +98,34 @@ def lines_from_charges(charges: list, scrub=None) -> list:
         desc = str(c.get("description") or "")
         out.append({"id": c.get("id"), "desc": scrub(desc) if scrub else desc,
                     "sell": round(sell, 2), "est": round(est, 2), "act": round(act, 2),
+                    # amounts are in the option's currency (111108: USD and MXN lines
+                    # add up to the option total); this is the line's cost currency
                     "currency": c.get("currency") or "",
                     "supplier": c.get("supplierCode") or "", "po": c.get("purchase") or "",
                     "modified": str(c.get("dateModified") or "")[:10]})
     return out
+
+
+def drop_total_line(lines: list, option_value=None) -> list:
+    """Some options start with a line that repeats the total of the others (seen
+    live on 111136: line 1 = sell 106,001.30 / est 83,681 / actual 58,000, exactly
+    the sum of the other six). Drop it so nothing is counted twice. Decided per
+    option: the first line is a total when its sell, estimate and actual each equal
+    the sum of the rest, or when the option's own value matches the rest without it."""
+    if len(lines) < 2:
+        return lines
+    first, rest = lines[0], lines[1:]
+    near = lambda a, b: abs(a - b) <= max(0.05, 0.001 * max(abs(a), abs(b)))
+    sums = {k: sum(ln[k] for ln in rest) for k in ("sell", "est", "act")}
+    if all(near(first[k], sums[k]) for k in ("sell", "est", "act")) and first["sell"]:
+        return rest
+    try:
+        ov = float(option_value)
+    except (TypeError, ValueError):
+        ov = None
+    if ov and near(sums["sell"], ov) and not near(sums["sell"] + first["sell"], ov):
+        return rest
+    return lines
 
 
 def summarize_file(job: str, parts: list, lines: list) -> dict:
@@ -109,7 +135,7 @@ def summarize_file(job: str, parts: list, lines: list) -> dict:
          "client_type": "", "move_type": "", "source": "moveware_api",
          "currency": "", "line_items": lines}
     ccy = {ln["currency"] for ln in lines if ln.get("currency")}
-    e["currency"] = ccy.pop() if len(ccy) == 1 else ("mixed" if ccy else "")
+    e["currency"] = ccy.pop() if len(ccy) == 1 else ""      # mixed: the file's own currency applies
     for ln in lines:
         e["lines"] += 1
         e["sell"] += ln["sell"]
@@ -144,7 +170,8 @@ def read_file(job_id, client: str = "") -> list:
     lines = []
     for o in won_options(options or []):
         cd = mw_live._get_timed(f"/options/{o['id']}/charges", 15) or {}
-        lines += lines_from_charges(cd.get("charges") if isinstance(cd, dict) else [], scrub)
+        got = lines_from_charges(cd.get("charges") if isinstance(cd, dict) else [], scrub)
+        lines += drop_total_line(got, o.get("valueExclusive"))
     return lines
 
 
@@ -172,6 +199,9 @@ def build(files: list, pause: float = 0.05) -> dict:
         out = {b: summarize_file(b, parts[b], ln) for b, ln in by_base.items() if ln}
         with _LOCK:
             _STATE.update(files=out, built_at=time.time())
+            due = not _STATE.get("reported")
+        if due:
+            report(out)
         try:
             with open(_path() + ".tmp", "w") as fh:
                 json.dump({"built_at": time.time(), "files": out}, fh)
@@ -211,6 +241,11 @@ def ensure_built(max_age_h: float = 20.0) -> bool:
             return False
         fresh = _STATE["built_at"] and time.time() - _STATE["built_at"] < max_age_h * 3600
     if fresh:
+        with _LOCK:
+            due = not _STATE.get("reported") and bool(_STATE["files"])
+            files_now = dict(_STATE["files"])
+        if due:
+            threading.Thread(target=report, args=(files_now,), daemon=True, name="mw-costs-report").start()
         return False
     files = [f for f in (mw_live.audited_in_window() or []) if f.get("job_id")]
     if not files:
@@ -263,3 +298,56 @@ def compare(api: dict, sheet: dict, tol: float = 0.02) -> dict:
                          "api_act": a["act"], "sheet_act": s["act"]})
     rows.sort(key=lambda r: -abs((r["api_act"] - r["sheet_act"]) or (r["api_est"] - r["sheet_est"])))
     return {"counts": counts, "differences": rows}
+
+
+def report_text(api: dict, sheet: dict) -> str:
+    cmp = compare(api, sheet)
+    c = cmp["counts"]
+    with_act = sum(1 for e in api.values() if e["lines_with_act"])
+    complete = sum(1 for e in api.values() if e["complete"])
+    lines = [
+        "Line-item revenue and cost from Moveware's API — first full read",
+        "",
+        f"Files read from the API: {len(api)} (won quote options only, lots added to their file).",
+        f"  with at least one actual cost loaded: {with_act}",
+        f"  every quoted cost line has its actual cost: {complete}",
+        f"  cost lines still waiting for a supplier invoice: {sum(e['lines_pending'] for e in api.values())}",
+        "",
+        "Compared with the last Move Costing Sheet uploaded to the app:",
+        f"  files in both: {c['both']}",
+        f"  quoted (estimated) cost agrees: {c['est_match']} of {c['both']}",
+        f"  actual cost agrees: {c['act_match']} of {c['both']}",
+        f"  only in the API (newer than the sheet, or not in it): {c['api_only']}",
+        f"  only in the sheet: {c['sheet_only']}",
+        "",
+        "Largest differences (file: API vs sheet, estimated | actual):",
+    ]
+    for r in cmp["differences"][:40]:
+        lines.append(f"  {r['job']}: est {r['api_est']:,.2f} vs {r['sheet_est']:,.2f} | "
+                     f"act {r['api_act']:,.2f} vs {r['sheet_act']:,.2f}")
+    lines += ["", "The audit now uses the API's cost wherever it has the file, the sheet otherwise.",
+              "Per-supplier detail (creditor, PO per invoice) is not in the API; the sheet still feeds the supplier checks."]
+    return "\n".join(lines)
+
+
+def report(api: dict) -> bool:
+    """Email the first comparison to Bill (MW_COSTS_REPORT_EMAIL), once per deploy."""
+    to = os.environ.get("MW_COSTS_REPORT_EMAIL", "bill.brill@inflectionpointnow.com")
+    if not to:
+        return False
+    try:
+        import html as _h
+        import costing_sheet
+        import coordinator_alerts as ca
+        from engine.mailer import GraphMailer
+        body = ("<pre style='font:13px/1.45 monospace;white-space:pre-wrap'>"
+                + _h.escape(report_text(api, costing_sheet.costs())) + "</pre>")
+        GraphMailer(mailbox=ca._sender()).send_mail(
+            to, "[FAIM Audit Assistant] Moveware API costs vs the Move Costing Sheet", body, html=True)
+        with _LOCK:
+            _STATE["reported"] = True
+        return True
+    except Exception as e:                       # noqa: BLE001
+        with _LOCK:
+            _STATE["error"] = f"report: {type(e).__name__}: {e}"[:300]
+        return False

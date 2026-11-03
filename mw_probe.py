@@ -363,7 +363,8 @@ def email(result: dict) -> bool:
 def run_once_per_deploy() -> None:
     """For the keeper: probe and email once per process, after the file book has
     loaded (it needs real file ids)."""
-    if os.environ.get("MW_PROBE", "1") != "1":
+    # Off by default since 3 Nov 2026 (it found the cost fields); MW_PROBE=1 to rerun.
+    if os.environ.get("MW_PROBE", "0") != "1":
         return
     with _LOCK:
         if _STATE["emailed"] or _STATE["running"] or (_STATE["at"] and time.time() - _STATE["at"] < 3600):

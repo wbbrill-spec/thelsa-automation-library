@@ -50,16 +50,6 @@ def _ln(sell, est, act):
     return {"id": 0, "desc": "", "sell": sell, "est": est, "act": act, "currency": "MXN"}
 
 
-def test_a_first_line_that_repeats_the_total_is_dropped():
-    # 111136 as Moveware returned it on 3 Nov 2026 (option 57328)
-    rest = [_ln(4350, 4350, 0), _ln(7665, 7665, 0), _ln(67280, 67280, 58000), _ln(1450, 1450, 0), _ln(25256.3, 2936, 0)]
-    lines = [_ln(106001.3, 83681.0, 58000.0)] + rest
-    assert mc.drop_total_line(lines, 106001.3) == rest
-    # 111108: the first line is a real line (the option total is the sum WITHOUT it is
-    # not the case here: all lines together make the option value)
-    real = [_ln(100, 80, 0), _ln(50, 40, 0)]
-    assert mc.drop_total_line(real, 150) == real
-
 
 def test_quoted_alternatives_never_count():
     assert mc.won_options([{"id": 1, "status": "Q"}, {"id": 2, "status": "C"}]) == []
@@ -91,11 +81,6 @@ def test_file_currency_is_the_options_currency():
     lines = [dict(_ln(100, 80, 0), currency="USD", option_currency="MXN"), dict(_ln(50, 40, 0), currency="MXN", option_currency="MXN")]
     assert mc.summarize_file("1", ["1"], lines)["currency"] == "MXN"
 
-
-def test_a_total_line_anywhere_in_the_option_is_dropped():
-    rest = [_ln(4350, 4350, 0), _ln(67280, 67280, 58000), _ln(34371.3, 12051, 0)]
-    total = _ln(106001.3, 83681.0, 58000.0)
-    assert mc.drop_total_line(rest[:2] + [total] + rest[2:], 106001.3) == rest
 
 
 def test_the_same_job_or_charge_line_is_counted_once(monkeypatch):
@@ -145,3 +130,16 @@ def test_a_failed_send_is_retried_later(tmp_path, monkeypatch):
     monkeypatch.setattr("costing_sheet.costs", lambda: {})
     assert mc.report({}) is False
     assert not mc._reported()                                           # claim released
+
+
+def test_the_option_total_line_is_left_out_by_its_name():
+    # 110578 as Moveware returned it on 3 Nov 2026: "Option Total" then the lines,
+    # with an extra (Despacho) after it that the total does not include.
+    charges = [
+        {"id": 564301, "description": "Option Total", "valueExclusive": 484689.38, "valueEstimateExclusive": 374383.56, "valueActualExclusive": 400347.23},
+        {"id": 564309, "description": "Unloading and unpacking", "valueExclusive": 28534.84, "valueEstimateExclusive": 28534.84, "valueActualExclusive": 23573.47},
+        {"id": 571533, "description": "Despacho", "valueExclusive": 1250.0, "valueEstimateExclusive": 1250.0, "valueActualExclusive": 20625.02},
+    ]
+    lines = mc.lines_from_charges(charges)
+    assert [ln["id"] for ln in lines] == [564309, 571533]
+    assert mc.is_total_line("  OPTION   total ") and not mc.is_total_line("Origin Services")

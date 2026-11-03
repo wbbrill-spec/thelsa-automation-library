@@ -30,7 +30,7 @@ import threading
 import time
 
 # Bump when the reading rules change, so a build saved by older rules is redone.
-RULES_VERSION = 4
+RULES_VERSION = 5
 
 WON_WORDS = ("w", "won", "accepted", "selected", "confirmed", "booked")
 LOST_WORDS = ("c", "l", "cancelled", "canceled", "lost", "declined")
@@ -100,6 +100,8 @@ def lines_from_charges(charges: list, scrub=None) -> list:
         if not (sell or est or act):
             continue
         desc = str(c.get("description") or "")
+        if is_total_line(desc):
+            continue            # Moveware's "Option Total" line repeats the others
         out.append({"id": c.get("id"), "desc": scrub(desc) if scrub else desc,
                     "sell": round(sell, 2), "est": round(est, 2), "act": round(act, 2),
                     "est_inc": round(est_inc, 2),
@@ -111,29 +113,18 @@ def lines_from_charges(charges: list, scrub=None) -> list:
     return out
 
 
+def is_total_line(description: str) -> bool:
+    """Moveware puts a line called "Option Total" in each quote option's charges
+    (seen live 3 Nov 2026 on every file: 110578, 110586, 110601 ...). It repeats the
+    lines above it (extras printed below it are not in it), so it is never counted:
+    on 110578 its actual cost, 400,347.23, is exactly the Costing Sheet's."""
+    return " ".join(str(description or "").split()).lower() in ("option total", "total option",
+                                                                 "total de la opcion", "total opcion")
+
+
 def drop_total_line(lines: list, option_value=None) -> list:
-    """Some options carry a line that repeats the total of the others (seen live on
-    111136: sell 106,001.30 / est 83,681 / actual 58,000, exactly the sum of the other
-    six lines). Drop it, wherever it sits in the option, so nothing counts twice:
-      * a line whose sale price equals the sum of the other lines' sale prices, and
-        whose estimate or actual also equals the others' sum; or
-      * a line equal to the option's own value when the other lines already add up
-        to that value."""
-    if len(lines) < 2:
-        return lines
-    near = lambda a, b: abs(a - b) <= max(0.05, 0.001 * max(abs(a), abs(b)))
-    tot = {k: sum(ln[k] for ln in lines) for k in ("sell", "est", "act")}
-    try:
-        ov = float(option_value)
-    except (TypeError, ValueError):
-        ov = None
-    for i, ln in enumerate(lines):
-        others = {k: tot[k] - ln[k] for k in tot}
-        if ln["sell"] and near(ln["sell"], others["sell"]) and (
-                near(ln["est"], others["est"]) or (ln["act"] and near(ln["act"], others["act"]))):
-            return lines[:i] + lines[i + 1:]
-        if ov and ln["sell"] and near(ln["sell"], ov) and near(others["sell"], ov):
-            return lines[:i] + lines[i + 1:]
+    """Kept for callers; the "Option Total" line is now left out by its name in
+    lines_from_charges (the sum test missed it when extras follow it)."""
     return lines
 
 

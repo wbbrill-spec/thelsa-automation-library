@@ -90,3 +90,38 @@ def test_a_build_saved_by_older_rules_is_not_reused(tmp_path, monkeypatch):
 def test_file_currency_is_the_options_currency():
     lines = [dict(_ln(100, 80, 0), currency="USD", option_currency="MXN"), dict(_ln(50, 40, 0), currency="MXN", option_currency="MXN")]
     assert mc.summarize_file("1", ["1"], lines)["currency"] == "MXN"
+
+
+def test_a_total_line_anywhere_in_the_option_is_dropped():
+    rest = [_ln(4350, 4350, 0), _ln(67280, 67280, 58000), _ln(34371.3, 12051, 0)]
+    total = _ln(106001.3, 83681.0, 58000.0)
+    assert mc.drop_total_line(rest[:2] + [total] + rest[2:], 106001.3) == rest
+
+
+def test_the_same_job_or_charge_line_is_counted_once(monkeypatch):
+    calls = []
+    def fake_read(jid, client=""):
+        calls.append(jid)
+        return [{"id": 7, "desc": "", "sell": 10.0, "est": 8.0, "act": 8.0, "est_inc": 8.0, "currency": "MXN"}]
+    monkeypatch.setattr(mc, "read_file", fake_read)
+    monkeypatch.setattr(mc, "_reported", lambda: True)
+    monkeypatch.setattr(mc, "_path", lambda: "/nonexistent/mw_costs.json")
+    out = mc.build([{"job": "110611", "job_id": 1}, {"job": "110611", "job_id": 1},
+                    {"job": "110611A", "job_id": 2}], pause=0)
+    assert calls == [1, 2]                               # job 1 read once
+    assert out["110611"]["act"] == 8.0                    # charge 7 counted once
+    monkeypatch.setitem(mc._STATE, "files", {})
+
+
+def test_estimate_matches_the_sheet_with_or_without_iva():
+    api = {"1": {"est": 80160.0, "est_inc": 92985.6, "act": 0.0}}
+    sheet = {"1": {"est": 92985.6, "act": 0.0}}
+    assert mc.compare(api, sheet)["counts"]["est_match"] == 1
+
+
+def test_the_report_is_sent_once_per_rules_version(tmp_path, monkeypatch):
+    monkeypatch.setattr(mc, "_path", lambda: str(tmp_path / "mw_costs.json"))
+    assert not mc._reported()
+    mc._mark_reported()
+    assert mc._reported()
+    assert mc.report({}) is False                        # already sent: nothing goes out

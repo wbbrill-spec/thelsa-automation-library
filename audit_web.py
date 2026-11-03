@@ -823,7 +823,17 @@ def compute_metrics(files, live_counts=None, cost_available=True):
 
     # Lost/lead (L) and cancelled (C) files are never billable (the executive view
     # already applied this; the worklist did not — found 30 Oct 2026).
+    # Moveware's test file (111000, "TEST ...") and any in FAIM_IGNORE_FILES are
+    # never billable (it reached Fer and Monica's first alert, 3 Nov 2026).
+    try:
+        import faim_web as _fw
+        _ignore = set(_fw.IGNORE_FILES)
+    except Exception:
+        _ignore = {"111000"}
+
     def _open(f):
+        if _base_file(f.get("job")) in _ignore or str(f.get("client") or "").strip().upper().startswith("TEST "):
+            return False
         return str(f.get("status") or "").strip().upper() not in ("L", "C")
 
     # Only BOOKED moves are billable (Bill, 31 Oct 2026): status W or a booked (Date Won)

@@ -1252,3 +1252,15 @@ def test_invoice_alerts_on_but_cost_alerts_stay_off_by_default(monkeypatch):
     monkeypatch.delenv("DRY_RUN", raising=False)
     assert ca.alerts_enabled() is True
     assert ca.cost_alerts_enabled() is False
+
+
+def test_moveware_test_file_is_never_ready_to_invoice(monkeypatch):
+    """111000 'TEST Michael Scott' reached the invoicing team's first alert (3 Nov 2026)."""
+    monkeypatch.setattr(aw, "_finance_invoice_view", lambda: {"invoiced": set(), "cutoff": ""})
+    monkeypatch.setattr(aw, "_load_finance_cost", lambda: {})
+    d = TODAY - dt.timedelta(days=20)
+    files = [_mkfile(job="111000", client="TEST Michael Scott Test/Mr", invoiced=False, sell=1781.67, pack=d, job_type="EXP"),
+             _mkfile(job="111001", client="Real Client", invoiced=False, sell=5000, pack=d, job_type="EXP")]
+    m = aw.compute_metrics(files, live_counts=LIVE_COUNTS, cost_available=False)
+    jobs = [r["job"] for r in m["to_invoice_worklist"]]
+    assert "111000" not in jobs and "111001" in jobs

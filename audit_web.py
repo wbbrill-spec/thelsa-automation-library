@@ -1270,6 +1270,13 @@ def audit():
     try:
         import costing_sheet
         costing = costing_sheet.costs()
+        # Moveware's API now returns estimated and actual cost per charge line
+        # (3 Nov 2026): it replaces the monthly sheet wherever it has the file.
+        try:
+            import mw_costs
+            costing = mw_costs.merged(costing)
+        except Exception:
+            pass
     except Exception:
         costing = {}
     ex = exec_dash.build(raw_dated, _load_finance_cost(), costing=costing)

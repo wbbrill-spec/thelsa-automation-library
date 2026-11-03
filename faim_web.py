@@ -539,6 +539,13 @@ def _keeper_tick():
                     dc.start(rows)
     except Exception:
         pass
+    try:  # line-item revenue and cost from Moveware's API, rebuilt daily
+        prog = mw_live.audit_progress()
+        if prog.get("window_complete") or prog.get("complete"):
+            import mw_costs
+            mw_costs.ensure_built()
+    except Exception:
+        pass
     try:  # Moveware API probe (cost endpoints), emailed to Bill once per deploy
         import mw_probe
         mw_probe.run_once_per_deploy()
@@ -992,6 +999,29 @@ def _shape(v, depth=0):
             return v
         return f"text({len(v)})"
     return v
+
+
+@faim_bp.route("/faim/mw-costs")
+@_login_required
+def faim_mw_costs():
+    """Line-item revenue and cost per file from Moveware's API, and how it compares
+    with the uploaded Move Costing Sheet. ?job=111136 shows one file's lines."""
+    import mw_costs
+    import costing_sheet
+    api = mw_costs.costs()
+    job = (request.args.get("job") or "").strip()
+    if job:
+        return jsonify(api.get(mw_costs.base(job)) or {"error": "not in the last build"})
+    if request.args.get("run"):
+        import threading as _th
+        files = [f for f in (mw_live.audited_in_window() or []) if f.get("job_id")]
+        _th.Thread(target=mw_costs.build, args=(files,), daemon=True).start()
+    cmp = mw_costs.compare(api, costing_sheet.costs())
+    totals = {"files": len(api), "sell": round(sum(e["sell"] for e in api.values() if e.get("currency") == "MXN"), 2),
+              "with_actuals": sum(1 for e in api.values() if e["lines_with_act"]),
+              "complete": sum(1 for e in api.values() if e["complete"]),
+              "pending_lines": sum(e["lines_pending"] for e in api.values())}
+    return jsonify({"state": mw_costs.state(), "totals_mxn_files": totals, "vs_costing_sheet": cmp})
 
 
 @faim_bp.route("/faim/mw-probe")

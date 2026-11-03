@@ -557,8 +557,23 @@ def test_keeper_tick_starts_auditor_and_sit(monkeypatch):
     calls = []
     monkeypatch.setattr(faim_web.mw_live, "ensure_auditor", lambda: calls.append("book"))
     monkeypatch.setattr(sit_milestones, "ensure_built", lambda *a, **k: calls.append("sit"))
+    monkeypatch.setattr(faim_web, "_BOOT", 0)
     faim_web._keeper_tick()
     assert calls == ["book", "sit"]
+
+
+def test_no_heavy_job_in_the_first_minutes_after_a_restart_or_while_another_runs(monkeypatch):
+    import time, faim_web, sit_milestones
+    calls = []
+    monkeypatch.setattr(faim_web.mw_live, "ensure_auditor", lambda: calls.append("book"))
+    monkeypatch.setattr(sit_milestones, "ensure_built", lambda *a, **k: calls.append("sit"))
+    monkeypatch.setattr(faim_web, "_BOOT", time.time())
+    faim_web._keeper_tick()
+    assert calls == ["book"]                      # site just restarted: heavy jobs wait
+    monkeypatch.setattr(faim_web, "_BOOT", 0)
+    monkeypatch.setattr(faim_web, "_heavy_busy", lambda: "doc_check")
+    faim_web._keeper_tick()
+    assert calls == ["book", "book"]              # another job is running: wait
 
 
 def test_keeper_tick_survives_errors(monkeypatch):

@@ -460,7 +460,8 @@ def _sit():
     restart; `info` says so (counts only)."""
     try:
         import sit_milestones as sm
-        sm.ensure_built()
+        if _heavy_ok():
+            sm.ensure_built()
         st = sm.state()
         days = sit_days(st.get("jobs"))
         books = st.get("workbooks") or []
@@ -495,6 +496,51 @@ def _date_gaps_now():
     return faim_snapshot(files, sit=sit)["date_gaps"], True, complete
 
 
+_BOOT = time.time()
+
+
+def _heavy_busy() -> str:
+    """Name of a background job still running, else ''. Only one runs at a time
+    (3 Nov 2026: the site went down — several jobs started together after each
+    restart and the server ran out of memory)."""
+    checks = (("survey_finder", lambda m: m.state()["running"]),
+              ("doc_check", lambda m: m.state()["running"]),
+              ("mw_costs", lambda m: m.state()["running"]),
+              ("invoice_mail", lambda m: m.state()["running"]),
+              ("sit_milestones", lambda m: m._STATE["running"]))
+    import sys as _sys
+    for name, fn in checks:
+        mod = _sys.modules.get(name)
+        if mod is None:
+            continue
+        try:
+            if fn(mod):
+                return name
+        except Exception:
+            continue
+    return ""
+
+
+def _heavy_ok() -> bool:
+    """A heavy job may start: the site has been up 10 minutes (FAIM_HEAVY_DELAY_MIN)
+    and nothing else heavy is running."""
+    try:
+        delay = float(os.environ.get("FAIM_HEAVY_DELAY_MIN", "10")) * 60
+    except ValueError:
+        delay = 600.0
+    if time.time() - _BOOT < delay:
+        return False
+    if _heavy_busy():
+        return False
+    try:
+        prog = mw_live.audit_progress()
+        if prog.get("running") and not (prog.get("window_complete") or prog.get("complete")):
+            return False
+    except Exception:
+        pass
+    return True
+
+
 def _keeper_tick():
     try:
         mw_live.ensure_auditor()
@@ -509,7 +555,8 @@ def _keeper_tick():
         pass
     try:
         import sit_milestones as sm
-        sm.ensure_built()
+        if _heavy_ok():
+            sm.ensure_built()
     except Exception:
         pass
     try:  # cost + ready-to-invoice emails to coordinators, once each weekday morning
@@ -520,7 +567,7 @@ def _keeper_tick():
     try:  # search the coordinators' email for missing surveys and dates, once a day
         import survey_finder as sf
         st = sf.state()
-        if not st["running"] and (not st["finished"] or time.time() - st["finished"] > 20 * 3600):
+        if _heavy_ok() and not st["running"] and (not st["finished"] or time.time() - st["finished"] > 20 * 3600):
             files, prog = mw_live.audited_in_window(), mw_live.audit_progress()
             if files and (prog.get("window_complete") or prog.get("complete")):
                 missing, clients = _survey_inputs()
@@ -531,7 +578,7 @@ def _keeper_tick():
     try:  # FAIM MS1.4 documents found in the coordinators' email, once a day
         import doc_check as dc
         st = dc.state()
-        if not st["running"] and (not st["finished"] or time.time() - st["finished"] > 20 * 3600):
+        if _heavy_ok() and not st["running"] and (not st["finished"] or time.time() - st["finished"] > 20 * 3600):
             prog = mw_live.audit_progress()
             if prog.get("window_complete") or prog.get("complete"):
                 rows = _doc_rows()
@@ -541,12 +588,13 @@ def _keeper_tick():
         pass
     try:  # Finance's monthly invoicing report (Wendy), read from email once a day
         import invoice_mail
-        invoice_mail.start_if_due()
+        if _heavy_ok():
+            invoice_mail.start_if_due()
     except Exception:
         pass
     try:  # line-item revenue and cost from Moveware's API, rebuilt daily
         prog = mw_live.audit_progress()
-        if prog.get("window_complete") or prog.get("complete"):
+        if (prog.get("window_complete") or prog.get("complete")) and _heavy_ok():
             import mw_costs
             mw_costs.ensure_built()
     except Exception:
@@ -558,7 +606,8 @@ def _keeper_tick():
         pass
     try:  # diary write-back from SIT's Plan de Viajes (on; MW_DIARY_WRITE=0 turns it off)
         import milestone_apply
-        milestone_apply.run_once()
+        if _heavy_ok():
+            milestone_apply.run_once()
     except Exception:
         pass
 
@@ -586,7 +635,7 @@ def start_keeper():
         return None  # another worker on this host owns it
     import threading
     try:
-        every = max(5.0, float(os.environ.get("FAIM_KEEPER_MINUTES", "30"))) * 60
+        every = max(5.0, float(os.environ.get("FAIM_KEEPER_MINUTES", "10"))) * 60
     except ValueError:
         every = 1800.0
     _KEEPER = threading.Thread(target=_keeper_loop, args=(every,), daemon=True,

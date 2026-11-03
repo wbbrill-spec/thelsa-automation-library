@@ -575,9 +575,10 @@ def test_embassy_regex_matches_expected_names():
     assert not mw_live._is_embassy("BMW Group")
 
 
-def test_invoice_alerts_go_to_the_invoicing_team_in_one_email():
-    """Lupita, 2 Nov 2026: alerts go to Fer (Maria Fernanda Carrasco) and Monica
-    Escalante, Lupita in copy — not to the coordinators or sales."""
+def test_invoice_alerts_go_to_the_invoicing_team_and_embassy_files_to_edgar():
+    """Lupita, 2-3 Nov 2026: alerts go to Fer (Maria Fernanda Carrasco) and Monica
+    Escalante, Lupita in copy; US Embassy / Consulate files go to Edgar, who requests
+    the invoice from them."""
     import coordinator_alerts as ca
     worklist = [
         {"job": 1, "client": "HSBC", "coordinator": "Maria", "value": 7723,
@@ -589,16 +590,22 @@ def test_invoice_alerts_go_to_the_invoicing_team_in_one_email():
          "embassy": True, "pack": "2026-07-01", "delivery": "2026-08-10"},
     ]
     alerts = ca.build_invoice_alerts(worklist)
-    assert len(alerts) == 1
-    a = alerts[0]
-    assert a["to"] == ["mariacarrasco@thelsa.com", "monicaescalante@thelsa.com"]
-    assert a["cc"] == ["maria.gonzalez@thelsa.com"]
-    assert "danielamartinez@thelsa.com" not in a["to"] + a["cc"]
-    assert a["file_count"] == 3 and a["total"] == 79723
-    assert "Hi Fer and Monica" in a["body"] and "Hola Fer y Mónica" in a["body"]
-    assert "coordinator Daniela Martínez" in a["body"] and "US EMBASSY" in a["body"]
-    assert a["body"].index("Job 3") < a["body"].index("Job 2") < a["body"].index("Job 1")   # highest value first
-    assert "[FAIM Audit Assistant]" in a["subject"] or "[" in a["subject"]
+    assert len(alerts) == 2
+    team, emb = alerts
+    assert team["to"] == ["mariacarrasco@thelsa.com", "monicaescalante@thelsa.com"]
+    assert team["cc"] == ["maria.gonzalez@thelsa.com"]
+    assert team["file_count"] == 2 and team["total"] == 19723 and "Job 3" not in team["body"]
+    assert "Hi Fer and Monica" in team["body"] and "coordinator Daniela Martínez" in team["body"]
+    assert team["body"].index("Job 2") < team["body"].index("Job 1")      # highest value first
+    assert emb["to"] == ["edgarespino@thelsa.com"] and emb["cc"] == ["maria.gonzalez@thelsa.com"]
+    assert emb["file_count"] == 1 and "Hi Edgar" in emb["body"] and "US Embassy" in emb["subject"]
+    assert "send the billing instructions to Fer and Monica" in emb["body"]
+
+
+def test_only_embassy_files_means_only_edgars_email():
+    import coordinator_alerts as ca
+    alerts = ca.build_invoice_alerts([{"job": 9, "client": "E", "value": 10, "embassy": True}])
+    assert [a["to"] for a in alerts] == [["edgarespino@thelsa.com"]]
 
 
 def test_no_invoice_alert_when_nothing_is_ready():

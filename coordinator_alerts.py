@@ -215,6 +215,11 @@ INVOICE_TO = "mariacarrasco@thelsa.com,monicaescalante@thelsa.com"
 INVOICE_TO_NAMES = "Fer and Monica"
 INVOICE_TO_NAMES_ES = "Fer y Mónica"
 INVOICE_CC = "maria.gonzalez@thelsa.com"
+# US Embassy / Consulate files: Edgar asks Fer and Monica for the invoice (Lupita,
+# 3 Nov 2026: "Edgar Espino is responsible to request the invoice to Monica and
+# Fernanda"). They go to him in their own email, not on the invoicing team's list.
+INVOICE_EMBASSY_TO = "edgarespino@thelsa.com"
+INVOICE_EMBASSY_NAMES = "Edgar"
 
 
 def _invoice_cc_list():
@@ -301,27 +306,70 @@ def _invoice_body(coordinator, rows, resolved, followup=False, coordinator_es=No
     return "\n".join(parts)
 
 
+def _embassy_body(rows, followup=False):
+    """Bilingual note to Edgar: US Embassy / Consulate files delivered and not yet
+    invoiced; he sends the billing instructions to Fer and Monica."""
+    total = _fmt(sum(r.get("value", 0) for r in rows))
+    files = _file_lines(rows)
+    rem_en = (["REMINDER: these were flagged earlier and are still not invoiced.", ""] if followup else [])
+    rem_es = (["RECORDATORIO: estos expedientes se marcaron antes y aún no están facturados.", ""] if followup else [])
+    en = ["Hi Edgar,", "", *rem_en,
+          "These US Embassy / Consulate moves have been delivered, but no invoice shows in Moveware "
+          "or in Finance's register yet.", "",
+          "Could you please send the billing instructions to Fer and Monica (or reply if a file is on "
+          "hold or should not be billed yet)?", "",
+          "US Embassy / Consulate files ready to invoice:", *files, "",
+          f"Total: {total}"]
+    es = ["Hola Edgar,", "", *rem_es,
+          "Estas mudanzas de la Embajada / Consulado de EE. UU. ya se entregaron, pero aún no aparece "
+          "factura en Moveware ni en el registro de Finanzas.", "",
+          "¿Podrías enviar las instrucciones de facturación a Fer y Mónica (o responder si algún "
+          "expediente está en espera o no debe facturarse todavía)?", "",
+          "Expedientes de Embajada / Consulado listos para facturar:", *files, "",
+          f"Total: {total}"]
+    return "\n".join(["\n".join(en), "", "— — — — —", "", "\n".join(es), "",
+                      "— Thelsa Automation Library · Move-File Audit"])
+
+
 def build_invoice_alerts(worklist):
-    """ONE email to the invoicing team (Fer and Monica, Lupita in copy — Lupita,
-    2 Nov 2026) listing every file ready to invoice, highest value first, each with
-    its coordinator. Pure — creates nothing. Returns a list (empty or one alert)."""
+    """Files ready to invoice, highest value first, each with its coordinator:
+      * US Embassy / Consulate files -> ONE email to Edgar (he requests the invoice
+        from Fer and Monica; Lupita, 3 Nov 2026), Lupita in copy;
+      * every other file -> ONE email to the invoicing team (Fer and Monica,
+        Lupita in copy — Lupita, 2 Nov 2026).
+    Pure — creates nothing. Returns a list of 0, 1 or 2 alerts."""
     rows = sorted(list(worklist or []), key=lambda r: -r.get("value", 0))
-    if not rows:
-        return []
-    to = _invoice_to_list()
-    total = round(sum(r.get("value", 0) for r in rows), 2)
-    n = len(rows)
-    followup = any(r.get("_followup") for r in rows)
-    tag = "[To Invoice – REMINDER]" if followup else "[To Invoice]"
-    subject = f"{tag} {n} file{'s' if n != 1 else ''} ready to bill ({_fmt(total)})"
-    names = os.environ.get("INVOICE_ALERT_TO_NAMES", INVOICE_TO_NAMES)
-    names_es = os.environ.get("INVOICE_ALERT_TO_NAMES_ES", INVOICE_TO_NAMES_ES)
-    return [{
-        "coordinator": "Invoicing team", "to": to, "cc": _invoice_cc_list(), "resolved": True,
-        "subject": app_subject(subject),
-        "body": _invoice_body(names, rows, True, followup, coordinator_es=names_es),
-        "file_count": n, "total": total, "followup": followup,
-    }]
+    alerts = []
+    embassy = [r for r in rows if r.get("embassy")]
+    team = [r for r in rows if not r.get("embassy")]
+    if team:
+        total = round(sum(r.get("value", 0) for r in team), 2)
+        n = len(team)
+        followup = any(r.get("_followup") for r in team)
+        tag = "[To Invoice – REMINDER]" if followup else "[To Invoice]"
+        subject = f"{tag} {n} file{'s' if n != 1 else ''} ready to bill ({_fmt(total)})"
+        names = os.environ.get("INVOICE_ALERT_TO_NAMES", INVOICE_TO_NAMES)
+        names_es = os.environ.get("INVOICE_ALERT_TO_NAMES_ES", INVOICE_TO_NAMES_ES)
+        alerts.append({
+            "coordinator": "Invoicing team", "to": _invoice_to_list(), "cc": _invoice_cc_list(),
+            "resolved": True, "subject": app_subject(subject),
+            "body": _invoice_body(names, team, True, followup, coordinator_es=names_es),
+            "file_count": n, "total": total, "followup": followup, "jobs": [r.get("job") for r in team],
+        })
+    if embassy:
+        total = round(sum(r.get("value", 0) for r in embassy), 2)
+        n = len(embassy)
+        followup = any(r.get("_followup") for r in embassy)
+        tag = "[To Invoice – US Embassy – REMINDER]" if followup else "[To Invoice – US Embassy]"
+        subject = f"{tag} {n} file{'s' if n != 1 else ''} ready to bill ({_fmt(total)})"
+        to = [a.strip() for a in os.environ.get("INVOICE_EMBASSY_TO", INVOICE_EMBASSY_TO).split(",") if a.strip()]
+        alerts.append({
+            "coordinator": "US Embassy (Edgar)", "to": to, "cc": _invoice_cc_list(),
+            "resolved": True, "subject": app_subject(subject),
+            "body": _embassy_body(embassy, followup),
+            "file_count": n, "total": total, "followup": followup, "jobs": [r.get("job") for r in embassy],
+        })
+    return alerts
 
 
 def send_enabled():
@@ -486,7 +534,10 @@ def dispatch_invoice_alerts(worklist, live=False, send=None):
                 status["drafts"].append(rec)
             # Mark this coordinator's jobs alerted (bump count) so the next touch
             # is a 48h follow-up, not an immediate re-send.
+            sent_jobs = {str(j) for j in (a.get("jobs") or [])}
             for r in fresh:
+                if sent_jobs and str(r.get("job")) not in sent_jobs:
+                    continue
                 prev = _entry(state, r.get("job")) or {"count": 0}
                 state[str(r.get("job"))] = {"last": now.isoformat(),
                                             "count": int(prev.get("count", 0)) + 1}

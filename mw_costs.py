@@ -30,7 +30,7 @@ import threading
 import time
 
 # Bump when the reading rules change, so a build saved by older rules is redone.
-RULES_VERSION = 2
+RULES_VERSION = 3
 
 WON_WORDS = ("w", "won", "accepted", "selected", "confirmed", "booked")
 LOST_WORDS = ("c", "l", "cancelled", "canceled", "lost", "declined")
@@ -137,7 +137,8 @@ def summarize_file(job: str, parts: list, lines: list) -> dict:
          "lines_with_act": 0, "lines_pending": 0, "est_pending": 0.0, "last_actual": "",
          "client_type": "", "move_type": "", "source": "moveware_api",
          "currency": "", "line_items": lines}
-    ccy = {ln["currency"] for ln in lines if ln.get("currency")}
+    ccy = {ln.get("option_currency") or ln["currency"] for ln in lines
+           if ln.get("option_currency") or ln.get("currency")}
     e["currency"] = ccy.pop() if len(ccy) == 1 else ""      # mixed: the file's own currency applies
     for ln in lines:
         e["lines"] += 1
@@ -174,6 +175,8 @@ def read_file(job_id, client: str = "") -> list:
     for o in won_options(options or []):
         cd = mw_live._get_timed(f"/options/{o['id']}/charges", 15) or {}
         got = lines_from_charges(cd.get("charges") if isinstance(cd, dict) else [], scrub)
+        for ln in got:     # amounts are in the option's currency (live 3 Nov 2026)
+            ln["option_currency"] = o.get("currency") or ""
         lines += drop_total_line(got, o.get("valueExclusive"))
     return lines
 

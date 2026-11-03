@@ -85,3 +85,8 @@ def test_a_build_saved_by_older_rules_is_not_reused(tmp_path, monkeypatch):
     mc.load_saved()
     assert mc._STATE["files"] == {"1": {"lines": 1}}
     monkeypatch.setitem(mc._STATE, "files", {})
+
+
+def test_file_currency_is_the_options_currency():
+    lines = [dict(_ln(100, 80, 0), currency="USD", option_currency="MXN"), dict(_ln(50, 40, 0), currency="MXN", option_currency="MXN")]
+    assert mc.summarize_file("1", ["1"], lines)["currency"] == "MXN"

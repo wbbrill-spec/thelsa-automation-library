@@ -610,3 +610,19 @@ def test_test_file_111000_is_treated_as_cancelled():
     out = snap([rec("111000", "W", pack=dt.date(2026, 5, 1)), rec("1", "W", pack=dt.date(2026, 5, 1))])
     assert out["metrics"]["tiles"]["lost"] == 1 and out["metrics"]["tiles"]["audited"] == 1
     assert "111000" not in [g["file"] for g in out.get("date_gaps", [])]
+
+
+def test_documents_page_shows_found_and_missing_documents(client, monkeypatch):
+    import doc_check as dc
+    st = {"running": False, "started": 1.0, "finished": 2.0, "error": None, "files": 1, "done": 1,
+          "diag": {"read_mailboxes": ["sarareyes@thelsa.com"], "refused_mailboxes": ["edgarespino@thelsa.com"]},
+          "results": [{"file": "110822", "type": "EXP", "coord": "Sara Reyes",
+                       "needed": ["bol", "inventory"], "missing": ["inventory"],
+                       "found": {"bol": {"date": "2026-09-05", "subject": "Docs", "link": "https://x/1",
+                                         "mailbox": "sarareyes@thelsa.com", "attachment": "HBL 110822.pdf"}}}]}
+    monkeypatch.setattr(dc, "state", lambda: st)
+    page = client.get("/faim/documents").data.decode()
+    assert "110822" in page and "HBL 110822.pdf" in page and "Packing list / inventory" in page
+    assert "0 of 1 files have every document" in page and "Not reachable yet: edgarespino" in page
+    crit = faim_web._with_documents([{"name": "Survey on file", "v": 40}])
+    assert {"name": "Documents found in email", "v": 50} in crit

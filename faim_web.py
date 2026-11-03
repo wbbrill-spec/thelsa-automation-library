@@ -177,6 +177,13 @@ def sit_days(jobs):
     return out
 
 
+def _insured(v) -> bool:
+    try:
+        return float(v or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
 def faim_snapshot(files, today=None, sit=None):
     """Pick the legitimate move files out of the file book and measure evidence.
 
@@ -233,6 +240,7 @@ def faim_snapshot(files, today=None, sit=None):
             "type": job_type,
             "coord_email": str(f.get("coordinator_email") or "").strip(),
             "pack_day": pack, "delivery_day": delivered,
+            "insured": _insured(f.get("ins")),     # insurance premium on the file (mw_live)
             "booked": _as_date(f.get("booked")),
             # proof it really moved, for a file not marked booked (Bill, 15 Oct):
             # it was invoiced, or SIT's plan shows a truck carried it
@@ -394,6 +402,13 @@ def faim_snapshot(files, today=None, sit=None):
             "gapFiles": len(gaps_rows),
         },
         "date_gaps": date_gaps,
+        # every audited file, for the email document check (doc_check, FAIM MS1.4)
+        "doc_rows": [{"file": r["number"], "type": r["type"], "coord": r["coord"],
+                      "coord_email": r["coord_email"], "insured": r["insured"],
+                      "load_day": r["pack_day"].isoformat() if r["pack_day"] else "",
+                      "delivery_day": (r["delivery_day"].isoformat() if r["delivery_day"]
+                                       else (r["sit_delivery"].isoformat() if r["sit_delivery"] else ""))}
+                     for r in audited],
         # audited files with no survey date in Moveware (for the survey finder)
         "missing_survey": [{"file": r["number"], "status": r["status"], "type": r["type"],
                             "coord": r["coord"], "coord_email": r["coord_email"],
@@ -513,6 +528,17 @@ def _keeper_tick():
                     sf.start(missing, clients)
     except Exception:
         pass
+    try:  # FAIM MS1.4 documents found in the coordinators' email, once a day
+        import doc_check as dc
+        st = dc.state()
+        if not st["running"] and (not st["finished"] or time.time() - st["finished"] > 20 * 3600):
+            prog = mw_live.audit_progress()
+            if prog.get("window_complete") or prog.get("complete"):
+                rows = _doc_rows()
+                if rows:
+                    dc.start(rows)
+    except Exception:
+        pass
     try:  # diary write-back from SIT's Plan de Viajes (on; MW_DIARY_WRITE=0 turns it off)
         import milestone_apply
         milestone_apply.run_once()
@@ -612,7 +638,7 @@ def faim_metrics():
         "passBar": PASS_BAR,
         "tiles": m["tiles"],
         "byCoordinator": m["byCoordinator"],
-        "byCriterion": m["byCriterion"],
+        "byCriterion": _with_documents(m["byCriterion"]),
         "breaches": m["breaches"],
         "gapFiles": m["gapFiles"],
         "viewer": viewer,
@@ -625,6 +651,34 @@ _DATE_ALERT_ADMINS = ("bbrill@thelsa.com", "bill.brill@inflectionpointnow.com", 
 
 _NEED_LABEL = {"survey": "survey", "pack": "pack/load date", "delivery": "delivery date",
                "load": "load", "packing": "packing"}
+
+
+def _with_documents(criteria):
+    """Add 'Documents found in email' (FAIM MS1.4) once the document check has a
+    finished run; until then the dashboard shows what it showed before."""
+    try:
+        import doc_check as dc
+        st = dc.state()
+        if st["finished"] and not st["running"]:
+            sm = dc.summary(st["results"])
+            need = sum(v["needed"] for v in sm["by_doc"].values())
+            got = sum(v["found"] for v in sm["by_doc"].values())
+            if need:
+                criteria = list(criteria) + [{"name": "Documents found in email", "v": _pct(got, need)}]
+                criteria.sort(key=lambda x: -x["v"])
+    except Exception:
+        pass
+    return criteria
+
+
+def _doc_rows():
+    files = mw_live.audited_in_window()
+    try:
+        import sit_milestones as sm
+        sit = sit_days(sm.state().get("jobs"))
+    except Exception:
+        sit = {}
+    return faim_snapshot(files, sit=sit).get("doc_rows") or []
 
 
 def _survey_inputs():
@@ -648,6 +702,94 @@ def _survey_inputs():
                                         "key_date": g.get("key_date", ""), "needs": []})
         r["needs"] += [m for m in g["missing"] if m not in r["needs"]]
     return list(rows.values()), clients
+
+
+@faim_bp.route("/faim/documents.json")
+@_login_required
+def faim_documents_json():
+    import doc_check as dc
+    st = dc.state()
+    if request.args.get("run") and not st["running"]:
+        rows = _doc_rows()
+        if rows:
+            dc.start(rows)
+        st = dc.state()
+    return jsonify(dict(st, summary=dc.summary(st["results"])))
+
+
+@faim_bp.route("/faim/documents")
+@_login_required
+def faim_documents():
+    """FAIM MS1.4 documents per file, as found in the coordinators' email."""
+    import html as _h
+    import doc_check as dc
+    st = dc.state()
+    if not st["running"] and (request.args.get("run") or not st["started"]):
+        rows = _doc_rows()
+        if rows:
+            dc.start(rows)
+            st = dc.state()
+    e = _h.escape
+    L = dc.DOC_LABELS
+    res = [r for r in st["results"] if r.get("needed")]
+    sm = dc.summary(st["results"])
+    d = st.get("diag") or {}
+    if st["running"]:
+        status = (f"Searching the coordinators' email&hellip; {st['done']} of {st['files']} files "
+                  "checked. This page refreshes by itself.")
+    elif st.get("error"):
+        status = f"Could not finish: {e(st['error'])}"
+    else:
+        status = (f"Done. {sm['files_complete']} of {sm['files_checked']} files have every document "
+                  "they need by now in an email.")
+    read_ok = d.get("read_mailboxes") or []
+    refused = [m for m in (d.get("refused_mailboxes") or []) if m not in read_ok]
+    status += (f" Mailboxes read: {e(', '.join(m.split('@')[0] for m in read_ok) or 'none')}."
+               + (f" Not reachable yet: {e(', '.join(m.split('@')[0] for m in refused))}." if refused else ""))
+    doc_rows = "".join(
+        f"<tr><td>{e(L[k][0])}</td><td class=n>{v['needed']}</td><td class=n>{v['found']}</td>"
+        f"<td class=n>{(round(v['found'] / v['needed'] * 100) if v['needed'] else 100)}%</td></tr>"
+        for k, v in sm["by_doc"].items())
+    coord_rows = "".join(
+        f"<tr><td>{e(c)}</td><td class=n>{v['files']}</td><td class=n>{v['found']} of {v['needed']}</td></tr>"
+        for c, v in sorted(sm["by_coord"].items(), key=lambda x: -x[1]["needed"]) if v["needed"])
+    rows = []
+    for r in sorted(res, key=lambda r: (-len(r["missing"]), r["coord"], r["file"])):
+        have = "".join(
+            f"<div class=ok>&#10003; {e(L[k][0])} &middot; {e(f['date'])} &middot; "
+            + (f"<a href='{e(f['link'])}' target=_blank>{e(f['attachment'] or f['subject'] or 'email')}</a>"
+               if f.get("link") else e(f.get("attachment") or f.get("subject") or ""))
+            + "</div>" for k, f in r["found"].items() if k in r["needed"])
+        miss = "".join(f"<div class=miss>&#10007; {e(L[k][0])}</div>" for k in r["missing"])
+        rows.append(f"<tr><td class=n>{e(r['file'])}</td><td>{e(r['type'])}</td><td>{e(r['coord'])}</td>"
+                    f"<td>{miss}{have}</td></tr>")
+    refresh = "<meta http-equiv=refresh content=20>" if st["running"] else ""
+    return f"""<!doctype html><html><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">{refresh}
+<title>FAIM documents</title><style>
+body{{font:14px/1.45 system-ui,sans-serif;margin:24px auto;max-width:1150px;padding:0 16px;color:#1d1d1f;background:#fafaf9}}
+table{{border-collapse:collapse;width:100%;background:#fff;margin:12px 0 28px}}
+td,th{{border-bottom:1px solid #e7e5e4;padding:8px;text-align:left;vertical-align:top}}
+th{{font-size:12px;text-transform:uppercase;color:#78716c}} .n{{white-space:nowrap}}
+.ok{{color:#166534;font-size:13px}} .miss{{color:#b91c1c;font-weight:600}} .m{{color:#78716c;font-size:12px}}
+.box{{background:#eef4ff;border:1px solid #c9dafc;padding:10px 14px;border-radius:8px}} a{{color:#1d4ed8}}</style></head><body>
+<p><a href="/faim">&larr; Dashboard</a></p>
+<h1>FAIM documents &mdash; found in the coordinators' email</h1>
+<p>FAIM 3.4 (MS1.4) asks each international file for shipment instructions, the bill of lading or waybill,
+the insurance certificate (when insured), a delivery confirmation and the packing list / inventory. Moveware
+doesn't let the app see the documents attached to a file, so the app looks for them in the email: every email
+that names the file number, by its attachment names, subject and text. A document is only expected once the
+move has reached that point (no bill of lading before loading, no delivery papers before delivery).
+Signatures on the inventory are not checked. Read-only: nothing is sent or changed.</p>
+<p class=box>{status}</p>
+<h2>By document</h2>
+<table><tr><th>Document</th><th>Files that need it</th><th>Found in email</th><th>Coverage</th></tr>{doc_rows}</table>
+<h2>By coordinator</h2>
+<table><tr><th>Coordinator</th><th>Files</th><th>Documents found</th></tr>{coord_rows}</table>
+<h2>Files</h2>
+<table><tr><th>File</th><th>Type</th><th>Coordinator</th><th>Documents</th></tr>{''.join(rows)}</table>
+<p class=m><a href="/faim/documents?run=1">Search again</a> &middot; Runs by itself once a day.</p>
+</body></html>"""
 
 
 @faim_bp.route("/faim/survey-finder.json")
@@ -974,7 +1116,7 @@ td.num{font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
 
 <div class="card">
 <h2>Files missing evidence</h2>
-<p class="note">What's not on record, worst first<span id="gapCount"></span>. (Alerting + auto-drafted follow-ups are a later phase — this view only reports gaps, it does not send anything yet.)</p>
+<p class="note">What's not on record, worst first<span id="gapCount"></span>. Found in the coordinators' email: <a href="/faim/documents">FAIM documents per file</a> · <a href="/faim/survey-finder">missing surveys and dates</a>.</p>
 <table>
 <thead><tr><th>File</th><th>Moveware status</th><th>Missing evidence</th><th>Coordinator</th><th class="num">Gaps</th><th>Severity</th></tr></thead>
 <tbody id="breaches"></tbody>

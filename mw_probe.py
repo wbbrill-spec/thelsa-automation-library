@@ -62,10 +62,13 @@ def shape(v, depth=0):
     if isinstance(v, str):
         if not v:
             return ""
-        if _DATE_LIKE.match(v) or _CODE_LIKE.match(v):
+        if _DATE_LIKE.match(v) or _CODE_LIKE.match(v) or _HREF.match(v):
             return v
         return f"text({len(v)})"
     return v
+
+
+_HREF = re.compile(r"^(/|https?://)[A-Za-z0-9_./?=&{}:-]*$")
 
 
 def cost_fields(v, prefix="") -> dict:
@@ -189,6 +192,68 @@ def probe_job(job_id) -> list:
     return out
 
 
+CHARGE_PATHS = ("", "/actuals", "/costs", "/purchases", "/purchaseOrders", "/supplierInvoices",
+                "/creditors", "/lines", "/items", "/details")
+
+
+def deep_charges(job_id) -> dict:
+    """Every charge line of the file's options (amounts, and whether the supplier
+    and purchase fields are filled), plus what each charge's own links and
+    sub-paths return — to find the per-supplier actual costs."""
+    import mw_live
+    base = mw_live.BASE_URL
+    host = base.split("/api")[0].rsplit("/", 1)[0]
+    code, body = _get(f"{base}/jobs/{job_id}/options")
+    opts = (body.get("options") if isinstance(body, dict) else None) or []
+    out = {"options": [], "charge_paths": [], "links": []}
+    first_charge = None
+    for o in opts[:4]:
+        if not isinstance(o, dict) or not o.get("id"):
+            continue
+        c2, b2 = _get(f"{base}/options/{o['id']}/charges")
+        lines = (b2.get("charges") if isinstance(b2, dict) else None) or []
+        out["options"].append({
+            "option": o.get("id"), "status": o.get("status") or (o.get("costStatus") or ""),
+            "charges": [{"id": c.get("id"), "desc_len": len(str(c.get("description") or "")),
+                         "value_ex": c.get("valueExclusive"), "est_ex": c.get("valueEstimateExclusive"),
+                         "act_ex": c.get("valueActualExclusive"), "profit_act": c.get("profitActual"),
+                         "currency": c.get("currency"), "supplier_code": bool(c.get("supplierCode")),
+                         "supplier_name": bool(c.get("supplierName")), "purchase": bool(c.get("purchase")),
+                         "parent": bool(c.get("parent")), "group": c.get("group"),
+                         "oneTotal": c.get("oneTotal"), "showOnQuote": c.get("showOnQuote"),
+                         "links": {k: (v or {}).get("href") for k, v in (c.get("links") or {}).items()}}
+                        for c in lines if isinstance(c, dict)],
+            "option_keys": sorted(o.keys())})
+        if lines and first_charge is None:
+            first_charge = (o["id"], lines[0])
+        # a line WITH an actual cost is the best one to open
+        for c in lines:
+            if isinstance(c, dict) and (c.get("valueActual") or 0) > 0:
+                first_charge = (o["id"], c)
+                break
+    if first_charge:
+        oid, c = first_charge
+        for p in CHARGE_PATHS:
+            for url, label in ((f"{base}/options/{oid}/charges/{c['id']}{p}", f"/options/{{opt}}/charges/{{charge}}{p}"),
+                               (f"{base}/charges/{c['id']}{p}", f"/charges/{{charge}}{p}")):
+                code, body = _get(url)
+                e = {"path": label, "status": code}
+                if isinstance(body, (dict, list)):
+                    e["shape"] = shape(body)
+                out["charge_paths"].append(e)
+        for k, v in (c.get("links") or {}).items():
+            href = (v or {}).get("href") or ""
+            if not href:
+                continue
+            url = href if href.startswith("http") else (f"{host}{href}" if href.startswith("/") else f"{base}/{href}")
+            code, body = _get(url)
+            e = {"link": k, "href": href, "status": code}
+            if isinstance(body, (dict, list)):
+                e["shape"] = shape(body)
+            out["links"].append(e)
+    return out
+
+
 def probe_top() -> list:
     import mw_live
     out = []
@@ -217,6 +282,10 @@ def run() -> dict:
         result = {"at": dt.datetime.utcnow().isoformat() + "Z", "base": mw_live.BASE_URL.split("//")[-1],
                   "spec": find_spec(), "top": probe_top(),
                   "jobs": [dict(j, paths=probe_job(j["job_id"])) for j in jobs]}
+        deep_ids = [j["job_id"] for j in jobs] + [x for x in (os.environ.get("MW_PROBE_JOBS", "111136,110749,111046").split(",")) if x.strip()]
+        result["deep"] = {}
+        for jid in list(dict.fromkeys(str(x).strip() for x in deep_ids))[:5]:
+            result["deep"][jid] = deep_charges(jid)
         with _LOCK:
             _STATE.update(result=result, at=time.time(), error=None)
         return result
@@ -234,6 +303,21 @@ def summary_text(result: dict) -> str:
     if not result or result.get("error"):
         return f"Probe failed: {(result or {}).get('error')}"
     lines = [f"Moveware API probe — {result['at']} — {result['base']}", ""]
+    for jid, d in (result.get("deep") or {}).items():
+        lines.append(f"DEEP file {jid}:")
+        for o in d.get("options", []):
+            lines.append(f"  option {o['option']} status {o['status']}: {len(o['charges'])} charge lines")
+            for c in o["charges"]:
+                lines.append(f"    charge {c['id']} sell {c['value_ex']} est {c['est_ex']} actual {c['act_ex']} "
+                             f"{c['currency']} supplier_code={c['supplier_code']} supplier_name={c['supplier_name']} "
+                             f"purchase={c['purchase']} parent={c['parent']} oneTotal={c['oneTotal']} links={c['links']}")
+        for e in d.get("charge_paths", []):
+            if e["status"] == 200:
+                lines.append(f"  200 {e['path']}: {json.dumps(e.get('shape'))[:1500]}")
+        lines.append("  other charge paths: " + "; ".join(f"{e['status']} {e['path']}" for e in d.get("charge_paths", []) if e["status"] != 200))
+        for e in d.get("links", []):
+            lines.append(f"  link {e['link']} {e['href']} -> {e['status']}: {json.dumps(e.get('shape'))[:2500]}")
+        lines.append("")
     sp = result["spec"]
     if sp["spec_url"]:
         lines.append(f"Endpoint list found at {sp['spec_url']}: {sp['n_paths']} paths, "

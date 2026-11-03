@@ -40,7 +40,7 @@ def put_payments(payments, to="2026-09-30"):
 
 
 def test_nothing_uploaded_means_nothing_changes():
-    assert cf.invoiced_files() == {"files": set(), "to": ""}
+    assert cf.invoiced_files() == {"files": set(), "lots": set(), "to": ""}
     assert cf.open_invoices()["open"] == []
     assert cf.price_differences([{"job": "111154", "sell": 17880, "currency": "USD"}]) == []
 
@@ -50,7 +50,8 @@ def test_files_in_the_register_count_as_invoiced_but_not_cancelled_ones():
                   inv("110950", "TRS", "102", 2320.0),
                   inv("", "TRS", "103", 2320.0, cancels="TRS 102")])
     got = cf.invoiced_files()
-    assert got["files"] == {"110887", "110900"}
+    assert got["files"] == {"110887"}
+    assert got["lots"] == {"110900A"}        # a lot's invoice covers that lot only
     assert got["to"] == "2026-09-10"
 
 
@@ -121,3 +122,32 @@ def test_lettered_lots_are_added_to_their_file_before_comparing():
              {"job": "110873A", "sell": 47684.70, "currency": "MXN"},
              {"job": "110873B", "sell": 36151.40, "currency": "MXN"}]
     assert cf.price_differences(files) == []
+
+
+def test_invoicing_reports_found_in_email_count_as_invoiced(monkeypatch):
+    import invoice_mail
+    from commissions import invoices as I
+    rep = [inv("110940", "AGTS", "2540", 3000.0, date="2026-10-30"),
+           inv("110741A", "AGTS", "2532", 3888.54, date="2026-10-30")]
+    store.put(invoice_mail.KEY, {"reports": {"abc": {"records": I.to_records(rep)}}})
+    put_register([inv("110887", "TRS", "100", 11600.0)])
+    got = cf.invoiced_files()
+    assert got["files"] == {"110887", "110940"} and got["lots"] == {"110741A"}
+    assert got["to"] == "2026-10-30"
+
+
+def test_wendys_monthly_report_with_a_sum_row_reads(tmp_path):
+    import openpyxl
+    from commissions import invoices as I
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append([None, None, None, None, None, "THELSA MOBILITY SOLUTION LLC"])
+    ws.append(["Cía", "Tipo", "Fecha", "Serie", "Folio", "Razón Social", "Total Factura", "Factura que cancela",
+               "Subtotal USD", "Subtotal MX", "Expediente", " Moneda", "TC MX", "TC USD"])
+    ws.append(["LLC", "AGTS", dt.datetime(2026, 10, 30), "AGTS", 2532, "AGENT", 3888.54, None, 3888.54,
+               73162.1, "110741A", "USD", 1, 18.81])
+    ws.append([None, None, None, None, None, None, 3888.54, None, 3888.54, 73162.1])     # the sum row
+    p = tmp_path / "FACT UNI OCTUBRE.xlsx"
+    wb.save(p)
+    invs, info = I.load(str(p))
+    assert [(x.job, x.folio) for x in invs] == [("110741A", "2532")]

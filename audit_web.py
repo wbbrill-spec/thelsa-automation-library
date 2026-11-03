@@ -675,7 +675,7 @@ def _finance_invoice_view() -> dict:
         fin = _load_finance_cost()
     except Exception:
         fin = {}
-    inv, cutoff = set(), ""
+    inv, lots, cutoff = set(), set(), ""
     for b, L in (fin.get("ledger") or {}).items():
         if (L.get("n_inv") or 0) > 0 or (L.get("inv_mxn") or 0) or (L.get("inv_usd") or 0):
             inv.add(str(b))
@@ -689,10 +689,11 @@ def _finance_invoice_view() -> dict:
         import commission_feed
         reg = commission_feed.invoiced_files()
         inv |= reg["files"]
+        lots |= set(reg.get("lots") or ())
         cutoff = max(cutoff, reg["to"] or "")
     except Exception:
         pass
-    return {"invoiced": inv, "cutoff": cutoff}
+    return {"invoiced": inv, "lots": lots, "cutoff": cutoff}
 
 
 def _inv_rows(f):
@@ -802,7 +803,8 @@ def compute_metrics(files, live_counts=None, cost_available=True):
     fin = _finance_invoice_view()
 
     def _billed_elsewhere(f):
-        return _base_file(f.get("job")) in fin["invoiced"]
+        return (_base_file(f.get("job")) in fin["invoiced"]
+                or str(f.get("job") or "").strip().upper() in fin.get("lots", ()))
 
     # Lupita, 30 Oct 2026, after checking October's list file by file: it was right
     # (none already invoiced); "focus on 2026 only"; US Embassy files carrying the
@@ -865,6 +867,10 @@ def compute_metrics(files, live_counts=None, cost_available=True):
     _done = sum(1 for f in files if f["invoiced"] and _invoiceable(f))
     pct_billed = round(_done / (_done + invoiceable_n) * 100, 1) if (_done + invoiceable_n) else 100.0
     # Worklist of files that should be invoiced (for the coordinator alert drafts).
+    try:
+        from coordinator_alerts import invoice_hold as _hold
+    except Exception:
+        _hold = lambda job: ""
     to_invoice_worklist = sorted(
         [{"job": f["job"], "client": f["client"],
           "coordinator": f.get("coordinator") or "Unassigned",
@@ -872,7 +878,7 @@ def compute_metrics(files, live_counts=None, cost_available=True):
           "value": _bill_value(f), "embassy": bool(f.get("is_embassy")),
           "currency": str(f.get("currency") or ""),
           **_orig_money(f, _bill_value(f)),
-          "draft": bool(_drafts(f)),
+          "draft": bool(_drafts(f)), "hold": _hold(f.get("job")),
           "status": str(f.get("status") or "").strip().upper(),
           "pack": f["pack"].isoformat() if f.get("pack") else None,
           "delivery": f["delivery"].isoformat() if f.get("delivery") else None}
@@ -2284,7 +2290,7 @@ TEMPLATE = r"""<!DOCTYPE html>
   {% if m.to_invoice_worklist %}
   <table style="margin-top:12px"><tr><th>Job</th><th>Client</th><th>Coordinator</th><th>Packed</th><th>Delivered</th><th>Value</th></tr>
   {% for r in m.to_invoice_worklist[:40] %}<tr>
-    <td class="num">{{ r.job }}{% if r.embassy %} <span class="pill rev" title="US Embassy or Consulate">EMB</span>{% endif %}</td>
+    <td class="num">{{ r.job }}{% if r.embassy %} <span class="pill rev" title="US Embassy or Consulate">EMB</span>{% endif %}{% if r.hold %} <span class="pill" title="{{ r.hold }}">ON HOLD</span>{% endif %}</td>
     <td>{{ r.client }}</td><td>{{ r.coordinator }}</td>
     <td>{{ r.pack or '—' }}</td><td>{{ r.delivery or '—' }}</td>
     <td class="num warn">{{ "{:,.0f}".format(r.value) }} {{ r.currency }}</td></tr>{% endfor %}</table>

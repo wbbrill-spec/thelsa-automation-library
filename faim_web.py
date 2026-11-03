@@ -539,6 +539,11 @@ def _keeper_tick():
                     dc.start(rows)
     except Exception:
         pass
+    try:  # Finance's monthly invoicing report (Wendy), read from email once a day
+        import invoice_mail
+        invoice_mail.start_if_due()
+    except Exception:
+        pass
     try:  # line-item revenue and cost from Moveware's API, rebuilt daily
         prog = mw_live.audit_progress()
         if prog.get("window_complete") or prog.get("complete"):

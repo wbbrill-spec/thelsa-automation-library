@@ -1271,3 +1271,21 @@ def test_moveware_test_file_is_never_ready_to_invoice(monkeypatch):
     m = aw.compute_metrics(files, live_counts=LIVE_COUNTS, cost_available=False)
     jobs = [r["job"] for r in m["to_invoice_worklist"]]
     assert "111000" not in jobs and "111001" in jobs
+
+
+def test_a_file_on_hold_is_not_flagged_until_its_review_date(monkeypatch):
+    import datetime as _dt
+    import coordinator_alerts as ca
+    assert "government funding" in ca.invoice_hold("110921", today=_dt.date(2026, 11, 4))
+    assert ca.invoice_hold("110921", today=_dt.date(2026, 12, 1)) == ""
+    assert ca.invoice_hold("111136") == ""
+    monkeypatch.setenv("INVOICE_HOLDS", '{"111188": {"reason": "client asked to wait", "until": "2099-01-01"}}')
+    assert ca.invoice_hold("111188") == "client asked to wait"
+
+
+def test_alert_lines_show_known_names_and_flag_files_of_people_who_left():
+    import coordinator_alerts as ca
+    lines = "\n".join(ca._file_lines([{"job": "111136", "client": "X", "value": 1, "coordinator": "Edgarespino"},
+                                      {"job": "111120", "client": "Y", "value": 1, "coordinator": "Stephanie Barraza"}]))
+    assert "coordinator Edgar Espino" in lines and "Edgarespino" not in lines
+    assert "Stephanie Barraza (no longer at TMS" in lines

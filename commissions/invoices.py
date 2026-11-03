@@ -141,6 +141,8 @@ def load(src) -> tuple:
         cell = lambda j: r[j] if j is not None and j < len(r) else None
         if all(cell(at[n]) is None for n in ("SERIE", "FOLIO", "TOTAL FACTURA", "EXPEDIENTE")):
             continue                                              # a blank row, or a note under the list
+        if all(cell(at[n]) is None for n in ("SERIE", "FOLIO", "EXPEDIENTE")) and cell(at["CIA"]) is None:
+            continue                  # the sum row under a month's report (Wendy's FACT UNI, Nov 2026)
         series, folio, date = _plain(cell(at["SERIE"])), _folio(cell(at["FOLIO"])), _date(cell(at["FECHA"]))
         if not _SERIES.match(series) or not folio:
             _bad(f"row {i}: the invoice series or folio cannot be read",

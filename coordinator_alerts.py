@@ -227,6 +227,52 @@ def _invoice_cc_list():
     return [a.strip() for a in raw.split(",") if a.strip()]
 
 
+# Moveware shows some users by their login (Bill, 3 Nov 2026: "coordinator
+# Edgarespino" in the alerts). The name people know them by:
+DISPLAY_NAMES = {"edgarespino": "Edgar Espino", "edgar espino gonzalez": "Edgar Espino"}
+
+
+def display_coordinator(name: str) -> str:
+    n = (name or "").strip()
+    if not n:
+        return ""
+    shown = DISPLAY_NAMES.get(n.lower(), n)
+    if n.lower() in FORMER_STAFF:
+        shown += " (no longer at TMS: please reassign the file in Moveware)"
+    return shown
+
+
+# Files the team said NOT to bill yet. Each comes back on the list after its
+# review date, so a hold is never forgotten. INVOICE_HOLDS (JSON
+# {"job": {"reason": "...", "until": "YYYY-MM-DD"}}) adds to / overrides these.
+INVOICE_HOLDS = {
+    "110921": {"reason": "on hold, waiting for US government funding (Edgar, 3 Nov 2026)",
+               "until": "2026-12-01"},
+}
+
+
+def invoice_hold(job, today=None):
+    """The hold reason if this file must not be flagged today, else ''."""
+    import datetime as _dt
+    holds = dict(INVOICE_HOLDS)
+    raw = (os.environ.get("INVOICE_HOLDS") or "").strip()
+    if raw:
+        try:
+            holds.update({str(k).strip().upper(): v for k, v in json.loads(raw).items() if isinstance(v, dict)})
+        except (ValueError, TypeError, AttributeError):
+            pass
+    h = holds.get(str(job or "").strip().upper())
+    if not h:
+        return ""
+    today = today or _dt.date.today()
+    try:
+        if h.get("until") and _dt.date.fromisoformat(h["until"]) <= today:
+            return ""
+    except ValueError:
+        pass
+    return str(h.get("reason") or "on hold")
+
+
 def _invoice_to_list():
     raw = os.environ.get("INVOICE_ALERT_TO", INVOICE_TO)
     return [a.strip() for a in raw.split(",") if a.strip()]
@@ -238,7 +284,7 @@ def _file_lines(rows):
         tag = " [US EMBASSY]" if r.get("embassy") else ""
         when = (f"packed {r['pack']}" if r.get("pack")
                 else (f"delivered {r['delivery']}" if r.get("delivery") else ""))
-        coord = f"; coordinator {r['coordinator']}" if r.get("coordinator") else ""
+        coord = f"; coordinator {display_coordinator(r['coordinator'])}" if r.get("coordinator") else ""
         out.append(f"  • Job {r['job']} — {r.get('client','')}{tag}  "
                    f"(value {_fmt(r.get('value', 0))}{' ' + r['currency'] if r.get('currency') else ''}{'; ' + when if when else ''}{coord})")
     return out
@@ -492,6 +538,10 @@ def dispatch_invoice_alerts(worklist, live=False, send=None):
 
     # Only booked files from the last 12 months, with a value to bill.
     worklist = [r for r in (worklist or []) if recent_booked(r) and (r.get("value") or 0) > 0]
+    # Files the team put on hold are left out until their review date.
+    held = [r for r in worklist if invoice_hold(r.get("job"))]
+    status["on_hold"] = [{"job": r.get("job"), "reason": invoice_hold(r.get("job"))} for r in held]
+    worklist = [r for r in worklist if not invoice_hold(r.get("job"))]
     # First alert immediately; then follow up only every 48h while still unbilled.
     state = _load_state()
     fresh = []

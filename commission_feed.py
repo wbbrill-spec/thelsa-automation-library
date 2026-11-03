@@ -120,22 +120,48 @@ def removals():
 
 
 # ── what AuditTrack uses ─────────────────────────────────────────────────────
+def _mail_invoices():
+    try:
+        import invoice_mail
+        return invoice_mail.invoices()
+    except Exception:
+        return []
+
+
 def invoiced_files() -> dict:
-    """{'files': base file numbers with an invoice in Finance's register (not
-    cancelled), 'to': last invoice date in the register}. Empty when the
-    register has not been uploaded."""
+    """{'files': base file numbers invoiced, 'lots': lettered lots invoiced on
+    their own, 'to': last invoice date}. Read from Finance's register (uploaded
+    on the commission page) and the monthly invoicing reports Finance emails
+    (invoice_mail). Cancelled invoices and credit notes don't count.
+
+    An invoice on a lettered lot (110741A) covers that lot only, not the main
+    file: Lupita, 3 Nov 2026, still had 110741 to bill after 110741A was invoiced.
+    An invoice on the main number covers the file and its lots."""
     reg = register()
-    if not reg:
-        return {"files": set(), "to": ""}
-    cancelled = _cancelled(reg["invoices"])
-    files = set()
-    for x in reg["invoices"]:
+    invs = list(reg["invoices"]) if reg else []
+    to = str(reg["info"].get("to") or "") if reg else ""
+    mail = _cached("mail_invoices", _mail_invoices) or []
+    have = {(x.series, x.folio, x.job) for x in invs}
+    for x in mail:
+        if (x.series, x.folio, x.job) not in have:
+            invs.append(x)
+            have.add((x.series, x.folio, x.job))
+            to = max(to, x.date or "")
+    if not invs:
+        return {"files": set(), "lots": set(), "to": ""}
+    cancelled = _cancelled(invs)
+    files, lots = set(), set()
+    for x in invs:
         if not x.job or (x.total or 0) <= 0:
             continue
         if _is_cancelled(x.series, x.folio, cancelled):
             continue
-        files.add(base(x.job))
-    return {"files": files, "to": str(reg["info"].get("to") or "")}
+        job = str(x.job).strip().upper()
+        if base(job) == job:
+            files.add(job)
+        else:
+            lots.add(job)
+    return {"files": files, "lots": lots, "to": to}
 
 
 def open_invoices(today: dt.date | None = None) -> dict:

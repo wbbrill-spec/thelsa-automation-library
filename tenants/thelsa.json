@@ -1,0 +1,94 @@
+{
+  "_about": "Thelsa's settings (multi-company, 4 Nov 2026). Rebuilt from the values the code held before f823984, which read this file but did not commit it (.gitignore '*.json'). Secrets never go here.",
+  "id": "thelsa",
+  "name": "Thelsa",
+  "app_name": "FAIM Audit Assistant",
+  "moveware": {
+    "host": "https://rest.moveware-test.app",
+    "company_segment": "64000"
+  },
+  "people": {
+    "alert_cc": "maria.gonzalez@thelsa.com",
+    "sender_mailbox": "bbrill@thelsa.com",
+    "admin_alerts_to": "bill.brill@inflectionpointnow.com",
+    "coordinators": {
+      "sara reyes": "sarareyes@thelsa.com",
+      "sara reyes gallegos": "sarareyes@thelsa.com",
+      "elizabeth hernandez": "elizabethhernandez@thelsa.com",
+      "elizabeth hernandez bravo": "elizabethhernandez@thelsa.com",
+      "maria gonzalez": "maria.gonzalez@thelsa.com",
+      "maria guadalupe gonzalez": "maria.gonzalez@thelsa.com",
+      "mg2": "maria.gonzalez@thelsa.com",
+      "sr2": "sarareyes@thelsa.com",
+      "eh1": "elizabethhernandez@thelsa.com"
+    },
+    "former_staff": [
+      "stephanie barraza",
+      "stephanie barraza villa",
+      "stephaniebarraza@thelsa.com"
+    ],
+    "display_names": {
+      "edgarespino": "Edgar Espino",
+      "edgar espino gonzalez": "Edgar Espino"
+    },
+    "operations_mailboxes": [
+      "sarareyes@thelsa.com",
+      "edwuinlopez@thelsa.com",
+      "edgarespino@thelsa.com",
+      "elizabethhernandez@thelsa.com",
+      "wendyhernandez@thelsa.com",
+      "monicaescalante@thelsa.com",
+      "pablomartinez@thelsa.com",
+      "stephaniebarraza@thelsa.com",
+      "maria.gonzalez@thelsa.com",
+      "mariacarrasco@thelsa.com",
+      "guillermomonroy@thelsa.com",
+      "victorjasso@thelsa.com",
+      "danielamartinez@thelsa.com"
+    ],
+    "sales_mailboxes": [
+      "pablomartinez@thelsa.com",
+      "edwuinlopez@thelsa.com"
+    ]
+  },
+  "invoicing": {
+    "team_to": [
+      "mariacarrasco@thelsa.com",
+      "monicaescalante@thelsa.com"
+    ],
+    "team_names": "Fer and Monica",
+    "team_names_es": "Fer y Mónica",
+    "cc": [
+      "maria.gonzalez@thelsa.com"
+    ],
+    "embassy_to": [
+      "edgarespino@thelsa.com"
+    ],
+    "embassy_names": "Edgar",
+    "holds": {
+      "110921": {
+        "reason": "on hold, waiting for US government funding (Edgar, 3 Nov 2026)",
+        "until": "2026-12-01"
+      }
+    },
+    "report_subject_words": [
+      "REPORTE FACTURACION",
+      "REPORTE DE FACTURACION"
+    ]
+  },
+  "files": {
+    "lost_statuses": [
+      "L",
+      "C"
+    ],
+    "agent_export_types": [
+      "EXA"
+    ],
+    "agent_import_types": [
+      "IMA"
+    ],
+    "ignore": [
+      "111000"
+    ]
+  }
+}

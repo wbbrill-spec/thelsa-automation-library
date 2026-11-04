@@ -4,6 +4,7 @@ data/tokens/
 *.json
 # Company settings for the AI Assistant: no secrets (tokens stay in the environment)
 !assistant/tenants/*.json
+!tenants/*.json
 
 # Python
 __pycache__/
@@ -20,3 +21,7 @@ data/flask_session/
 # Local runtime files written by the app / test runs
 data/flask_session/
 data/commissions.db
+
+# Local SQLite databases never go in this public repo
+data/*.db
+data/*.db-*

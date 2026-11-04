@@ -1,0 +1,51 @@
+{
+  "_about": "Template for a new company: copy to tenants/<id>.json.",
+  "id": "example",
+  "name": "Example Moving",
+  "app_name": "Audit Assistant",
+  "moveware": {
+    "host": "https://rest.moveware-test.app",
+    "company_segment": "00000"
+  },
+  "people": {
+    "alert_cc": "ops@example.com",
+    "sender_mailbox": "assistant@example.com",
+    "admin_alerts_to": "bill.brill@inflectionpointnow.com",
+    "coordinators": {
+      "ana coordinator": "ana@example.com"
+    },
+    "former_staff": [],
+    "display_names": {},
+    "operations_mailboxes": [
+      "ana@example.com"
+    ],
+    "sales_mailboxes": [
+      "sales@example.com"
+    ]
+  },
+  "invoicing": {
+    "team_to": [
+      "billing@example.com"
+    ],
+    "team_names": "Billing",
+    "team_names_es": "Facturación",
+    "cc": [],
+    "embassy_to": [],
+    "embassy_names": "",
+    "holds": {},
+    "report_subject_words": []
+  },
+  "files": {
+    "lost_statuses": [
+      "L",
+      "C"
+    ],
+    "agent_export_types": [
+      "EXA"
+    ],
+    "agent_import_types": [
+      "IMA"
+    ],
+    "ignore": []
+  }
+}

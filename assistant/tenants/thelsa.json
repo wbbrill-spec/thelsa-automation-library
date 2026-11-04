@@ -1,6 +1,8 @@
 {
   "_about": "Company settings for the AI Assistant (one file per company; adding a company = adding a file, never a code change). Secrets never go here: feed tokens are read from the environment variable named in token_env.",
-  "tenant": {"id": "thelsa", "name": "Thelsa"},
+  "tenant": {"id": "thelsa", "name": "Thelsa", "logo": "/static/thelsa_logo.png",
+             "staff_domains": ["thelsa.com"],
+             "admins": ["bbrill@thelsa.com", "bill.brill@inflectionpointnow.com"]},
 
   "people": {
     "_about": "Who handles what. key_users see every to-do nobody owns, so nothing is lost. Each role lists addresses that receive that kind of to-do when the product does not name a person.",

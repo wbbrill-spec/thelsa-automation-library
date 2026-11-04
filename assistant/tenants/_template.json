@@ -1,0 +1,36 @@
+{
+  "_about": "Copy this file to assistant/tenants/<company-id>.json (lower case, no spaces, e.g. greatermoving.json) and fill it in. The company's own copy of the app on Render sets TENANT=<company-id>. Secrets never go here: tokens and passwords live in that copy's Render environment.",
+  "tenant": {
+    "id": "COMPANY-ID",
+    "name": "Company Name",
+    "logo": "/static/COMPANY-ID_logo.png",
+    "staff_domains": ["company.com"],
+    "admins": ["bill.brill@inflectionpointnow.com"]
+  },
+
+  "people": {
+    "_about": "key_users see every to-do nobody owns, so nothing is lost. Each role lists who gets that kind of to-do when the product does not name a person. Leave a role out if the company has no such person.",
+    "key_users": ["ops.manager@company.com"],
+    "billing": [],
+    "procurement": [],
+    "collections": []
+  },
+
+  "drafts": {
+    "invoice_request_to": ""
+  },
+
+  "auditrack": {
+    "enabled": false,
+    "_about": "Turn on only when the company's move system (Moveware) is connected to this copy."
+  },
+
+  "feeds": [
+    {
+      "id": "quoterelay",
+      "name": "QuoteRelay",
+      "url": "https://mattapp.inflectionpointnow.com/api/assistant/tasks?t=COMPANY-ID",
+      "token_env": "ASSISTANT_FEED_TOKEN_QUOTERELAY"
+    }
+  ]
+}

@@ -156,7 +156,7 @@ def start_scheduler():
         return None
     try:
         import fcntl
-        _sched_lock_fh = open("/tmp/thelsa_assistant_scheduler.lock", "w")
+        _sched_lock_fh = open(f"/tmp/{__import__('assistant.todo', fromlist=['x']).tenant_id()}_assistant_scheduler.lock", "w")
         fcntl.flock(_sched_lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except Exception:
         return None  # another worker owns the scheduler

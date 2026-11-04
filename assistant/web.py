@@ -30,9 +30,17 @@ EXT_DIR = Path(__file__).resolve().parent / "whatsapp_extension"
 
 
 def _admins():
-    raw = os.environ.get("ASSISTANT_ADMINS",
-                         "bbrill@thelsa.com,bill.brill@inflectionpointnow.com")
+    from . import todo
+    raw = os.environ.get("ASSISTANT_ADMINS")
+    if raw is None:
+        listed = todo.company()["admins"]
+        raw = ",".join(listed) if listed else "bbrill@thelsa.com,bill.brill@inflectionpointnow.com"
     return {e.strip().lower() for e in raw.split(",") if e.strip()}
+
+
+def _company():
+    from . import todo
+    return todo.company()
 
 
 # ── Language ───────────────────────────────────────────────────────────────────
@@ -203,7 +211,7 @@ SHELL = """<!doctype html><html lang="{{ lang }}"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{ title }} — {{ t('title_suffix') }}</title><style>{{ css|safe }}</style></head><body>
 <div class="wrap">
-  <div class="top"><img src="/static/thelsa_logo.png" alt="Thelsa">
+  <div class="top"><img src="{{ company.logo }}" alt="{{ company.name }}">
     <nav>{% if admin %}<a href="/assistant/admin">{{ t('nav_admin') }}</a>{% endif %}
       <a href="/assistant">{{ t('nav_dashboard') }}</a><a href="/">{{ t('nav_library') }}</a>
       <span class="lang" role="group" aria-label="Language / Idioma">
@@ -223,11 +231,13 @@ def _here():
 
 def _page(title, body, admin=False, lang="en"):
     return render_template_string(SHELL, title=title, css=CSS, body=body, admin=admin, lang=lang,
-                                  here=_here(), t=lambda k, **kw: i18n.t(lang, k, **kw))
+                                  here=_here(), company=_company(),
+                                  t=lambda k, **kw: i18n.t(lang, k, **kw))
 
 
 def _render(title, tpl, u, lang=None, **ctx):
     lang = lang or user_lang(u)
+    ctx.setdefault("company", _company())
     body = render_template_string(tpl, csrf=_csrf_token(), u=u, lang=lang,
                                   t=lambda k, **kw: i18n.t(lang, k, **kw), **ctx)
     return _page(title, body, admin=(u and u["role"] == "admin"), lang=lang)
@@ -779,9 +789,9 @@ def whatsapp_extension(u):
         for p in sorted(EXT_DIR.iterdir()):
             if p.is_file():
                 data = p.read_text().replace("__SERVER__", base)
-                z.writestr(f"thelsa-assistant-whatsapp/{p.name}", data)
+                z.writestr(f"{_company()['id']}-assistant-whatsapp/{p.name}", data)
     return Response(buf.getvalue(), mimetype="application/zip", headers={
-        "Content-Disposition": "attachment; filename=thelsa-assistant-whatsapp.zip"})
+        "Content-Disposition": f"attachment; filename={_company()['id']}-assistant-whatsapp.zip"})
 
 
 @bp.route("/api/assistant/whatsapp/sync", methods=["POST", "OPTIONS"])
@@ -851,7 +861,8 @@ def _safe_addr(addr) -> str:
     a = (addr or "").strip().lower()
     if not a:
         return "(blank)"
-    if a.endswith("@thelsa.com"):
+    from . import todo
+    if todo.is_staff(a):
         return a
     return f"(external: {a.split('@')[-1]})" if "@" in a else "(external)"
 
@@ -962,7 +973,7 @@ Job types on files opened in the last 30 days: {% for t, n in h.types.recent %}{
 
 <h2>Add a user</h2>
 <form method="post" action="/assistant/admin/add" class="bar"><input type="hidden" name="csrf" value="{{ csrf }}">
-  <input type="email" name="email" placeholder="name@thelsa.com" required>
+  <input type="email" name="email" placeholder="name@{{ company.staff_domains[0] }}" required>
   <input type="text" name="name" placeholder="Full name">
   <button class="btn" type="submit">Add</button>
   <span class="sub" style="margin:0">They open the AI Assistant tile, sign in, and connect their mailbox.</span></form>
@@ -1061,7 +1072,8 @@ def admin_add(u):
     _check_csrf()
     email = (request.form.get("email") or "").strip().lower()
     allowed = {d.strip().lower() for d in os.environ.get(
-        "ALLOWED_EMAIL_DOMAINS", "thelsa.com,inflectionpointnow.com").split(",") if d.strip()}
+        "ALLOWED_EMAIL_DOMAINS", ",".join(_company()["staff_domains"] + ["inflectionpointnow.com"])).split(",")
+        if d.strip()}
     if "@" in email and email.rsplit("@", 1)[1] in allowed:
         db.upsert_user(email, request.form.get("name") or None)
     return redirect(url_for("assistant.admin"))

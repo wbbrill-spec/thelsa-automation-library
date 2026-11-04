@@ -240,3 +240,37 @@ def test_company_settings_file_is_tracked_by_git():
     out = subprocess.run(["git", "ls-files", "assistant/tenants/thelsa.json"], cwd=root,
                          capture_output=True, text=True).stdout.strip()
     assert out == "assistant/tenants/thelsa.json"
+
+
+def test_company_settings_drive_branding_and_sign_in(monkeypatch, tmp_path):
+    import json
+    from assistant import todo
+    (tmp_path / "acme.json").write_text(json.dumps({"tenant": {
+        "id": "acme", "name": "Acme Moving", "logo": "/static/acme_logo.png",
+        "staff_domains": ["acmemoving.com"], "admins": ["boss@acmemoving.com"]}}))
+    monkeypatch.setattr(todo, "_TENANT_DIR", str(tmp_path))
+    monkeypatch.setenv("ASSISTANT_TENANT", "acme")
+    todo._CACHE.clear()
+    try:
+        c = todo.company()
+        assert c["name"] == "Acme Moving" and c["staff_domains"] == ["acmemoving.com"]
+        assert todo.is_staff("ana@acmemoving.com") and not todo.is_staff("ana@thelsa.com")
+        monkeypatch.delenv("ASSISTANT_ADMINS", raising=False)
+        from assistant import web
+        assert web._admins() == {"boss@acmemoving.com"}
+    finally:
+        todo._CACHE.clear()
+
+
+def test_thelsa_keeps_its_branding():
+    from assistant import todo
+    todo._CACHE.clear()
+    c = todo.company()
+    assert c["id"] == "thelsa" and c["staff_domains"] == ["thelsa.com"]
+    assert "bbrill@thelsa.com" in c["admins"]
+
+
+def test_template_is_valid_json():
+    import json, os
+    from assistant import todo
+    json.load(open(os.path.join(todo._TENANT_DIR, "_template.json")))

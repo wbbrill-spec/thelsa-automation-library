@@ -64,7 +64,8 @@ _CACHE: dict = {}
 
 # ── Company settings ──────────────────────────────────────────────────────────
 def tenant_id() -> str:
-    return (os.environ.get("ASSISTANT_TENANT") or "thelsa").strip().lower()
+    # Same switch as the rest of the library (tenant.py: TENANT); ASSISTANT_TENANT still wins.
+    return (os.environ.get("ASSISTANT_TENANT") or os.environ.get("TENANT") or "thelsa").strip().lower()
 
 
 def settings(tid: str | None = None) -> dict:
@@ -77,6 +78,22 @@ def settings(tid: str | None = None) -> dict:
         except Exception:
             _CACHE[tid] = {}
     return _CACHE[tid]
+
+
+def company() -> dict:
+    """Branding and who may sign in, from the company's settings file.
+    Thelsa's values are the fallback so the live Thelsa copy never changes."""
+    t = settings().get("tenant") or {}
+    domains = [str(d).strip().lower() for d in (t.get("staff_domains") or ["thelsa.com"]) if str(d).strip()]
+    return {"id": tenant_id(), "name": t.get("name") or "Thelsa",
+            "logo": t.get("logo") or "/static/thelsa_logo.png",
+            "staff_domains": domains,
+            "admins": [str(a).strip().lower() for a in (t.get("admins") or []) if "@" in str(a)]}
+
+
+def is_staff(addr: str) -> bool:
+    a = (addr or "").strip().lower()
+    return "@" in a and a.rsplit("@", 1)[1] in company()["staff_domains"]
 
 
 def people(role: str) -> list:

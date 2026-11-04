@@ -34,6 +34,8 @@ from dataclasses import asdict, dataclass
 
 import openpyxl
 
+from commissions import xl as _xl
+
 COMPANY = {"LLC": "TMS LLC", "SA": "TMS SA", "TRS": "TRS", "TIM": "TIM"}      # as Finance's margin report names them
 CURRENCY = {"USD": "USD", "MXP": "MXN", "MXN": "MXN", "EUR": "EUR"}
 RATE_BAND = (10.0, 30.0)
@@ -122,11 +124,11 @@ def load(src) -> tuple:
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            wb = openpyxl.load_workbook(src, data_only=True)
+            wb = _xl.open_workbook(src)
     except Exception:
         _bad("the file could not be opened as an Excel workbook", "el archivo no se pudo abrir como libro de Excel")
     for ws in wb.worksheets:
-        rows = [tuple(r) for r in ws.iter_rows(values_only=True)]
+        rows = _xl.rows(ws)
         head = next((i for i, r in enumerate(rows[:30]) if set(NEEDED) <= {_plain(c) for c in r if c is not None}), None)
         if head is not None:
             break

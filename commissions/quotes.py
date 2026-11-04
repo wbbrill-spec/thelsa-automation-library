@@ -34,6 +34,8 @@ from dataclasses import asdict, dataclass
 
 import openpyxl
 
+from commissions import xl as _xl
+
 from . import engine as E
 
 EPS = 0.005
@@ -79,13 +81,13 @@ def _rows(src):
     try:
         with warnings.catch_warnings():                      # Moveware's exports carry no default style
             warnings.simplefilter("ignore")
-            wb = openpyxl.load_workbook(src, data_only=True)
+            wb = _xl.open_workbook(src)
     except QuoteReportError:
         raise
     except Exception:
         _bad("the file could not be opened as an Excel workbook", "el archivo no se pudo abrir como libro de Excel")
     ws = wb.worksheets[0]
-    rows = [tuple(r) for r in ws.iter_rows(values_only=True)]
+    rows = _xl.rows(ws)
     wb.close()
     return rows
 

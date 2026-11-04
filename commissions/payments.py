@@ -38,6 +38,8 @@ from dataclasses import asdict, dataclass, replace
 
 import openpyxl
 
+from commissions import xl as _xl
+
 MONTHS_ES = {"ENE": 1, "FEB": 2, "MAR": 3, "ABR": 4, "MAY": 5, "JUN": 6, "JUL": 7, "AGO": 8, "SEP": 9, "OCT": 10,
              "NOV": 11, "DIC": 12}
 CURRENCIES = {"DOLAR AMERICANO": "USD", "PESO MEXICANO": "MXN"}
@@ -116,12 +118,12 @@ def load(src) -> tuple:
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            wb = openpyxl.load_workbook(src, data_only=True)
+            wb = _xl.open_workbook(src)
     except Exception:
         _bad("the file could not be opened as an Excel workbook", "el archivo no se pudo abrir como libro de Excel")
     out, info = [], {"company": "", "key": "", "from": "", "to": "", "currencies": [], "paid": {}}
     for si, ws in enumerate(wb.worksheets, start=1):
-        rows = [tuple(r) for r in ws.iter_rows(values_only=True)]
+        rows = _xl.rows(ws)
         head = next((i for i, r in enumerate(rows)
                      if [_plain(c) for c in r if c is not None][:3] == ["FECHA", "SERIE", "FOLIO"]), None)
         if head is None:

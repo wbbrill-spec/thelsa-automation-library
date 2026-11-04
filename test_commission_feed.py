@@ -160,3 +160,23 @@ def test_main_file_and_its_lot_are_billed_separately(monkeypatch):
     v = audit_web._finance_invoice_view()
     assert {"111135", "110741A"} <= v["lots"]
     assert "111135" not in v["invoiced"]        # so 111135A is not taken as billed
+
+
+def test_a_report_formatted_down_to_the_last_excel_row_reads_fast(tmp_path):
+    """FACT UNI OCTUBRE.xlsx is formatted on all 1,048,576 rows: reading it used
+    4.5 GB and took the server down (4 Nov 2026)."""
+    import openpyxl
+    from openpyxl.styles import Font
+    from commissions import invoices as I, xl
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["Cía", "Tipo", "Fecha", "Serie", "Folio", "Razón Social", "Total Factura", "Factura que cancela",
+               "Subtotal USD", "Subtotal MX", "Expediente", " Moneda", "TC MX", "TC USD"])
+    ws.append(["LLC", "AGTS", dt.datetime(2026, 10, 30), "AGTS", 2532, "A", 10.0, None, 10.0, 180.0,
+               "110741A", "USD", 1, 18.0])
+    for r in range(3, 5000):
+        ws.cell(row=r, column=1).font = Font(bold=True)        # formatted, empty
+    p = tmp_path / "r.xlsx"
+    wb.save(p)
+    assert len(xl.rows(xl.open_workbook(str(p)).active)) == 2
+    assert [x.job for x in I.load(str(p))[0]] == ["110741A"]

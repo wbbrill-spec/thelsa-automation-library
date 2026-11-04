@@ -30,7 +30,8 @@ import ms_graph
 import survey_finder as sf
 
 KEY = "invoice_reports_mail"
-SUBJECT_WORDS = ("REPORTE FACTURACION", "REPORTE DE FACTURACION")
+import tenant as _t
+SUBJECT_WORDS = tuple(_t.get("invoicing.report_subject_words", []))
 LOOKBACK_DAYS = 120
 _STATE = {"running": False, "finished": None, "error": None, "diag": None}
 

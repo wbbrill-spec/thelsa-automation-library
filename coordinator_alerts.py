@@ -31,14 +31,17 @@ Config
 import json
 import os
 
-DEFAULT_CC = "maria.gonzalez@thelsa.com"
+import tenant as _t
+
+# Every company-specific value comes from tenants/<id>.json (multi-company, 4 Nov 2026).
+DEFAULT_CC = _t.get("people.alert_cc", "")
 
 
 
 # Bill, 21 Oct 2026: every email the app sends carries the app's name in the
 # subject line, so people know where it came from. APP_EMAIL_NAME overrides.
 def app_subject(subject: str) -> str:
-    name = os.environ.get("APP_EMAIL_NAME", "FAIM Audit Assistant").strip()
+    name = os.environ.get("APP_EMAIL_NAME", _t.get("app_name", "Audit Assistant")).strip()
     tag = f"[{name}]"
     return subject if not name or subject.startswith(tag) else f"{tag} {subject}"
 
@@ -50,27 +53,15 @@ def _cc_list():
 def _fallback_inbox():
     return (os.environ.get("AUDIT_ALERT_FALLBACK")
             or os.environ.get("ALERT_EMAIL")
-            or "bbrill@thelsa.com").strip()
+            or _t.get("people.sender_mailbox", "")).strip()
 
 
 # Coordinators whose address was confirmed from mail they sent themselves
 # (19 Oct 2026). AUDIT_COORDINATOR_EMAILS adds to / overrides these.
-KNOWN_COORDINATORS = {
-    "sara reyes": "sarareyes@thelsa.com",
-    "sara reyes gallegos": "sarareyes@thelsa.com",
-    "elizabeth hernandez": "elizabethhernandez@thelsa.com",
-    "elizabeth hernandez bravo": "elizabethhernandez@thelsa.com",
-    # Lupita (Maria Guadalupe Gonzalez); her Moveware code MG2 (her email, 30 Oct 2026)
-    "maria gonzalez": "maria.gonzalez@thelsa.com",
-    "maria guadalupe gonzalez": "maria.gonzalez@thelsa.com",
-    "mg2": "maria.gonzalez@thelsa.com",
-    # Moveware codes (Bill, 30 Oct 2026): Sara = SR2, Elizabeth Hernandez = EH1.
-    "sr2": "sarareyes@thelsa.com",
-    "eh1": "elizabethhernandez@thelsa.com",
-}
+KNOWN_COORDINATORS = dict(_t.get("people.coordinators", {}))
 # No longer with Thelsa (Bill, 30 Oct 2026): never emailed. Other unknown codes
 # are probably ex-staff too and go to the fallback inbox, never guessed.
-FORMER_STAFF = {"stephanie barraza", "stephanie barraza villa", "stephaniebarraza@thelsa.com"}
+FORMER_STAFF = set(_t.get("people.former_staff", []))
 
 
 def _coordinator_map():
@@ -211,15 +202,15 @@ def build_alerts(files):
 # be invoiced should go to Maria Fernanda Carrasco or Monica Escalante, in copy my
 # email. We are the responsible for issuing the invoice, not the sales or the MC").
 # One email per run listing every file, each with its coordinator.
-INVOICE_TO = "mariacarrasco@thelsa.com,monicaescalante@thelsa.com"
-INVOICE_TO_NAMES = "Fer and Monica"
-INVOICE_TO_NAMES_ES = "Fer y Mónica"
-INVOICE_CC = "maria.gonzalez@thelsa.com"
+INVOICE_TO = ",".join(_t.get("invoicing.team_to", []))
+INVOICE_TO_NAMES = _t.get("invoicing.team_names", "team")
+INVOICE_TO_NAMES_ES = _t.get("invoicing.team_names_es", INVOICE_TO_NAMES)
+INVOICE_CC = ",".join(_t.get("invoicing.cc", []))
 # US Embassy / Consulate files: Edgar asks Fer and Monica for the invoice (Lupita,
 # 3 Nov 2026: "Edgar Espino is responsible to request the invoice to Monica and
 # Fernanda"). They go to him in their own email, not on the invoicing team's list.
-INVOICE_EMBASSY_TO = "edgarespino@thelsa.com"
-INVOICE_EMBASSY_NAMES = "Edgar"
+INVOICE_EMBASSY_TO = ",".join(_t.get("invoicing.embassy_to", []))
+INVOICE_EMBASSY_NAMES = _t.get("invoicing.embassy_names", "")
 
 
 def _invoice_cc_list():
@@ -229,7 +220,7 @@ def _invoice_cc_list():
 
 # Moveware shows some users by their login (Bill, 3 Nov 2026: "coordinator
 # Edgarespino" in the alerts). The name people know them by:
-DISPLAY_NAMES = {"edgarespino": "Edgar Espino", "edgar espino gonzalez": "Edgar Espino"}
+DISPLAY_NAMES = dict(_t.get("people.display_names", {}))
 
 
 def display_coordinator(name: str) -> str:
@@ -245,10 +236,7 @@ def display_coordinator(name: str) -> str:
 # Files the team said NOT to bill yet. Each comes back on the list after its
 # review date, so a hold is never forgotten. INVOICE_HOLDS (JSON
 # {"job": {"reason": "...", "until": "YYYY-MM-DD"}}) adds to / overrides these.
-INVOICE_HOLDS = {
-    "110921": {"reason": "on hold, waiting for US government funding (Edgar, 3 Nov 2026)",
-               "until": "2026-12-01"},
-}
+INVOICE_HOLDS = dict(_t.get("invoicing.holds", {}))
 
 
 def invoice_hold(job, today=None):
@@ -426,7 +414,7 @@ def send_enabled():
 
 def _sender():
     return (os.environ.get("GRAPH_SENDER") or os.environ.get("ALERT_EMAIL")
-            or "bbrill@thelsa.com").strip()
+            or _t.get("people.sender_mailbox", "")).strip()
 
 
 def _draft_folder():

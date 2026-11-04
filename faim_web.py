@@ -86,14 +86,15 @@ def _env_codes(name, default):
     return set(vals or default)
 
 
-LOST_STATUSES = _env_codes("FAIM_LOST_STATUSES", ["L", "C"])
-AGENT_EXPORT_TYPES = _env_codes("FAIM_AGENT_EXPORT_TYPES", ["EXA"])   # no delivery date due
-AGENT_IMPORT_TYPES = _env_codes("FAIM_AGENT_IMPORT_TYPES", ["IMA"])   # no pack date due
+import tenant as _t
+LOST_STATUSES = _env_codes("FAIM_LOST_STATUSES", _t.get("files.lost_statuses", ["L", "C"]))
+AGENT_EXPORT_TYPES = _env_codes("FAIM_AGENT_EXPORT_TYPES", _t.get("files.agent_export_types", ["EXA"]))   # no delivery date due
+AGENT_IMPORT_TYPES = _env_codes("FAIM_AGENT_IMPORT_TYPES", _t.get("files.agent_import_types", ["IMA"]))   # no pack date due
 BOOKED_STATUS = "W"
 # Files Thelsa says are not real moves but can't be cancelled in Moveware yet.
 # Treated as cancelled everywhere in the audit. Lupita, 29 Oct 2026: 111000 is a
 # TEST file. FAIM_IGNORE_FILES adds more (comma-separated file numbers).
-IGNORE_FILES = _env_codes("FAIM_IGNORE_FILES", []) | {"111000"}
+IGNORE_FILES = _env_codes("FAIM_IGNORE_FILES", []) | set(_t.get("files.ignore", []))
 WINDOW_MONTHS = int(os.environ.get("FAIM_WINDOW_MONTHS", "12"))
 PASS_BAR = 80
 _MAX_GAP_ROWS = 15

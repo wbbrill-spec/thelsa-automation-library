@@ -21,7 +21,8 @@ import os
 import threading
 import time
 
-TO = os.environ.get("HEALTH_ALERT_TO", "bill.brill@inflectionpointnow.com")
+import tenant as _t
+TO = os.environ.get("HEALTH_ALERT_TO", _t.get("people.admin_alerts_to", "bill.brill@inflectionpointnow.com"))
 BEAT_S = int(os.environ.get("HEALTH_BEAT_S", "10"))
 _BOOT = time.time()
 _PEAK = {"bytes": 0, "job": ""}

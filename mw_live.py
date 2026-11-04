@@ -64,8 +64,9 @@ _MAX_JOBS = 3     # cap the deep-load sample — each job makes sub-calls
 #
 # So MW_COMPANY_SEGMENT is the switch, not the hostname. Set it to 08800 to
 # point everything at the test DB; leave it unset for live.
-MW_HOST = os.environ.get("MOVEWARE_HOST", "https://rest.moveware-test.app").rstrip("/")
-MW_COMPANY_SEGMENT = os.environ.get("MW_COMPANY_SEGMENT", "64000").strip().strip("/")
+import tenant as _t
+MW_HOST = os.environ.get("MOVEWARE_HOST", _t.get("moveware.host", "https://rest.moveware-test.app")).rstrip("/")
+MW_COMPANY_SEGMENT = os.environ.get("MW_COMPANY_SEGMENT", _t.get("moveware.company_segment", "")).strip().strip("/")
 # MOVEWARE_URL still wins outright when set, so a full custom base URL (or a
 # rollback to v1) needs no code change.
 BASE_URL = (os.environ.get("MOVEWARE_URL")

@@ -200,13 +200,14 @@ def surname(client: str) -> str | None:
 
 
 # Daniela Martinez coordinates TMS files too (she is on the dashboard)
-MAILBOXES = list(dict.fromkeys(ms_graph.TMS_COORDINATORS + ["danielamartinez@thelsa.com"]))
+import tenant as _t
+MAILBOXES = list(dict.fromkeys(_t.get("people.operations_mailboxes") or ms_graph.TMS_COORDINATORS))
 
 
 # Sales (KAR 1 Pablo, KAR 2 Edwin) send the survey and the booking — searched for
 # every file along with the coordinator's own mailbox (Bill, 4 Nov 2026).
 SALES_MAILBOXES = [m.strip().lower() for m in os.environ.get(
-    "FAIM_SALES_MAILBOXES", "pablomartinez@thelsa.com,edwuinlopez@thelsa.com").split(",") if m.strip()]
+    "FAIM_SALES_MAILBOXES", ",".join(_t.get("people.sales_mailboxes", []))).split(",") if m.strip()]
 
 
 def _mailboxes_for(coord_email: str) -> list[str]:

@@ -639,7 +639,7 @@ def _keeper_tick():
     try:  # search the coordinators' email for missing surveys and dates, once a day
         import survey_finder as sf
         st = sf.state()
-        if _heavy_ok() and not st["running"] and not _crashed_recently("survey_finder") \
+        if _t.feature("survey_finder") and _heavy_ok() and not st["running"] and not _crashed_recently("survey_finder") \
                 and (not st["finished"] or time.time() - st["finished"] > 20 * 3600):
             files, prog = mw_live.audited_in_window(), mw_live.audit_progress()
             if files and (prog.get("window_complete") or prog.get("complete")):
@@ -651,7 +651,7 @@ def _keeper_tick():
     try:  # FAIM MS1.4 documents found in the coordinators' email, once a day
         import doc_check as dc
         st = dc.state()
-        if _heavy_ok() and not st["running"] and not _crashed_recently("doc_check") \
+        if _t.feature("doc_check") and _heavy_ok() and not st["running"] and not _crashed_recently("doc_check") \
                 and (not st["finished"] or time.time() - st["finished"] > 20 * 3600):
             prog = mw_live.audit_progress()
             if prog.get("window_complete") or prog.get("complete"):
@@ -662,13 +662,13 @@ def _keeper_tick():
         pass
     try:  # Finance's monthly invoicing report (Wendy), read from email once a day
         import invoice_mail
-        if _heavy_ok() and not _crashed_recently("invoice_mail"):
+        if _t.feature("invoice_alerts") and _heavy_ok() and not _crashed_recently("invoice_mail"):
             invoice_mail.start_if_due()
     except Exception:
         pass
     try:  # line-item revenue and cost from Moveware's API, rebuilt daily
         prog = mw_live.audit_progress()
-        if (prog.get("window_complete") or prog.get("complete")) and _heavy_ok():
+        if _t.feature("mw_costs") and (prog.get("window_complete") or prog.get("complete")) and _heavy_ok():
             import mw_costs
             mw_costs.ensure_built()
     except Exception:

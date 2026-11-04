@@ -32,7 +32,8 @@ import job_rules
 import fx
 
 LEAD, CANCELLED = "L", "C"
-EMBASSY_HANDLERS = ("edgarespino", "edgar espino", "edgar.espino")
+import tenant as _t
+EMBASSY_HANDLERS = tuple(_t.get("people.embassy_handlers", []))
 
 
 def _d(v):
@@ -126,6 +127,9 @@ def _invoiced(f):
 
 
 def _is_embassy(f, fin_type):
+    import tenant as _t
+    if not _t.feature("embassy_rules"):
+        return False
     if f.get("is_embassy") or fin_type == "DIPLOM":
         return True
     who = f"{f.get('coordinator') or ''} {f.get('coordinator_email') or ''}".lower()

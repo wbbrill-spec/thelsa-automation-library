@@ -45,6 +45,10 @@ def app_subject(subject: str) -> str:
     tag = f"[{name}]"
     return subject if not name or subject.startswith(tag) else f"{tag} {subject}"
 
+def _footer() -> str:
+    return (_t.get("brand.product") or _t.get("app_name") or "Automation Library")
+
+
 def _cc_list():
     raw = os.environ.get("AUDIT_ALERT_CC", DEFAULT_CC)
     return [a.strip() for a in raw.split(",") if a.strip()]
@@ -160,7 +164,7 @@ def _body_for(coordinator, files, resolved):
         lines.append("[Coordinator email not on file — routed here for manual "
                      "assignment. Add them to AUDIT_COORDINATOR_EMAILS.]")
         lines.append("")
-    lines.append("— Thelsa Automation Library · Move-File Cost & Profit Audit")
+    lines.append(f"— {_footer()} · Move-File Cost & Profit Audit")
     return "\n".join(lines)
 
 
@@ -269,7 +273,7 @@ def _invoice_to_list():
 def _file_lines(rows):
     out = []
     for r in rows:
-        tag = " [US EMBASSY]" if r.get("embassy") else ""
+        tag = " [US EMBASSY]" if (r.get("embassy") and _t.feature("embassy_rules")) else ""
         when = (f"packed {r['pack']}" if r.get("pack")
                 else (f"delivered {r['delivery']}" if r.get("delivery") else ""))
         coord = f"; coordinator {display_coordinator(r['coordinator'])}" if r.get("coordinator") else ""
@@ -300,8 +304,9 @@ def _invoice_body(coordinator, rows, resolved, followup=False, coordinator_es=No
         *en_reminder,
         "The automated Move-File Audit flagged the following move(s) as READY TO "
         "INVOICE: the move has happened (loaded, or delivered for inbound moves), but "
-        "no invoice shows in Moveware or in Finance's register yet. (US Embassy files "
-        "are only flagged once they have been DELIVERED.)",
+        "no invoice shows in Moveware or in Finance's register yet."
+        + (" (US Embassy files are only flagged once they have been DELIVERED.)"
+           if _t.feature("embassy_rules") else ""),
         "",
         "Please issue the invoice(s), or reply to this email if a file is on hold or "
         "should not be billed yet. Each file shows its coordinator, in case you need "
@@ -319,8 +324,9 @@ def _invoice_body(coordinator, rows, resolved, followup=False, coordinator_es=No
         "La auditoría automática de expedientes marcó la(s) siguiente(s) mudanza(s) "
         "como LISTA(S) PARA FACTURAR: la mudanza ya se realizó (cargada, o entregada "
         "si es de importación), pero aún no aparece factura en Moveware ni en el "
-        "registro de Finanzas. (Los expedientes de la Embajada de EE. UU. se marcan "
-        "solo una vez ENTREGADOS.)",
+        "registro de Finanzas."
+        + (" (Los expedientes de la Embajada de EE. UU. se marcan solo una vez ENTREGADOS.)"
+           if _t.feature("embassy_rules") else ""),
         "",
         "Por favor emite la(s) factura(s), o responde a este correo si algún "
         "expediente está en espera o no debe facturarse todavía. Cada expediente "
@@ -336,7 +342,7 @@ def _invoice_body(coordinator, rows, resolved, followup=False, coordinator_es=No
         parts.append("[Coordinator email not on file — routed here for manual "
                      "assignment. Add them to AUDIT_COORDINATOR_EMAILS.]")
         parts.append("")
-    parts.append("— Thelsa Automation Library · Move-File Audit")
+    parts.append(f"— {_footer()} · Move-File Audit")
     return "\n".join(parts)
 
 
@@ -362,7 +368,7 @@ def _embassy_body(rows, followup=False):
           "Expedientes de Embajada / Consulado listos para facturar:", *files, "",
           f"Total: {total}"]
     return "\n".join(["\n".join(en), "", "— — — — —", "", "\n".join(es), "",
-                      "— Thelsa Automation Library · Move-File Audit"])
+                      f"— {_footer()} · Move-File Audit"])
 
 
 def build_invoice_alerts(worklist):
@@ -374,8 +380,9 @@ def build_invoice_alerts(worklist):
     Pure — creates nothing. Returns a list of 0, 1 or 2 alerts."""
     rows = sorted(list(worklist or []), key=lambda r: -r.get("value", 0))
     alerts = []
-    embassy = [r for r in rows if r.get("embassy")]
-    team = [r for r in rows if not r.get("embassy")]
+    use_emb = _t.feature("embassy_rules") and bool(_t.get("invoicing.embassy_to"))
+    embassy = [r for r in rows if r.get("embassy")] if use_emb else []
+    team = [r for r in rows if not (use_emb and r.get("embassy"))]
     if team:
         total = round(sum(r.get("value", 0) for r in team), 2)
         n = len(team)

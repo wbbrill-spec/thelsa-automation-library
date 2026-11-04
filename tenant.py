@@ -53,3 +53,24 @@ def feature(name: str) -> bool:
 
 def clear_cache() -> None:
     _load.cache_clear()
+
+
+def claim_database() -> None:
+    """Each company needs its own database (sign-ins, connected mailboxes, uploaded
+    reports). The first company to use a database writes its id into it; any other
+    company pointed at the same database refuses to start rather than mix data."""
+    if not (os.environ.get("DATABASE_URL") or os.environ.get("COMMISSION_DATABASE_URL")):
+        return
+    from commissions import store
+    def _claim(doc):
+        owner = (doc or {}).get("tenant")
+        if owner and owner != tenant_id():
+            return None, owner
+        return ({"tenant": tenant_id()} if not owner else None), owner or tenant_id()
+    try:
+        owner = store.update("_tenant_owner", _claim, default=None, by="tenant")
+    except Exception:
+        return                     # database unreachable: never block the boot for it
+    if owner != tenant_id():
+        raise RuntimeError(f"This database belongs to company '{owner}'. Give company "
+                           f"'{tenant_id()}' its own DATABASE_URL.")

@@ -234,7 +234,10 @@ def _rid(*parts) -> str:
     return hashlib.sha1("|".join(str(p) for p in parts).encode()).hexdigest()[:16]
 
 
-def rows_from_message(msg: dict, known=None, thelsa_domains=("thelsa.com",)) -> list[dict]:
+def rows_from_message(msg: dict, known=None, thelsa_domains=None) -> list[dict]:
+    if thelsa_domains is None:
+        import tenant as _t
+        thelsa_domains = tuple(_t.get("people.email_domains", []))
     """msg: {subject, body, sender, date, mailbox, attachments:[{name, bytes}]}"""
     subject, sender = msg.get("subject") or "", (msg.get("sender") or "").lower()
     date = (msg.get("date") or "")[:10]

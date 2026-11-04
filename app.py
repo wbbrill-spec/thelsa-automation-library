@@ -121,10 +121,22 @@ except Exception as _sess_exc:  # pragma: no cover
     logger.warning("Flask-Session not active (%s) — using default cookie sessions.", _sess_exc)
 
 # ── Access control (email-domain allow-list) ───────────────────────────────────
+import tenant as _tenant
+
+_tenant.claim_database()      # never share a database between companies
+
+# Company branding and sign-in come from tenants/<id>.json (multi-company, 4 Nov 2026).
+BRAND = _tenant.get("brand", {}) or {}
+PRODUCT = BRAND.get("product") or "Automation Library"
+COMPANY = BRAND.get("company") or ""
+LOGO = BRAND.get("logo") or ""
+_LOGO_HTML = f'<img src="{LOGO}" alt="{COMPANY}">' if LOGO else ""
+_LOGO_CLASS_HTML = f'<img class="logo" src="{LOGO}" alt="{COMPANY}">' if LOGO else ""
+
 ALLOWED_DOMAINS = {
     d.strip().lower()
     for d in os.environ.get(
-        "ALLOWED_EMAIL_DOMAINS", "thelsa.com,inflectionpointnow.com"
+        "ALLOWED_EMAIL_DOMAINS", ",".join(_tenant.get("login.allowed_domains", ["inflectionpointnow.com"]))
     ).split(",")
     if d.strip()
 }
@@ -153,7 +165,7 @@ def _deny_page(email: str):
     allowed = " and ".join(f"@{d}" for d in sorted(ALLOWED_DOMAINS))
     html = f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Access restricted — Thelsa Automation Library</title>
+<title>Access restricted — {PRODUCT}</title>
 <style>
   body{{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
        background:#f5f6f8;color:#1a1a2e;display:flex;align-items:center;justify-content:center;
@@ -167,9 +179,9 @@ def _deny_page(email: str):
   a{{display:inline-block;margin-top:18px;color:#1967d2;text-decoration:none;font-weight:600;}}
 </style></head><body>
   <div class="box">
-    <img src="/static/thelsa_logo.png" alt="Thelsa">
+    {_LOGO_HTML}
     <h1>Access restricted</h1>
-    <p>The Thelsa Automation Library is limited to {allowed} accounts.</p>
+    <p>The {PRODUCT} is limited to {allowed} accounts.</p>
     <p>You're signed in as <span class="email">{email}</span>, which isn't authorized.</p>
     <a href="/logout">Try a different account</a>
   </div></body></html>"""
@@ -285,7 +297,7 @@ def _login_page(next_url: str) -> str:
         </a>"""
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Sign in — Thelsa Automation Library</title>
+<title>Sign in — {PRODUCT}</title>
 <style>
   body{{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
        background:#f5f6f8;color:#1a1a2e;display:flex;align-items:center;justify-content:center;
@@ -306,8 +318,8 @@ def _login_page(next_url: str) -> str:
   .note{{font-size:12px;color:#999;margin-top:20px;line-height:1.5;}}
 </style></head><body>
   <div class="box">
-    <img class="logo" src="/static/thelsa_logo.png" alt="Thelsa">
-    <h1>Automation Library</h1>
+    {_LOGO_CLASS_HTML}
+    <h1>{PRODUCT}</h1>
     <p class="sub">Sign in to continue</p>
     <a class="btn btn-google" href="/login/google{q}">
       <svg width="18" height="18" viewBox="0 0 48 48" aria-hidden="true">
@@ -319,7 +331,7 @@ def _login_page(next_url: str) -> str:
       Sign in with Google
     </a>
     {ms_button}
-    <p class="note">Access is limited to authorized Thelsa and InflectionPoint accounts.</p>
+    <p class="note">Access is limited to authorized {COMPANY} and InflectionPoint accounts.</p>
   </div></body></html>"""
 
 
@@ -478,13 +490,35 @@ def logout():
 @app.route("/")
 @login_required
 def index():
-    html = (BASE / "index.html").read_text()
+    page = _tenant.get("home_page")
+    if not page:                       # a company without its own hub page
+        return _generic_home(session.get("user_name", ""), session.get("user_email", ""))
+    html = (BASE / page).read_text()
     name = session.get("user_name", "")
     email = session.get("user_email", "")
     html = _commission_tile(html, email)
     html = _tim_exec_tile(html, email)
     html = html.replace("{{USER_NAME}}", name).replace("{{USER_EMAIL}}", email)
     return html
+
+
+def _generic_home(name, email):
+    """Home page for a company: only the tools it has (tenants/<id>.json)."""
+    import html as _h
+    tools = [("/audit", "Move-File Audit", "Cost, profit and ready-to-invoice checks on every move file."),
+             ("/faim", "FAIM Quality Audit", "Evidence on every file: survey, dates and documents, checked in email first."),
+             ("/assistant", "Assistant", "Your mailbox, files and follow-ups. Connect your mailbox here.")]
+    cards = "".join(f'<a class="card" href="{u}"><b>{_h.escape(t)}</b><span>{_h.escape(d)}</span></a>'
+                    for u, t, d in tools)
+    return f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{_h.escape(PRODUCT)}</title><style>
+body{{font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#f5f6f8;margin:0;padding:24px;color:#1a1a2e}}
+.wrap{{max-width:900px;margin:0 auto}} h1{{font-size:22px}} .top{{display:flex;justify-content:space-between;align-items:center}}
+.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px;margin-top:18px}}
+.card{{background:#fff;border:1px solid #e3e5ea;border-radius:12px;padding:18px;text-decoration:none;color:inherit;display:flex;flex-direction:column;gap:6px}}
+.card span{{color:#555;font-size:14px}} a.out{{color:#1967d2;text-decoration:none}}
+</style></head><body><div class="wrap"><div class="top">{_LOGO_HTML}<h1>{_h.escape(PRODUCT)}</h1>
+<a class="out" href="/logout">Sign out ({_h.escape(email)})</a></div><div class="grid">{cards}</div></div></body></html>"""
 
 
 def _tim_exec_tile(html, email):
@@ -565,12 +599,19 @@ def ping():
 
 
 # ── Blueprints (sub-app dashboards mounted in-process) ──────────────────────────
+# Which tools a company has comes from its settings (tenants/<id>.json, "features").
+def _on(name: str) -> bool:
+    return _tenant.feature(name)
+
+
 # Email Campaigns dashboard
-from campaigns import campaigns_bp
-app.register_blueprint(campaigns_bp)
+if _on("campaigns"):
+    from campaigns import campaigns_bp
+    app.register_blueprint(campaigns_bp)
 # Engine HTTP triggers (test draft + scheduled draft/monitor)
-from engine_web import engine_bp
-app.register_blueprint(engine_bp)
+if _on("engine"):
+    from engine_web import engine_bp
+    app.register_blueprint(engine_bp)
 # Move-File Cost & Profit Audit dashboard
 from audit_web import audit_bp
 app.register_blueprint(audit_bp)
@@ -578,29 +619,31 @@ app.register_blueprint(audit_bp)
 from faim_web import faim_bp
 app.register_blueprint(faim_bp)
 # Cross-Border Shipment Dashboard (TIM/ClickUp + TMS/Moveware, unified)
-from crossborder.web import crossborder_bp
-app.register_blueprint(crossborder_bp)
+if _on("crossborder"):
+    from crossborder.web import crossborder_bp
+    app.register_blueprint(crossborder_bp)
 # TIM Executive Dashboard (financial P&L by business unit, from Finance's monthly close)
-from tim_exec import tim_exec_bp
-app.register_blueprint(tim_exec_bp)
-# AI Assistant — multi-tenant, per-user dashboard (mail + Moveware + WhatsApp),
-# refreshed 5x/day (06/09/12/15/18 Mexico City). Replaces the Phase-1 on-demand page.
+if _on("tim"):
+    from tim_exec import tim_exec_bp
+    app.register_blueprint(tim_exec_bp)
+# AI Assistant — per-user dashboard (mail + Moveware + WhatsApp); also where people
+# connect their mailbox for the email search, so every company has it.
 from assistant.web import bp as assistant_bp
 app.register_blueprint(assistant_bp)
-# TMS Commission Report — restricted to the people named in COMMISSION_USERS
-# (default: Lupita, Mario, Rogelio, Bill). The home page shows its tile only to
-# those people (see _commission_tile); anyone else who opens the address gets "not found".
-try:
-    from commissions.web import commissions_bp
-    app.register_blueprint(commissions_bp)
-except Exception as _comm_exc:  # never block the library from booting
-    logger.warning("Commission report not mounted: %s", _comm_exc)
+# Commission Report — restricted to the people named in COMMISSION_USERS.
+if _on("commission_report"):
+    try:
+        from commissions.web import commissions_bp
+        app.register_blueprint(commissions_bp)
+    except Exception as _comm_exc:  # never block the library from booting
+        logger.warning("Commission report not mounted: %s", _comm_exc)
 # Moveware schema reader for the new-platform spec — hidden admin page, no tile.
-try:
-    from mw_schema import schema_bp
-    app.register_blueprint(schema_bp)
-except Exception as _schema_exc:  # never block the library from booting
-    logger.warning("Moveware schema reader not mounted: %s", _schema_exc)
+if _on("schema"):
+    try:
+        from mw_schema import schema_bp
+        app.register_blueprint(schema_bp)
+    except Exception as _schema_exc:  # never block the library from booting
+        logger.warning("Moveware schema reader not mounted: %s", _schema_exc)
 try:
     from assistant.scan import start_scheduler as _asst_start_scheduler
     _asst_start_scheduler()

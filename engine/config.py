@@ -18,10 +18,11 @@ Environment variables (set in the engine's runtime, e.g. Render):
 import os
 
 SHEET_ID = os.environ.get("OUTREACH_SHEET_ID", "1QhlNpaLndlcEy3EDgnVwsfc7PjNqO26HysaqjLdy6uc")
-MAILBOX = os.environ.get("MAILBOX", "bbrill@thelsa.com")
+import tenant as _t
+MAILBOX = os.environ.get("MAILBOX", _t.get("people.sender_mailbox", ""))
 # Mailboxes the engine may draft from; lead-gen round-robins across these.
-ALLOWED_MAILBOXES = [m.strip().lower() for m in os.environ.get("ALLOWED_MAILBOXES", "bbrill@thelsa.com,armandosilveyra@thelsa.com,gustavogonzalez@thelsa.com").split(",") if m.strip()]
-ALERT_EMAIL = os.environ.get("ALERT_EMAIL", "bbrill@thelsa.com")
+ALLOWED_MAILBOXES = [m.strip().lower() for m in os.environ.get("ALLOWED_MAILBOXES", ",".join(_t.get("people.allowed_send_mailboxes", [_t.get("people.sender_mailbox", "")]))).split(",") if m.strip()]
+ALERT_EMAIL = os.environ.get("ALERT_EMAIL", _t.get("people.sender_mailbox", ""))
 DRY_RUN = os.environ.get("DRY_RUN", "0") == "1"
 
 # Stages that mean "do not draft to this member again"

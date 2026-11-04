@@ -129,7 +129,7 @@ def _send(subject: str, body: str) -> None:
     try:
         from engine.mailer import GraphMailer
         from coordinator_alerts import app_subject
-        GraphMailer(mailbox=os.environ.get("GRAPH_SENDER", "bbrill@thelsa.com")).send_mail(
+        GraphMailer(mailbox=os.environ.get("GRAPH_SENDER") or _t.get("people.sender_mailbox", "")).send_mail(
             TO, app_subject(subject), body)
     except Exception:
         pass

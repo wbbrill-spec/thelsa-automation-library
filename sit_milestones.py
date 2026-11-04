@@ -320,6 +320,9 @@ def build(months: int | None = None) -> dict:
 
 
 def ensure_built(max_age_s: int = 6 * 3600):
+    import tenant as _t
+    if not _t.feature("plan_de_viajes"):
+        return                      # this company has no Plan de Viajes
     if _STATE["running"]:
         return
     if _STATE["built_at"] and time.time() - _STATE["built_at"] < max_age_s:

@@ -1212,7 +1212,8 @@ def run_daily_coordinator_alerts():
     their files ready to invoice and their cost discrepancies (Bill, 30 Oct 2026)."""
     import mw_live
     import coordinator_alerts as ca
-    if not ca.alerts_enabled() or not ca.daily_due("coordinator_alerts"):
+    import tenant as _t
+    if not _t.feature("invoice_alerts") or not ca.alerts_enabled() or not ca.daily_due("coordinator_alerts"):
         return None
     audited = [m for m in mw_live.audited_files() if m.get("job")]
     if not audited:
@@ -1407,7 +1408,19 @@ def _feed_allowed() -> bool:
     if request.headers.get("X-Forwarded-For") or request.headers.get("X-Forwarded-Host"):
         return False
     host = (request.headers.get("Host") or "").split(":")[0].lower()
-    return host in ("thelsa-automation-library", "localhost", "127.0.0.1") or host.endswith(".internal")
+    import tenant as _t
+    return host in (_t.get("service_name", ""), "localhost", "127.0.0.1") or host.endswith(".internal")
+
+
+def _feed_rules() -> str:
+    import tenant as _t
+    emb = "US Embassy/Consulate when delivered; " if _t.feature("embassy_rules") else ""
+    plan = "Move dates from Moveware, else Plan de Viajes (done moves). " if _t.feature("plan_de_viajes") \
+        else "Move dates from Moveware. "
+    return ("Booked moves only (status W or a Date Won). Billable: inbound (IMP/IMA) at delivery; outbound "
+            "(EXP/EXA) and domestic (DIN) at load; " + emb + "other types at load or delivery. " + plan +
+            "Already invoiced = an issued (numbered) Moveware invoice or an invoice in Finance's report; a draft "
+            "keeps the file listed, marked as a draft. Prices of 500 or less are placeholders.")
 
 
 @audit_bp.route("/audit/feed.json")
@@ -1430,12 +1443,8 @@ def audit_feed():
     except Exception:
         out["finance_cutoff"], out["finance_files"] = None, None
     out.update({"live": is_live, "as_of": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
-                "list_from": os.environ.get("INVOICE_LIST_FROM", "2026-01-01"),
-                "rules": "Booked moves only (status W or a Date Won). Billable: inbound (IMP/IMA) at delivery; outbound "
-                         "(EXP/EXA) and domestic (DIN) at load; US Embassy/Consulate when delivered; other types at load "
-                         "or delivery. Move dates from Moveware, else Plan de Viajes (done moves). Already invoiced = an "
-                         "issued (numbered) Moveware invoice or an invoice in Finance's report; a draft keeps the file "
-                         "listed, marked as a draft. 2026 moves only; prices of 500 or less are placeholders."})
+                "list_from": os.environ.get("INVOICE_LIST_FROM", __import__("tenant").get("invoicing.list_from", "2026-01-01")),
+                "rules": _feed_rules()})
     return jsonify(out)
 
 

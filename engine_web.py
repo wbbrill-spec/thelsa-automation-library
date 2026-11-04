@@ -38,7 +38,8 @@ def graph_test():
     """Create one harmless test draft in the mailbox to verify Graph access."""
     try:
         from engine.mailer import GraphMailer
-        to = request.args.get("to") or os.environ.get("MAILBOX", "bbrill@thelsa.com")
+        import tenant as _t
+        to = request.args.get("to") or os.environ.get("MAILBOX", _t.get("people.sender_mailbox", ""))
         d = GraphMailer().create_draft(
             to, "[TEST] Thelsa outreach engine — connectivity check",
             "This is a test draft created by the agent-outreach engine to confirm "

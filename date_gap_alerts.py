@@ -49,7 +49,8 @@ import os
 import coordinator_alerts as ca
 
 MEXICO = dt.timezone(dt.timedelta(hours=-6))
-DEFAULT_CC = "maria.gonzalez@thelsa.com,sarareyes@thelsa.com"
+import tenant as _t
+DEFAULT_CC = _t.get("people.date_alert_cc", "")
 DEFAULT_SUMMARY_TO = "bill.brill@inflectionpointnow.com"
 WORD_ES = {"pack": "fecha de empaque / carga", "delivery": "fecha de entrega"}
 WORD_EN = {"pack": "pack / load date", "delivery": "delivery date"}
@@ -141,7 +142,7 @@ def build(date_gaps) -> dict:
         if not resolved:
             body.append("[Sin correo del coordinador en el expediente: asignar manualmente. / Coordinator "
                         "email not on file: routed here for manual assignment.]")
-        body.append("— Thelsa Automation Library · Auditoría FAIM / FAIM audit")
+        body.append("— " + (_t.get("brand.product") or "Automation Library") + " · Auditoría FAIM / FAIM audit")
         out.append({"coordinator": coord, "to": to, "cc": cc, "files": n, "resolved": resolved,
                     "subject": ca.app_subject(f"Fechas faltantes en Moveware: {n} expediente{'s' if n != 1 else ''} / "
                                               f"Missing Moveware dates: {n} file{'s' if n != 1 else ''}"),
@@ -161,7 +162,7 @@ def build(date_gaps) -> dict:
                                      ["", f"De ellos, {no_dates} ganados sin ninguna fecha / of which {no_dates} "
                                       "booked with no key date at all.", "",
                                       "Cada coordinador recibió su lista. / Each coordinator was sent their list.",
-                                      "— Thelsa Automation Library · Auditoría FAIM"])}
+                                      "— " + (_t.get("brand.product") or "Automation Library") + " · Auditoría FAIM"])}
     return {"coordinators": out, "summary": summary}
 
 
@@ -215,6 +216,9 @@ def dispatch(date_gaps, live: bool, complete: bool, send=None, now=None) -> dict
 def due_now(now=None) -> bool:
     """For the keeper: once a day, from DATE_ALERTS_HOUR (Mexico City time)."""
     if os.environ.get("DATE_ALERTS_AUTO", "1") != "1":
+        return False
+    import tenant as _t
+    if not _t.feature("date_gap_alerts"):
         return False
     now = now or dt.datetime.now(MEXICO)
     try:

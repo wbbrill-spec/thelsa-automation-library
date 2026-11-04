@@ -43,9 +43,16 @@ _EMBASSY_RE = re.compile(
     re.IGNORECASE)
 
 
+def _own_domain(email: str) -> bool:
+    """An address at the company's own email domain (tenants/<id>.json)."""
+    e = (email or "").strip().lower()
+    return any(e.endswith("@" + d) for d in (_t.get("people.email_domains") or []))
+
+
 def _is_embassy(name: str) -> bool:
-    """US Embassy OR US Consulate — both bill only after delivery."""
-    return bool(name and _EMBASSY_RE.search(name))
+    """US Embassy OR US Consulate — both bill only after delivery (companies with
+    the embassy_rules feature only)."""
+    return bool(name and _t.feature("embassy_rules") and _EMBASSY_RE.search(name))
 _MAX_JOBS = 3     # cap the deep-load sample — each job makes sub-calls
                   # (quotes/invoices) at ~2-3s each, so keep this low to stay well
                   # inside the proxy/worker timeout; result is cached (TTL) and
@@ -756,7 +763,7 @@ def _map_job(job: dict, prefetched: dict | None = None) -> dict | None:
         if not coordinator_email:
             for r in role_rows:
                 em = (_first(r, "email", default="") or "").strip()
-                if em.lower().endswith("@thelsa.com"):
+                if _own_domain(em):
                     coordinator_email = em
                     break
 
@@ -766,7 +773,7 @@ def _map_job(job: dict, prefetched: dict | None = None) -> dict | None:
     # client name. No @thelsa.com email -> genuinely "Unassigned".
     if coordinator and client and coordinator.strip().lower() == client.strip().lower():
         coordinator = ""
-    if not coordinator and coordinator_email.lower().endswith("@thelsa.com"):
+    if not coordinator and _own_domain(coordinator_email):
         _local = coordinator_email.split("@")[0]
         _parts = [p for p in re.split(r"[._\-]+", _local) if p]
         coordinator = " ".join(p.capitalize() for p in _parts) if _parts else coordinator_email

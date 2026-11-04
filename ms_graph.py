@@ -59,13 +59,8 @@ _TIMEOUT = 20
 
 # The 12 TMS coordinators (TMS shipments run in MoveWare = company 64000). TIM
 # coordinators run in ClickUp and are intentionally excluded here.
-TMS_COORDINATORS = [
-    "sarareyes@thelsa.com", "edwuinlopez@thelsa.com", "edgarespino@thelsa.com",
-    "elizabethhernandez@thelsa.com", "wendyhernandez@thelsa.com",
-    "monicaescalante@thelsa.com", "pablomartinez@thelsa.com",
-    "stephaniebarraza@thelsa.com", "maria.gonzalez@thelsa.com",
-    "mariacarrasco@thelsa.com", "guillermomonroy@thelsa.com", "victorjasso@thelsa.com",
-]
+import tenant as _t
+TMS_COORDINATORS = list(_t.get("people.operations_mailboxes", []))
 
 _token = {"value": None, "exp": 0}
 

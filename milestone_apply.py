@@ -47,12 +47,13 @@ PLACEHOLDER_USERS = {"", "AUT"}
 # initials code, not a name, so the app looks the code up by name in the staff
 # fields of the files it reads. MW_AUTO_USER overrides the lookup.
 SIGN_AS_NAME = os.environ.get("MW_SIGN_AS_NAME", "Maria Gonzalez")
-SIGN_AS_EMAIL = os.environ.get("MW_SIGN_AS_EMAIL", "maria.gonzalez@thelsa.com")
+import tenant as _t
+SIGN_AS_EMAIL = os.environ.get("MW_SIGN_AS_EMAIL", _t.get("moveware.sign_as_email", ""))
 
 
 def auto_user() -> str:
     # Lupita confirmed her Moveware code on 30 Oct 2026: MG2.
-    code = (os.environ.get("MW_AUTO_USER") or "MG2").strip().upper()[:3]
+    code = (os.environ.get("MW_AUTO_USER") or _t.get("moveware.sign_as_code", "")).strip().upper()[:3]
     if code:
         return code
     try:
@@ -245,7 +246,7 @@ _LAST = {"at": 0.0, "result": None}
 def run_once(min_gap_s: int = 3 * 3600) -> dict | None:
     """For the keeper: rebuild the plan and apply it, at most every 3 hours.
     Returns None when not due or not enabled."""
-    if not write_enabled() or time.time() - _LAST["at"] < min_gap_s:
+    if not _t.feature("diary_write") or not write_enabled() or time.time() - _LAST["at"] < min_gap_s:
         return None
     _LAST["at"] = time.time()
     try:

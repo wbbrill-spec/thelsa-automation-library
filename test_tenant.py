@@ -37,3 +37,18 @@ def test_every_company_file_has_the_required_settings():
                     assert tenant.get(k) is not None, f"{name}: {k}"
             finally:
                 os.environ.pop("TENANT_FILE")
+
+
+def test_two_companies_never_share_a_database(tmp_path, monkeypatch):
+    from commissions import store
+    monkeypatch.setenv("COMMISSION_DATABASE_URL", f"sqlite:///{tmp_path}/c.db")
+    store.reset_for_tests()
+    try:
+        tenant.claim_database()                       # thelsa claims it
+        tenant.claim_database()                       # and may keep using it
+        monkeypatch.setenv("TENANT", "example")
+        import pytest
+        with pytest.raises(RuntimeError, match="belongs to company 'thelsa'"):
+            tenant.claim_database()
+    finally:
+        store.reset_for_tests()

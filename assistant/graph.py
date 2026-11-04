@@ -101,17 +101,15 @@ def fetch_inbox(user_id: str) -> list:
 
 
 def my_addresses(user_id: str) -> set:
-    """Every address that delivers to this mailbox: primary, sign-in name and
-    aliases (proxyAddresses "smtp:..."). Needs only User.Read. Empty on error,
-    so the caller falls back to the addresses it already knows."""
+    """The user's OWN personal address(es): primary mail and sign-in name only.
+    Deliberately NOT proxyAddresses: a shared or group address such as
+    rates@thelsa.com can sit on a mailbox as an alias, and mail to it is not
+    addressed to this person (Bill, 4 Nov 2026). Empty on error."""
     try:
-        me = _get(access_token(user_id), "/me", {"$select": "mail,userPrincipalName,proxyAddresses"})
+        me = _get(access_token(user_id), "/me", {"$select": "mail,userPrincipalName"})
     except Exception:
         return set()
     out = {(me.get("mail") or "").lower(), (me.get("userPrincipalName") or "").lower()}
-    for p_ in me.get("proxyAddresses") or []:
-        if str(p_).lower().startswith("smtp:"):
-            out.add(str(p_)[5:].lower())
     return {a for a in out if "@" in a}
 
 

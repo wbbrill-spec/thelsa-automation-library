@@ -71,3 +71,21 @@ def test_dashboard_counts_only_my_own(client=None):
             {"source": "auditrack", "tier": "urgent", "seen": False, "meta": {"job": "1"}}]
     g = web.group_team([r for r in rows if r["meta"].get("team")])
     assert g[0]["email"] == "sarareyes@thelsa.com" and g[0]["n"] == 1
+
+
+def test_shared_rates_box_is_not_my_address():
+    msgs = [triage.normalize_graph(m) for m in [
+        _g("r1", ["rates@thelsa.com"]),                                   # shared box / list
+        _g("r2", ["rates@thelsa.com"], cc=["bbrill@thelsa.com"]),         # me only on cc
+        _g("r3", ["rates@thelsa.com", "bbrill@thelsa.com"]),              # me by name in To
+    ]]
+    assert [i["external_id"] for i in triage.triage(msgs, {"bbrill@thelsa.com"})] == ["r3"]
+
+
+def test_my_addresses_ignores_aliases(monkeypatch):
+    from assistant import graph
+    monkeypatch.setattr(graph, "access_token", lambda uid: "t")
+    monkeypatch.setattr(graph, "_get", lambda tok, path, params=None: {
+        "mail": "BBrill@thelsa.com", "userPrincipalName": "bbrill@thelsa.com",
+        "proxyAddresses": ["SMTP:bbrill@thelsa.com", "smtp:rates@thelsa.com"]})
+    assert graph.my_addresses("u") == {"bbrill@thelsa.com"}

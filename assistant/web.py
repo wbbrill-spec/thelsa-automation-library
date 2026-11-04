@@ -155,6 +155,9 @@ h1{font-size:24px;margin:0 0 4px}h2{font-size:17px;margin:0 0 10px}
 .btn{display:inline-block;border:0;background:var(--ink);color:#fff;text-decoration:none;font-weight:600;font-size:13px;padding:8px 14px;border-radius:9px;cursor:pointer;font-family:inherit}
 .btn.light{background:#fff;color:var(--ink);border:1px solid var(--line)}
 .btn.small{padding:5px 10px;font-size:12px}.btn.danger{background:var(--urgent)}
+details.team{margin-top:28px;border-top:1px solid var(--line);padding-top:6px}
+.team-h{cursor:pointer;font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase;margin:16px 0 8px;color:var(--muted)}
+.team-owner{margin:14px 0 6px}
 .tier-h{font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase;margin:22px 0 10px;display:flex;align-items:center;gap:8px}
 .tier-h .dot{width:9px;height:9px;border-radius:50%}
 .card{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--soon);border-radius:12px;padding:12px 14px;margin-bottom:9px}
@@ -399,6 +402,14 @@ DASH_TPL = """
   </div>
 {% endmacro %}
 
+{% macro entry(e) %}
+    {% if e.todos|length > 1 %}
+    <div class="group card-wrap" data-src="{{ e.sources }}">
+      <div class="gh">{{ t('file_label') }} {{ e.file }} <span class="n">· {{ t('n_todos', n=e.todos|length) }}</span></div>
+      {% for it in e.todos %}{{ card(it, True) }}{% endfor %}
+    </div>
+    {% else %}{{ card(e.todos[0]) }}{% endif %}
+{% endmacro %}
 {% if not items %}
   <div class="empty">{{ t('empty') }}</div>
 {% endif %}
@@ -406,16 +417,19 @@ DASH_TPL = """
   {% set group = entries | selectattr('tier', 'equalto', key) | list %}
   {% if group %}
   <div class="tier-h" style="color:{{ color }}"><span class="dot" style="background:{{ color }}"></span>{{ t(key) }} ({{ group | sum(attribute='n') }})</div>
-  {% for e in group %}
-    {% if e.todos|length > 1 %}
-    <div class="group card-wrap" data-src="{{ e.sources }}">
-      <div class="gh">{{ t('file_label') }} {{ e.file }} <span class="n">· {{ t('n_todos', n=e.todos|length) }}</span></div>
-      {% for it in e.todos %}{{ card(it, True) }}{% endfor %}
-    </div>
-    {% else %}{{ card(e.todos[0]) }}{% endif %}
-  {% endfor %}
+  {% for e in group %}{{ entry(e) }}{% endfor %}
   {% endif %}
 {% endfor %}
+{% if team %}
+<details class="team" id="team">
+  <summary class="team-h">{{ t('team_title') }} ({{ team | sum(attribute='n') }})</summary>
+  <p class="sub">{{ t('team_sub') }}</p>
+  {% for g in team %}
+    <div class="gh team-owner">{{ g.name }} <span class="n">· {{ t('n_todos', n=g.n) }}</span></div>
+    {% for e in g.entries %}{{ entry(e) }}{% endfor %}
+  {% endfor %}
+</details>
+{% endif %}
 
 <div class="foot">
   {{ t('foot_private') }}
@@ -464,6 +478,9 @@ def dashboard(u):
     wa_on = bool(u["whatsapp_opt_in"])
     if not wa_on:
         ranked = [i for i in ranked if i["source"] != "whatsapp"]
+    # Colleagues' to-dos (watch list) are shown apart and never counted as theirs.
+    team_items = [i for i in ranked if (i.get("meta") or {}).get("team")]
+    all_ranked, ranked = ranked, [i for i in ranked if not (i.get("meta") or {}).get("team")]
     drafts = {}
     for d in db.list_drafts(u["id"]):
         if d["status"] != "dismissed":
@@ -475,7 +492,7 @@ def dashboard(u):
     if not ms:
         fresh["microsoft"] = i18n.t(lang, "not_connected")
     # Only show a source's box / filter / "as of" line if this person has items from it.
-    has = {src: any(i["source"] == src for i in ranked)
+    has = {src: any(i["source"] == src for i in all_ranked)
            for src in ("moveware", "clickup", "auditrack", "quoterelay", "wa_leads")}
     counts = {t: sum(1 for i in ranked if i["tier"] == t and not i["seen"])
               for t in ("urgent", "today", "soon")}
@@ -487,7 +504,8 @@ def dashboard(u):
     return _render(i18n.t(lang, "nav_dashboard"), DASH_TPL, u, lang=lang,
                    first=(u["name"] or u["email"]).split(" ")[0].split("@")[0],
                    greeting=greeting, ms=ms, items=ranked, drafts=drafts, counts=counts,
-                   entries=group_by_file(ranked), draft_ok=drafting.enabled(),
+                   entries=group_by_file(ranked), team=group_team(team_items),
+                   draft_ok=drafting.enabled(),
                    fresh=fresh, wa_on=wa_on, next_run=_next_run_label(lang), has=has,
                    refreshing=request.args.get("refreshing") or request.args.get("connected"),
                    tiers=[("urgent", "#c0392b"), ("today", "#d68910"), ("soon", "#7f8c8d")],
@@ -497,6 +515,35 @@ def dashboard(u):
                    draft_on=drafting.enabled() and ms is not None,
                    ready=vault.is_configured(),
                    can_write=graph.can_write_drafts())
+
+
+def _staff_names() -> dict:
+    """{email: display name} for staff, from the confirmed coordinator map."""
+    out = {}
+    try:
+        from . import todo
+        for nm, em in todo.people_directory().items():
+            out.setdefault(em, nm.title())
+    except Exception:
+        pass
+    try:
+        for usr in db.list_users():
+            if usr.get("email") and usr.get("name"):
+                out[usr["email"].lower()] = usr["name"]
+    except Exception:
+        pass
+    return out
+
+
+def group_team(team_items) -> list:
+    """Followed colleagues' to-dos: one block per colleague, largest first."""
+    by = {}
+    for it in team_items:
+        by.setdefault(it["meta"]["team"], []).append(it)
+    names = _staff_names() if by else {}
+    out = [{"email": em, "name": names.get(em) or em, "n": len(rows), "entries": group_by_file(rows)}
+           for em, rows in by.items()]
+    return sorted(out, key=lambda g: -g["n"])
 
 
 def group_by_file(ranked) -> list:

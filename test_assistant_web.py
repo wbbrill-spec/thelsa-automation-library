@@ -703,3 +703,18 @@ def test_double_click_save_makes_one_outlook_draft(client, monkeypatch):
     client.post(f"/assistant/draft/{did}/save", data={"csrf": "tok", "body": "texto"})
     client.post(f"/assistant/draft/{did}/save", data={"csrf": "tok", "body": "texto"})
     assert calls == [1]
+
+
+def test_followed_colleagues_todos_are_shown_apart_and_not_counted(client):
+    u = consent("bbrill@thelsa.com")
+    files = [{"job": "777", "coordinator_email": "sarareyes@thelsa.com", "status": "W",
+              "pack": dt.date.today() - dt.timedelta(days=3), "invoiced": False, "act_wt": 5}]
+    db.replace_items(u["id"], "moveware", moveware.mark_team(moveware.tasks_for_files(files),
+                                                             "sarareyes@thelsa.com"))
+    login(client, "bbrill@thelsa.com")
+    html = client.get("/assistant").get_data(as_text=True)
+    assert "Your team&#39;s files (not yours)" in html or "Your team's files (not yours)" in html
+    assert "sarareyes@thelsa.com" in html or "Sara" in html
+    kpis = html.split('class="kpis"')[1].split("</div>\n</div>")[0]
+    assert '<div class="n">0</div><div class="l">' in kpis              # nothing counted as Bill's
+    assert html.index("<summary class=\"team-h\">") > html.index("<div class=\"kpis\">")

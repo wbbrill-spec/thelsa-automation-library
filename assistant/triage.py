@@ -5,7 +5,8 @@ Provider adapters (Graph, Gmail) turn raw messages into a common "message" dict:
     {id, from_name, from_addr, subject, snippet, url, received_at (datetime),
      is_read, is_flagged}
 and triage() turns those into dashboard items:
-    needs_reply — unread, from a real person (not an automated sender)
+    needs_reply — unread, from a real person (not an automated sender), with the
+                  user in the To line (CC copies and group mail are not to-dos)
     flagged     — flagged / starred for follow-up
 Same rules as the original on-demand /assistant page.
 """
@@ -50,12 +51,37 @@ def normalize_graph(m: dict) -> dict:
         "is_flagged": (m.get("flag") or {}).get("flagStatus") == "flagged",
         "importance": (m.get("importance") or "normal").lower(),
         "conversation_id": m.get("conversationId") or "",
+        # None = the provider did not say (older data): treated as addressed to the user.
+        "to": _addrs(m["toRecipients"]) if "toRecipients" in m else None,
+        "cc": _addrs(m.get("ccRecipients")),
     }
+
+
+def _addrs(recips) -> list:
+    return [((r or {}).get("emailAddress") or {}).get("address", "").lower()
+            for r in recips or [] if ((r or {}).get("emailAddress") or {}).get("address")]
+
+
+def _own_set(own) -> set:
+    if not own:
+        return set()
+    if isinstance(own, str):
+        return {own.lower()}
+    return {str(a).lower() for a in own if a}
+
+
+def addressed_to_me(m: dict, own: set) -> bool:
+    """Is the user named in the To line? CC copies, BCC, group / distribution-
+    list mail and FYI forwards are not asking THEM for anything."""
+    to = m.get("to")
+    if to is None or not own:
+        return True
+    return bool(own & set(to))
 
 
 def triage(messages: list, own_address: str = None) -> list:
     """Common message dicts → dashboard item dicts (for db.replace_items)."""
-    own = (own_address or "").lower()
+    own = _own_set(own_address)
     out = []
     for m in messages:
         if not m.get("id"):
@@ -67,7 +93,7 @@ def triage(messages: list, own_address: str = None) -> list:
         if m.get("is_flagged"):
             out.append({**base, "kind": "flagged"})
         if (not m.get("is_read") and not is_automated(m.get("from_addr"))
-                and m.get("from_addr") != own):
+                and m.get("from_addr") not in own and addressed_to_me(m, own)):
             out.append({**base, "kind": "needs_reply"})
     return out
 
@@ -104,7 +130,7 @@ def chasers(messages: list, sent: list, own_address: str = None) -> list:
     user's sent mail [{conversationId, sentDateTime}]. One item per
     conversation (the latest chaser), so a thread chased three times is one
     to-do that says so."""
-    own = (own_address or "").lower()
+    own = _own_set(own_address)
     last_sent = {}
     for s_ in sent or []:
         cid, when = s_.get("conversationId"), _parse_iso(s_.get("sentDateTime"))
@@ -113,7 +139,8 @@ def chasers(messages: list, sent: list, own_address: str = None) -> list:
     per_conv = {}
     for m in messages:
         if not m.get("id") or not m.get("received_at") or is_automated(m.get("from_addr")) \
-                or m.get("from_addr") == own or not is_chaser(m.get("subject"), m.get("snippet")):
+                or m.get("from_addr") in own or not addressed_to_me(m, own) \
+                or not is_chaser(m.get("subject"), m.get("snippet")):
             continue
         cid = m.get("conversation_id") or m["id"]
         replied = last_sent.get(cid)

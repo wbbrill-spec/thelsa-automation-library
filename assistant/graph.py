@@ -92,12 +92,27 @@ def fetch_inbox(user_id: str) -> list:
     since = (_dt.datetime.now(_dt.timezone.utc)
              - _dt.timedelta(days=LOOKBACK_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
     data = _get(token, "/me/mailFolders/inbox/messages", {
-        "$select": "id,subject,from,receivedDateTime,isRead,webLink,bodyPreview,flag,importance,conversationId",
+        "$select": "id,subject,from,toRecipients,ccRecipients,receivedDateTime,isRead,webLink,bodyPreview,flag,importance,conversationId",
         "$top": str(MAX_MESSAGES),
         "$orderby": "receivedDateTime desc",
         "$filter": f"receivedDateTime ge {since}",
     })
     return data.get("value", [])
+
+
+def my_addresses(user_id: str) -> set:
+    """Every address that delivers to this mailbox: primary, sign-in name and
+    aliases (proxyAddresses "smtp:..."). Needs only User.Read. Empty on error,
+    so the caller falls back to the addresses it already knows."""
+    try:
+        me = _get(access_token(user_id), "/me", {"$select": "mail,userPrincipalName,proxyAddresses"})
+    except Exception:
+        return set()
+    out = {(me.get("mail") or "").lower(), (me.get("userPrincipalName") or "").lower()}
+    for p_ in me.get("proxyAddresses") or []:
+        if str(p_).lower().startswith("smtp:"):
+            out.add(str(p_)[5:].lower())
+    return {a for a in out if "@" in a}
 
 
 def fetch_sent(user_id: str) -> list:

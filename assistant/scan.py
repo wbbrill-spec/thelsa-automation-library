@@ -48,10 +48,10 @@ def scan_user(user_id: str) -> dict:
         if conn:
             try:
                 msgs = [triage.normalize_graph(m) for m in graph.fetch_inbox(user_id)]
-                found = triage.triage(msgs, conn["account_email"] or user["email"])
+                me = {a.lower() for a in (conn["account_email"], user["email"]) if a} | graph.my_addresses(user_id)
+                found = triage.triage(msgs, me)
                 try:   # chasers waiting on the user, read or not (needs only Mail.Read)
-                    ch = triage.chasers(msgs, graph.fetch_sent(user_id),
-                                        conn["account_email"] or user["email"])
+                    ch = triage.chasers(msgs, graph.fetch_sent(user_id), me)
                     dup = {c["external_id"] for c in ch}
                     found = [f for f in found if not (f["kind"] == "needs_reply" and f["external_id"] in dup)] + ch
                 except Exception as exc:
@@ -77,12 +77,17 @@ def scan_user(user_id: str) -> dict:
         # read once for everyone at the start of the run; here each user gets
         # their share. A product never read yet leaves that user's items as they were.
         try:
-            emails = moveware.watched_emails(user)
-            au = auditrack.items_for(emails)
+            # Own to-dos are routed to the user's own addresses only; colleagues
+            # they follow come back tagged as team (shown apart, never as theirs).
+            own, team = moveware.own_emails(user), moveware.team_emails(user)
+            au = auditrack.items_for(own)
             if au is not None:
+                au = moveware.merge_team(au, [(em, auditrack.items_for({em}) or []) for em in team])
                 db.replace_items(user_id, "auditrack", au)
                 report["auditrack"] = len(au)
-            for src, rows in feeds.items_for(user, emails).items():
+            team_feeds = [(em, feeds.items_for(user, {em})) for em in team]
+            for src, rows in feeds.items_for(user, own).items():
+                rows = moveware.merge_team(rows, [(em, tf.get(src) or []) for em, tf in team_feeds])
                 db.replace_items(user_id, src, rows)
                 report[src] = len(rows)
         except Exception as exc:

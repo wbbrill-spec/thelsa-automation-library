@@ -244,37 +244,61 @@ def wants_file(f, user, emails=None) -> bool:
     return bool(user.get("mw_embassy")) and bool(f.get("is_embassy"))
 
 
-def watched_emails(user) -> set:
-    """Every coordinator address whose files this user should see: their own,
-    their Moveware override, plus anyone on their watch list (users.mw_watch).
-    A manager can therefore follow their coordinators' files without being the
-    coordinator on any of them."""
+def own_emails(user) -> set:
+    """The addresses that ARE this user: their login and their Moveware override.
+    Only files coordinated under these are the user's own to-dos."""
     emails = {(user.get("email") or "").strip().lower()}
     if user.get("moveware_email"):
         emails.add(user["moveware_email"].strip().lower())
-    watch = user.get("mw_watch")
-    if watch:
-        parts = watch.replace(";", ",").split(",") if isinstance(watch, str) else watch
-        emails.update(e for e in (str(p).strip().lower() for p in parts) if "@" in e)
     emails.discard("")
     return emails
 
 
-def tasks_for_user(user) -> list:
-    """All Moveware to-dos for one user. Returns None if Moveware data isn't
-    loaded yet (so the caller keeps the previous items instead of wiping them)."""
-    try:
-        import mw_live
-    except Exception:
-        return None
-    if not mw_live.have_creds():
-        return None
-    mw_live.ensure_auditor()
-    files = mw_live.audited_in_window()
-    if not files:
-        return None
-    emails = watched_emails(user)
-    mine = [f for f in files if wants_file(f, user, emails)]
+def team_emails(user) -> list:
+    """Coordinators this user follows (users.mw_watch) who are not the user.
+    Their to-dos are shown in a separate "Your team" section with the
+    coordinator's name on them — never counted or listed as the user's own."""
+    own = own_emails(user)
+    watch = user.get("mw_watch")
+    out = []
+    if watch:
+        parts = watch.replace(";", ",").split(",") if isinstance(watch, str) else watch
+        for e in (str(p).strip().lower() for p in parts):
+            if "@" in e and e not in own and e not in out:
+                out.append(e)
+    return out
+
+
+def watched_emails(user) -> set:
+    """Every coordinator address whose files this user can see: their own plus
+    their watch list (own and team together)."""
+    return own_emails(user) | set(team_emails(user))
+
+
+def mark_team(rows, owner_email):
+    """Tag rows as a followed colleague's to-dos (not the user's own)."""
+    for r in rows or []:
+        m = r.get("meta")
+        r["meta"] = {**(m if isinstance(m, dict) else {}), "team": owner_email}
+    return rows
+
+
+def merge_team(own_rows, team_lists):
+    """own rows + each colleague's rows tagged as team, one row per to-do."""
+    out = list(own_rows or [])
+    seen = {(r["external_id"], r["kind"]) for r in out}
+    for em, rows in team_lists:
+        for r in mark_team(rows, em):
+            k = (r["external_id"], r["kind"])
+            if k not in seen:
+                seen.add(k)
+                out.append(r)
+    return out
+
+
+def _items_for(user, files, emails, embassy=False, unassigned=False, team=None) -> list:
+    mine = [f for f in files if _matches(f.get("coordinator_email"), emails)
+            or (embassy and f.get("is_embassy"))]
     items = tasks_for_files(mine)
     # "Invoice this file" now comes from AuditTrack's own worklist (booked moves
     # only, drafts not counted, Embassy files after delivery, Finance's invoice
@@ -291,7 +315,7 @@ def tasks_for_user(user) -> list:
         items += tasks_for_underbilling([r for r in rows if _matches(r.get("coordinator"), emails)])
     except Exception:
         pass
-    items += _gap_items(user, emails)
+    items += _gap_items(user, emails, unassigned=unassigned, team=team)
     try:
         from . import mw_confirm
         items += mw_confirm.items(mine)
@@ -300,7 +324,35 @@ def tasks_for_user(user) -> list:
     return items
 
 
-def _gap_items(user, emails) -> list:
+def tasks_for_user(user) -> list:
+    """All Moveware to-dos for one user. Returns None if Moveware data isn't
+    loaded yet (so the caller keeps the previous items instead of wiping them).
+
+    The user's OWN to-dos are files coordinated under their own address (and
+    every Embassy file if they follow those). Files of colleagues on their
+    watch list come back tagged meta.team = that colleague, so the dashboard
+    shows them apart and never as the user's."""
+    try:
+        import mw_live
+    except Exception:
+        return None
+    if not mw_live.have_creds():
+        return None
+    mw_live.ensure_auditor()
+    files = mw_live.audited_in_window()
+    if not files:
+        return None
+    try:
+        is_key = (user.get("email") or "").strip().lower() in key_users()
+    except Exception:
+        is_key = False
+    own = _items_for(user, files, own_emails(user), embassy=bool(user.get("mw_embassy")),
+                     unassigned=is_key)
+    team = [(em, _items_for(user, files, {em}, team=em)) for em in team_emails(user)]
+    return merge_team(own, team)
+
+
+def _gap_items(user, emails, unassigned=None, team=None) -> list:
     """Missing-date items. Only a FULL read of the file book may change them:
     a half-read book would accuse people of gaps that are not there, so while
     it is still being read the previous gap items are carried over unchanged."""
@@ -308,7 +360,9 @@ def _gap_items(user, emails) -> list:
     if gaps is not None and complete:
         out = tasks_for_date_gaps(gaps, emails)
         try:
-            if (user.get("email") or "").strip().lower() in key_users():
+            if unassigned is None:
+                unassigned = (user.get("email") or "").strip().lower() in key_users()
+            if unassigned:
                 out += tasks_for_unassigned(gaps)
         except Exception:
             pass
@@ -323,6 +377,8 @@ def _gap_items(user, emails) -> list:
             d = dict(r)
             m = d.get("meta")
             d["meta"] = m if isinstance(m, dict) else json.loads(m or "{}")
+            if (d["meta"].get("team") or None) != team:
+                continue                       # carry over only this same list's rows
             prev.append({k: d.get(k) for k in ("kind", "external_id", "from_name", "from_addr",
                                                "subject", "snippet", "url", "received_at", "meta")})
         return prev

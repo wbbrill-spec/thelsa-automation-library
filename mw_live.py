@@ -1293,10 +1293,15 @@ def _json_obj_hook(d):
 
 def _persist_snapshot():
     """Write the current audited window to disk so a restart/deploy can resume
-    instantly instead of re-crawling the API. Best-effort; never raises."""
+    instantly instead of re-crawling the API. Best-effort; never raises.
+
+    Written one file per line (4 Nov 2026): building the whole snapshot as one
+    JSON document took over 1 GB on top of the data itself, and every 20th
+    backfill cycle the server ran out of memory (Render: "used over 2GB")."""
+    import gc
     with _AUDIT_LOCK:
-        snap = {
-            "files": _AUDIT["files"],
+        head = {
+            "format": "lines",
             "old_ids": list(_AUDIT["old_ids"]),
             "total": _AUDIT["total"],
             "window_complete": _AUDIT["window_complete"],
@@ -1308,23 +1313,46 @@ def _persist_snapshot():
             "gapfill_done": _AUDIT["gapfill_done"],
             "saved_at": time.time(),
         }
+        items = list(_AUDIT["files"].items())     # references only — cheap
     try:
         tmp = _CACHE_PATH + ".tmp"
         with open(tmp, "w") as f:
-            json.dump(snap, f, default=_json_default)
+            f.write(json.dumps(head, default=_json_default) + "\n")
+            for jid, rec in items:
+                f.write(json.dumps([jid, rec], default=_json_default) + "\n")
         os.replace(tmp, _CACHE_PATH)  # atomic
         with _AUDIT_LOCK:
-            _AUDIT["saved_at"] = snap["saved_at"]
+            _AUDIT["saved_at"] = head["saved_at"]
     except Exception:
         pass  # e.g. read-only FS — degrade to in-memory only
+    finally:
+        del items
+        gc.collect()
+
+
+def _read_snapshot():
+    """The snapshot as {header..., "files": {...}}, read line by line; the old
+    one-document format is still accepted."""
+    with open(_CACHE_PATH) as f:
+        first = f.readline()
+        head = json.loads(first, object_hook=_json_obj_hook) if first.strip() else {}
+        if not (isinstance(head, dict) and head.get("format") == "lines"):
+            f.seek(0)
+            return json.load(f, object_hook=_json_obj_hook)
+        files = {}
+        for line in f:
+            if line.strip():
+                jid, rec = json.loads(line, object_hook=_json_obj_hook)
+                files[jid] = rec
+        head["files"] = files
+        return head
 
 
 def _load_snapshot() -> bool:
     """Load a persisted snapshot into _AUDIT on boot. Returns True if a usable
     snapshot was loaded. Ignores snapshots built for a different window length."""
     try:
-        with open(_CACHE_PATH) as f:
-            snap = json.load(f, object_hook=_json_obj_hook)
+        snap = _read_snapshot()
     except FileNotFoundError:
         return False
     except Exception:

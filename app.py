@@ -607,6 +607,17 @@ try:
 except Exception as _asst_exc:  # never block the library from booting
     logger.warning("AI Assistant scheduler not started: %s", _asst_exc)
 
+try:  # heartbeat + crash email + daily health line (Bill, 3 Nov 2026)
+    import health as _health
+    _health.start()
+
+    @app.route("/healthz")
+    def _healthz():
+        from flask import jsonify
+        return jsonify(_health.status())
+except Exception as _health_exc:  # never block the library from booting
+    logger.warning("Health watch not started: %s", _health_exc)
+
 try:
     from faim_web import start_keeper as _faim_start_keeper
     _faim_start_keeper()

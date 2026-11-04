@@ -533,6 +533,12 @@ def _heavy_ok() -> bool:
     if _heavy_busy():
         return False
     try:
+        import health
+        if health.memory_high():
+            return False
+    except Exception:
+        pass
+    try:
         prog = mw_live.audit_progress()
         if prog.get("running") and not (prog.get("window_complete") or prog.get("complete")):
             return False

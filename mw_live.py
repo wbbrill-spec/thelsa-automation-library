@@ -1112,7 +1112,7 @@ _AUDIT_BATCH = _AUDIT_PAGE  # back-compat alias (per-cycle deep-check count)
 # branch isolation needed. Runs in the background after the list backfill, bounded
 # per cycle, persisted, and skips ids already known foreign. Kill-switch: set
 # AUDIT_GAPFILL=0 in the env to disable.
-_GAPFILL = os.environ.get("AUDIT_GAPFILL", "1") == "1"
+_GAPFILL = os.environ.get("AUDIT_GAPFILL", "1") == "1"   # the big hidden-job backfill only runs with full coverage; this also finds new jobs above the highest id
 _GAP_SPAN = int(os.environ.get("AUDIT_GAP_SPAN", "4000") or 4000)   # ids below max to probe
 _GAP_CHUNK = int(os.environ.get("AUDIT_GAP_CHUNK", "60") or 60)     # ids per cycle (gentle on the beta)
 _GAP_WORKERS = min(_AUDIT_WORKERS, 8)   # Dave: "don't hammer it" — cap gap concurrency
@@ -1384,9 +1384,16 @@ def _load_snapshot() -> bool:
     else:
         wc = snap_wc
         wr = bool(snap.get("window_ready")) or snap_wc
+    old_ids = set(snap.get("old_ids") or [])
+    if not _FULL_COVERAGE:
+        # A snapshot saved by the full-history crawl: keep only the 12-month window
+        # in memory; older files are remembered as out-of-window ids.
+        for jid in [j for j, m in files.items() if isinstance(m, dict) and _is_out_of_window(m)]:
+            files.pop(jid, None)
+            old_ids.add(jid)
     with _AUDIT_LOCK:
         _AUDIT["files"] = files
-        _AUDIT["old_ids"] = set(snap.get("old_ids") or [])
+        _AUDIT["old_ids"] = old_ids
         _AUDIT["total"] = total
         _AUDIT["window_complete"] = wc
         _AUDIT["window_ready"] = wr
@@ -1704,6 +1711,15 @@ def _auditor_loop():
                 complete = _AUDIT["window_complete"]
                 last_full = _AUDIT["last_full_at"] or 0
             if complete and (time.time() - last_full) < _REFRESH_SECONDS:
+                # New jobs the list doesn't show sit above the highest id: look a
+                # short way ahead every 15 minutes (light — a bounded band).
+                if _GAPFILL and time.time() - _PROBE_AT["t"] > 900:
+                    _PROBE_AT["t"] = time.time()
+                    try:
+                        _probe_ahead()
+                    except Exception:
+                        with _AUDIT_LOCK:
+                            _AUDIT["errors"] += 1
                 time.sleep(_AUDIT_IDLE_SLEEP)
                 continue
             if complete:
@@ -1728,6 +1744,9 @@ def _auditor_loop():
             with _AUDIT_LOCK:
                 _AUDIT["errors"] += 1
         time.sleep(_AUDIT_SLEEP)
+
+
+_PROBE_AT = {"t": 0.0}
 
 
 def ensure_auditor():

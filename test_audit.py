@@ -1289,3 +1289,27 @@ def test_alert_lines_show_known_names_and_flag_files_of_people_who_left():
                                       {"job": "111120", "client": "Y", "value": 1, "coordinator": "Stephanie Barraza"}]))
     assert "coordinator Edgar Espino" in lines and "Edgarespino" not in lines
     assert "Stephanie Barraza (no longer at TMS" in lines
+
+
+def test_window_only_load_drops_files_older_than_the_window(tmp_path, monkeypatch):
+    """4 Nov 2026: the full-history snapshot (~11k files) is cut to the 12-month
+    window on load, so memory stays low after the switch."""
+    import json as _json
+    monkeypatch.setattr(mw, "_FULL_COVERAGE", False)
+    monkeypatch.setattr(mw, "_CACHE_PATH", str(tmp_path / "c.json"))
+    old = (TODAY - dt.timedelta(days=900)).isoformat()
+    new = (TODAY - dt.timedelta(days=30)).isoformat()
+    snap = {"files": {"1": {"job": "1", "delivery": {"__date__": old}},
+                      "2": {"job": "2", "delivery": {"__date__": new}},
+                      "3": {"job": "3"}},
+            "old_ids": [], "total": 3, "window_complete": True, "window_days": mw._WINDOW_DAYS,
+            "last_full_at": 1.0, "saved_at": 1.0, "full_coverage": True}
+    (tmp_path / "c.json").write_text(_json.dumps(snap))
+    assert mw._load_snapshot() is True
+    assert set(mw._AUDIT["files"]) == {"2", "3"} and "1" in mw._AUDIT["old_ids"]
+
+
+def test_full_history_crawl_is_off_by_default():
+    import importlib, os
+    assert os.environ.get("AUDIT_FULL_COVERAGE") is None
+    assert mw._FULL_COVERAGE is False

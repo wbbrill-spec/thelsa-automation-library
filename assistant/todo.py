@@ -71,6 +71,14 @@ def tenant_id() -> str:
 def settings(tid: str | None = None) -> dict:
     """assistant/tenants/<id>.json — read once per process. Missing file → {}."""
     tid = (tid or tenant_id())
+    if tid == tenant_id():
+        try:                              # one intake for all apps (company_sync)
+            import company_sync
+            remote = company_sync.get("assistant")
+            if remote:
+                return remote
+        except Exception:
+            pass
     if tid not in _CACHE:
         try:
             with open(os.path.join(_TENANT_DIR, f"{tid}.json"), encoding="utf-8") as fh:

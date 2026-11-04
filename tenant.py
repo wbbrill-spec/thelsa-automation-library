@@ -33,6 +33,16 @@ def _load(path: str) -> dict:
 
 
 def config() -> dict:
+    # One intake for all apps (company_sync): when this copy reads its settings
+    # from the onboarding form, that wins; otherwise the repo file.
+    if not os.environ.get("TENANT_FILE"):
+        try:
+            import company_sync
+            remote = company_sync.get("auditrack")
+            if remote:
+                return remote
+        except Exception:
+            pass
     path = os.environ.get("TENANT_FILE") or os.path.join(_DIR, f"{tenant_id()}.json")
     return _load(path)
 

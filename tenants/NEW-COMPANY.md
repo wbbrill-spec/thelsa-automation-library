@@ -1,5 +1,14 @@
 # Adding a new company
 
+> **Start here (4 Nov 2026): one intake for all three apps.** Fill the company in once in QuoteRelay's
+> onboarding wizard (mattapp.inflectionpointnow.com/admin/onboard): sections 1–4 for QuoteRelay,
+> 5 "Operations & AuditTrack" and 6 "AI Assistant". The company's copy of this app then reads its
+> settings from there: set `COMPANY_SETTINGS_URL=https://mattapp.inflectionpointnow.com/api/company/settings?t=<id>`
+> and the company's token (`ASSISTANT_FEED_TOKEN_QUOTERELAY` here = `ASSISTANT_FEED_TOKEN_<ID>` on QuoteRelay).
+> The settings files below are then only a fallback (the wizard can also download them).
+> Passwords and keys never go in the form: the wizard's one-time secure link collects them.
+
+
 Each company runs as its own copy of this app, from this same code, on its own
 Render server, with its own disk and its own database. One company's data,
 mailboxes and memory never touch another's.

@@ -25,3 +25,4 @@ data/commissions.db
 # Local SQLite databases never go in this public repo
 data/*.db
 data/*.db-*
+data/company_settings_*.json

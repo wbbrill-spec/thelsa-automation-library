@@ -159,6 +159,11 @@ def start_if_due(hours: float = 20) -> bool:
         if _STATE["running"] or (_STATE["finished"] and time.time() - _STATE["finished"] < hours * 3600):
             return False
         _STATE["running"] = True
+    import jobrunner
+    if jobrunner.isolate():           # own process, own memory cap (4 Nov 2026)
+        with _LOCK:
+            _STATE["running"] = False
+        return jobrunner.start("invoice_mail")
     threading.Thread(target=refresh, daemon=True, name="invoice-mail").start()
     return True
 

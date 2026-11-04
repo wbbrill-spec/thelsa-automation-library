@@ -267,6 +267,9 @@ def ensure_built(max_age_h: float = 20.0) -> bool:
     if not files:
         return False
     _mark_building()
+    import jobrunner
+    if jobrunner.isolate():           # own process, own memory cap (4 Nov 2026)
+        return jobrunner.start("mw_costs", files)
     threading.Thread(target=build, args=(files,), daemon=True, name="mw-costs").start()
     return True
 

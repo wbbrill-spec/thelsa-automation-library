@@ -270,6 +270,11 @@ def start(rows) -> bool:
         if _STATE["running"]:
             return False
         _STATE["running"] = True
+    import jobrunner
+    if jobrunner.isolate():           # own process, own memory cap (4 Nov 2026)
+        with _LOCK:
+            _STATE["running"] = False
+        return jobrunner.start("doc_check", rows)
     threading.Thread(target=run, args=(rows,), daemon=True, name="doc-check").start()
     return True
 

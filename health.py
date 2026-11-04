@@ -175,7 +175,7 @@ def _beat() -> None:
     if m["used"] > _PEAK["bytes"]:
         _PEAK.update(bytes=m["used"], job=job)
     doc = _load()
-    doc.update(beat_at=time.time(), version=_version(), used=m["used"], limit=m["limit"],
+    doc.update(beat_at=time.time(), version=_version(), pid=os.getpid(), used=m["used"], limit=m["limit"],
                pct=m["pct"], job=job, peak=_PEAK["bytes"], peak_job=_PEAK["job"], clean=False)
     _summary(doc)
     _save(doc)
@@ -246,8 +246,10 @@ def status() -> dict:
             "unexpected_restarts_24h": sum(1 for c in crashes if time.time() - c.get("at", 0) < 86400),
             "unexpected_restarts_7d": len(crashes),
             "memory_mb": round(m["used"] / 1048576), "memory_limit_mb": round(m["limit"] / 1048576) if m["limit"] else None,
-            "memory_pct": m["pct"], "peak_mb": round(_PEAK["bytes"] / 1048576), "peak_during": _PEAK["job"],
-            "background_job": _job(),
+            "memory_pct": m["pct"],
+            "peak_mb": round(max(_PEAK["bytes"], doc.get("peak") or 0) / 1048576),
+            "peak_during": doc.get("peak_job") or _PEAK["job"],
+            "background_job": doc.get("job") or _job(),
             "last_beat_s_ago": round(time.time() - doc["beat_at"]) if doc.get("beat_at") else None,
-            "beat_thread_alive": any(t.name == "health" and t.is_alive() for t in threading.enumerate()),
+            "beat_pid": doc.get("pid"), "this_pid": os.getpid(),
             "beat_error": _ERR.get("last", "")}

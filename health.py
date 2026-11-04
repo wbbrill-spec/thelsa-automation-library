@@ -22,7 +22,7 @@ import threading
 import time
 
 TO = os.environ.get("HEALTH_ALERT_TO", "bill.brill@inflectionpointnow.com")
-BEAT_S = 60
+BEAT_S = int(os.environ.get("HEALTH_BEAT_S", "10"))
 _BOOT = time.time()
 _PEAK = {"bytes": 0, "job": ""}
 _STARTED = False
@@ -164,9 +164,33 @@ def _on_boot() -> None:
               f"Highest memory in that run: {_mb(prev.get('peak'))}\n"
               f"Background job running: {prev.get('job') or 'none'}\n"
               f"Unexpected restarts in the last 7 days: {len(crashes)}\n\n"
+              "Last readings before it stopped (time, MB, what was running):\n"
+              + "\n".join(f"  {dt.datetime.fromtimestamp(r['t'], dt.timezone(dt.timedelta(hours=-6))):%H:%M:%S}  "
+                           f"{r.get('mb')} MB  job={r.get('job') or '-'}  audit={r.get('audit')}  threads={r.get('threads')}"
+                           for r in (prev.get("recent") or [])[-12:]) + "\n\n"
               "The site is back up now. Claude will look into this.")
-    _save({"boot_at": _BOOT, "version": _version(), "crashes": crashes,
+    _save({"boot_at": _BOOT, "version": _version(), "crashes": crashes, "prev_recent": prev.get("recent") or [],
            "last_kind": kind, "summary_day": prev.get("summary_day", "")})
+
+
+def _context() -> dict:
+    """What the app is doing right now, to tie a memory jump to its cause."""
+    import sys
+    out = {}
+    mw = sys.modules.get("mw_live")
+    try:
+        a = mw._AUDIT
+        out["audit"] = {"files": len(a.get("files") or {}), "cycles": a.get("cycles"),
+                        "complete": a.get("window_complete"), "gapfill_done": a.get("gapfill_done"),
+                        "refetch": a.get("refetch")}
+    except Exception:
+        pass
+    names = {}
+    for t in threading.enumerate():
+        n = t.name.split("-")[0] if t.name.startswith(("ThreadPoolExecutor", "Thread")) else t.name
+        names[n] = names.get(n, 0) + 1
+    out["threads"] = names
+    return out
 
 
 def _beat() -> None:
@@ -175,6 +199,10 @@ def _beat() -> None:
     if m["used"] > _PEAK["bytes"]:
         _PEAK.update(bytes=m["used"], job=job)
     doc = _load()
+    ctx = _context()
+    ring = (doc.get("recent") or [])[-29:]
+    ring.append({"t": round(time.time()), "mb": round(m["used"] / 1048576), "job": job, **ctx})
+    doc["recent"] = ring
     doc.update(beat_at=time.time(), version=_version(), pid=os.getpid(), used=m["used"], limit=m["limit"],
                pct=m["pct"], job=job, peak=_PEAK["bytes"], peak_job=_PEAK["job"], clean=False)
     _summary(doc)
@@ -252,4 +280,6 @@ def status() -> dict:
             "background_job": doc.get("job") or _job(),
             "last_beat_s_ago": round(time.time() - doc["beat_at"]) if doc.get("beat_at") else None,
             "beat_pid": doc.get("pid"), "this_pid": os.getpid(),
-            "beat_error": _ERR.get("last", "")}
+            "beat_error": _ERR.get("last", ""),
+            "recent": (doc.get("recent") or [])[-6:],
+            "before_last_restart": (doc.get("prev_recent") or [])[-12:]}

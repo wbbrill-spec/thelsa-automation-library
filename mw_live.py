@@ -1213,7 +1213,11 @@ _WINDOW_STOP = 60         # consecutive out-of-window files => window fully cove
 # but kept as a LIGHT record (no charge lines) — enough for coverage/revenue, not
 # for the discrepancy view (which stays window-scoped). The dashboard filters to
 # the 12-month window for its metrics and reports total coverage separately.
-_FULL_COVERAGE = os.environ.get("AUDIT_FULL_COVERAGE", "1") == "1"
+# OFF by default since 4 Nov 2026 (memory crash: holding every file in the book
+# in RAM took the server past 2 GB every ~100 minutes). The audit covers the
+# rolling 12-month window; AUDIT_FULL_COVERAGE=1 turns the whole-book crawl
+# back on once the audit keeps its files on disk instead of in memory.
+_FULL_COVERAGE = os.environ.get("AUDIT_FULL_COVERAGE", "0") == "1"
 _REFRESH_SCAN_PAGES = 40   # newest pages scanned for brand-new files on refresh
 _BACKFILL_PERSIST_EVERY = 20  # persist the growing snapshot every N backfill cycles
 
@@ -1343,6 +1347,10 @@ def _read_snapshot():
         for line in f:
             if line.strip():
                 jid, rec = json.loads(line, object_hook=_json_obj_hook)
+                # window-only mode: a whole-book snapshot is read back without
+                # its older files, one line at a time, so they never sit in RAM
+                if not _FULL_COVERAGE and isinstance(rec, dict) and _is_out_of_window(rec):
+                    continue
                 files[jid] = rec
         head["files"] = files
         return head

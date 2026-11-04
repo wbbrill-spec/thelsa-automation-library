@@ -5,7 +5,9 @@
   "app_name": "FAIM Audit Assistant",
   "moveware": {
     "host": "https://rest.moveware-test.app",
-    "company_segment": "64000"
+    "company_segment": "64000",
+    "sign_as_email": "maria.gonzalez@thelsa.com",
+    "sign_as_code": "MG2"
   },
   "people": {
     "alert_cc": "maria.gonzalez@thelsa.com",
@@ -49,6 +51,20 @@
     "sales_mailboxes": [
       "pablomartinez@thelsa.com",
       "edwuinlopez@thelsa.com"
+    ],
+    "date_alert_cc": "maria.gonzalez@thelsa.com,sarareyes@thelsa.com",
+    "email_domains": [
+      "thelsa.com"
+    ],
+    "embassy_handlers": [
+      "edgarespino",
+      "edgar espino",
+      "edgar.espino"
+    ],
+    "allowed_send_mailboxes": [
+      "bbrill@thelsa.com",
+      "armandosilveyra@thelsa.com",
+      "gustavogonzalez@thelsa.com"
     ]
   },
   "invoicing": {
@@ -74,7 +90,8 @@
     "report_subject_words": [
       "REPORTE FACTURACION",
       "REPORTE DE FACTURACION"
-    ]
+    ],
+    "list_from": "2026-01-01"
   },
   "files": {
     "lost_statuses": [
@@ -89,6 +106,45 @@
     ],
     "ignore": [
       "111000"
+    ],
+    "booked_status": "W",
+    "window_months": 12
+  },
+  "timezone_utc_offset_hours": -6,
+  "languages": [
+    "en",
+    "es"
+  ],
+  "brand": {
+    "company": "Thelsa",
+    "product": "Thelsa Automation Library",
+    "logo": "/static/thelsa_logo.png",
+    "ops_label": "TMS"
+  },
+  "login": {
+    "allowed_domains": [
+      "thelsa.com",
+      "inflectionpointnow.com"
     ]
+  },
+  "home_page": "index.html",
+  "service_name": "thelsa-automation-library",
+  "features": {
+    "embassy_rules": true,
+    "plan_de_viajes": true,
+    "commission_report": true,
+    "campaigns": true,
+    "engine": true,
+    "rate_engine": true,
+    "crossborder": true,
+    "tim": true,
+    "assistant": true,
+    "schema": true,
+    "survey_finder": true,
+    "doc_check": true,
+    "mw_costs": true,
+    "invoice_alerts": true,
+    "date_gap_alerts": true,
+    "diary_write": true
   }
 }

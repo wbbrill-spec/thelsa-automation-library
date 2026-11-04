@@ -52,3 +52,13 @@ def test_two_companies_never_share_a_database(tmp_path, monkeypatch):
             tenant.claim_database()
     finally:
         store.reset_for_tests()
+
+
+def test_thelsa_keeps_every_tool_and_rule_switched_on():
+    """4 Nov 2026: a settings file missing its "features" switched Thelsa's tools off."""
+    for f in ("embassy_rules", "plan_de_viajes", "commission_report", "campaigns", "engine", "crossborder", "tim",
+              "survey_finder", "doc_check", "mw_costs", "invoice_alerts", "date_gap_alerts", "diary_write"):
+        assert tenant.feature(f), f
+    assert tenant.get("brand.product") == "Thelsa Automation Library"
+    assert tenant.get("home_page") == "index.html"
+    assert "thelsa.com" in tenant.get("login.allowed_domains")

@@ -5,7 +5,9 @@
   "app_name": "Audit Assistant",
   "moveware": {
     "host": "https://rest.moveware-test.app",
-    "company_segment": "00000"
+    "company_segment": "00000",
+    "sign_as_email": "",
+    "sign_as_code": ""
   },
   "people": {
     "alert_cc": "ops@example.com",
@@ -21,6 +23,14 @@
     ],
     "sales_mailboxes": [
       "sales@example.com"
+    ],
+    "date_alert_cc": "ops.manager@example.com",
+    "email_domains": [
+      "example.com"
+    ],
+    "embassy_handlers": [],
+    "allowed_send_mailboxes": [
+      "assistant@example.com"
     ]
   },
   "invoicing": {
@@ -33,7 +43,8 @@
     "embassy_to": [],
     "embassy_names": "",
     "holds": {},
-    "report_subject_words": []
+    "report_subject_words": [],
+    "list_from": "2026-01-01"
   },
   "files": {
     "lost_statuses": [
@@ -46,6 +57,43 @@
     "agent_import_types": [
       "IMA"
     ],
-    "ignore": []
+    "ignore": [],
+    "booked_status": "W",
+    "window_months": 12
+  },
+  "timezone_utc_offset_hours": -6,
+  "languages": [
+    "en"
+  ],
+  "brand": {
+    "company": "Example Moving",
+    "product": "Move-File Audit",
+    "logo": "",
+    "ops_label": "Operations"
+  },
+  "login": {
+    "allowed_domains": [
+      "example.com",
+      "inflectionpointnow.com"
+    ]
+  },
+  "service_name": "audit-example",
+  "features": {
+    "embassy_rules": false,
+    "plan_de_viajes": false,
+    "commission_report": false,
+    "campaigns": false,
+    "engine": false,
+    "rate_engine": false,
+    "crossborder": false,
+    "tim": false,
+    "schema": false,
+    "diary_write": false,
+    "assistant": true,
+    "survey_finder": true,
+    "doc_check": true,
+    "mw_costs": true,
+    "invoice_alerts": true,
+    "date_gap_alerts": true
   }
 }

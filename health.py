@@ -94,9 +94,10 @@ def _version() -> str:
 
 
 def _job() -> str:
+    import sys
+    fw = sys.modules.get("faim_web")
     try:
-        import faim_web
-        return faim_web._heavy_busy()
+        return fw._heavy_busy() if fw else ""
     except Exception:
         return ""
 
@@ -202,12 +203,15 @@ def mark_clean_exit() -> None:
     _save(doc)
 
 
+_ERR = {"last": ""}
+
+
 def _loop() -> None:
     while True:
         try:
             _beat()
-        except Exception:
-            pass
+        except Exception as e:
+            _ERR["last"] = f"{type(e).__name__}: {e}"[:200]
         time.sleep(BEAT_S)
 
 
@@ -243,4 +247,7 @@ def status() -> dict:
             "unexpected_restarts_7d": len(crashes),
             "memory_mb": round(m["used"] / 1048576), "memory_limit_mb": round(m["limit"] / 1048576) if m["limit"] else None,
             "memory_pct": m["pct"], "peak_mb": round(_PEAK["bytes"] / 1048576), "peak_during": _PEAK["job"],
-            "background_job": _job()}
+            "background_job": _job(),
+            "last_beat_s_ago": round(time.time() - doc["beat_at"]) if doc.get("beat_at") else None,
+            "beat_thread_alive": any(t.name == "health" and t.is_alive() for t in threading.enumerate()),
+            "beat_error": _ERR.get("last", "")}

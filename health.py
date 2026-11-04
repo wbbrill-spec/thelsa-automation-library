@@ -234,12 +234,26 @@ def mark_clean_exit() -> None:
 _ERR = {"last": ""}
 
 
+TRIM_S = float(os.environ.get("HEALTH_TRIM_SECONDS", "300"))
+
+
 def _loop() -> None:
+    last_trim = 0.0
     while True:
         try:
             _beat()
         except Exception as e:
             _ERR["last"] = f"{type(e).__name__}: {e}"[:200]
+        # Give memory Python has freed back to the OS every few minutes, so a
+        # burst (an audit refresh, a page build) does not raise the floor for
+        # good (4 Nov 2026 crash loop).
+        if TRIM_S > 0 and time.time() - last_trim >= TRIM_S:
+            last_trim = time.time()
+            try:
+                import job_state
+                job_state.release_memory()
+            except Exception:
+                pass
         time.sleep(BEAT_S)
 
 

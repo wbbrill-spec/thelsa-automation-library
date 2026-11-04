@@ -33,6 +33,13 @@ KEY = "invoice_reports_mail"
 SUBJECT_WORDS = ("REPORTE FACTURACION", "REPORTE DE FACTURACION")
 LOOKBACK_DAYS = 120
 _STATE = {"running": False, "finished": None, "error": None, "diag": None}
+
+try:  # last run survives restarts (4 Nov 2026 crash loop)
+    import job_state as _js
+    _js.restore('invoice_mail', _STATE)
+except Exception:
+    _js = None
+
 _LOCK = threading.Lock()
 
 
@@ -94,6 +101,8 @@ def refresh() -> dict:
     diag = {"mailboxes": [], "messages": 0, "files": 0, "new": 0, "errors": []}
     with _LOCK:
         _STATE.update(running=True, error=None, diag=diag)
+    if _js:
+        _js.mark_started('invoice_mail')
     try:
         doc, _ = store.get(KEY)
         doc = doc or {"reports": {}}
@@ -136,6 +145,12 @@ def refresh() -> dict:
     finally:
         with _LOCK:
             _STATE.update(running=False, finished=time.time())
+    if _js:
+        with _LOCK:
+            _snap = dict(_STATE)
+        _snap["finished_ok"] = True
+        _js.save('invoice_mail', _snap)
+        _js.release_memory()
     return diag
 
 

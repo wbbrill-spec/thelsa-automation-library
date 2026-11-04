@@ -86,6 +86,13 @@ _STATE = {"running": False, "started": None, "finished": None, "error": None,
           "files": 0, "done": 0, "results": [], "diag": None}
 _LOCK = threading.Lock()
 
+try:  # last run survives restarts (4 Nov 2026 crash loop)
+    import job_state as _js
+    _js.restore('doc_check', _STATE)
+except Exception:
+    _js = None
+
+
 
 def _norm(s: str) -> str:
     return sf._norm(s or "")
@@ -223,6 +230,8 @@ def run(rows: list) -> None:
     with _LOCK:
         _STATE.update(running=True, started=time.time(), finished=None, error=None,
                       files=len(rows), done=0, results=[], diag=diag)
+    if _js:
+        _js.mark_started('doc_check')
     try:
         tok = ms_graph._get_token()
         diag["_delegated"] = sf.delegated_mailboxes()
@@ -248,6 +257,12 @@ def run(rows: list) -> None:
         diag.pop("_delegated", None)
         with _LOCK:
             _STATE.update(running=False, finished=time.time())
+    if _js:
+        with _LOCK:
+            _snap = dict(_STATE)
+        _snap["finished_ok"] = True
+        _js.save('doc_check', _snap)
+        _js.release_memory()
 
 
 def start(rows) -> bool:

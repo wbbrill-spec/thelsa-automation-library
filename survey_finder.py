@@ -153,6 +153,13 @@ _STATE = {"running": False, "started": None, "finished": None, "error": None,
           "diag": None}
 _LOCK = threading.Lock()
 
+try:  # last run survives restarts (4 Nov 2026 crash loop)
+    import job_state as _js
+    _js.restore('survey_finder', _STATE)
+except Exception:
+    _js = None
+
+
 
 def _norm(s: str) -> str:
     s = unicodedata.normalize("NFKD", s or "")
@@ -392,6 +399,8 @@ def run(missing: list[dict], clients: dict[str, str]) -> None:
     with _LOCK:
         _STATE.update(running=True, started=time.time(), finished=None, error=None,
                       files=len(missing), done=0, results=[], diag=diag)
+    if _js:
+        _js.mark_started('survey_finder')
     try:
         tok = ms_graph._get_token()
         diag["token_ok"] = bool(tok)
@@ -420,6 +429,12 @@ def run(missing: list[dict], clients: dict[str, str]) -> None:
         diag.pop("_delegated", None)
         with _LOCK:
             _STATE.update(running=False, finished=time.time())
+    if _js:
+        with _LOCK:
+            _snap = dict(_STATE)
+        _snap["finished_ok"] = True
+        _js.save('survey_finder', _snap)
+        _js.release_memory()
 
 
 def start(missing, clients) -> bool:

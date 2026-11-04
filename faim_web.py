@@ -547,6 +547,16 @@ def _heavy_ok() -> bool:
     return True
 
 
+def _crashed_recently(name: str) -> bool:
+    """The job's last run began but never finished (the server died during it)
+    within JOB_CRASH_RETRY_HOURS: wait before trying again (4 Nov 2026 crash loop)."""
+    try:
+        import job_state
+        return job_state.recently_crashed(name)
+    except Exception:
+        return False
+
+
 def _keeper_tick():
     try:
         mw_live.ensure_auditor()
@@ -573,7 +583,8 @@ def _keeper_tick():
     try:  # search the coordinators' email for missing surveys and dates, once a day
         import survey_finder as sf
         st = sf.state()
-        if _heavy_ok() and not st["running"] and (not st["finished"] or time.time() - st["finished"] > 20 * 3600):
+        if _heavy_ok() and not st["running"] and not _crashed_recently("survey_finder") \
+                and (not st["finished"] or time.time() - st["finished"] > 20 * 3600):
             files, prog = mw_live.audited_in_window(), mw_live.audit_progress()
             if files and (prog.get("window_complete") or prog.get("complete")):
                 missing, clients = _survey_inputs()
@@ -584,7 +595,8 @@ def _keeper_tick():
     try:  # FAIM MS1.4 documents found in the coordinators' email, once a day
         import doc_check as dc
         st = dc.state()
-        if _heavy_ok() and not st["running"] and (not st["finished"] or time.time() - st["finished"] > 20 * 3600):
+        if _heavy_ok() and not st["running"] and not _crashed_recently("doc_check") \
+                and (not st["finished"] or time.time() - st["finished"] > 20 * 3600):
             prog = mw_live.audit_progress()
             if prog.get("window_complete") or prog.get("complete"):
                 rows = _doc_rows()
@@ -594,7 +606,7 @@ def _keeper_tick():
         pass
     try:  # Finance's monthly invoicing report (Wendy), read from email once a day
         import invoice_mail
-        if _heavy_ok():
+        if _heavy_ok() and not _crashed_recently("invoice_mail"):
             invoice_mail.start_if_due()
     except Exception:
         pass

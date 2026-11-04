@@ -184,7 +184,35 @@ def _insured(v) -> bool:
         return False
 
 
-def faim_snapshot(files, today=None, sit=None):
+def _email_evidence():
+    """What the last email search found, per file: {FILE: {"survey": date or None,
+    "pack": date or None, "delivery": date or None}}. None when the search has never
+    run (then nothing is held back). Bill, 4 Nov 2026: read the sales and
+    coordinator email for the missing survey and dates BEFORE flagging anything."""
+    try:
+        import survey_finder as sf
+        st = sf.state()
+    except Exception:
+        return None
+    if not st.get("finished") and not st.get("results"):
+        return None
+    ev = {}
+    for r in st.get("results") or []:
+        num = str(r.get("file") or "").strip().upper()
+        if not num:
+            continue
+        e = {"survey": None, "pack": None, "delivery": None}
+        for h in r.get("hits") or []:
+            if h.get("need") == "survey" and h.get("matched_by") in ("file number", "customer name"):
+                e["survey"] = e["survey"] or (h.get("date") or "email")
+        d = r.get("email_dates") or {}
+        e["pack"] = d.get("load") or d.get("packing")
+        e["delivery"] = d.get("delivery")
+        ev[num] = e
+    return ev
+
+
+def faim_snapshot(files, today=None, sit=None, email="auto"):
     """Pick the legitimate move files out of the file book and measure evidence.
 
     `files` are mw_live's mapped records; `sit` is sit_days(...) or None. Returns
@@ -194,6 +222,8 @@ def faim_snapshot(files, today=None, sit=None):
     today = today or dt.date.today()
     sit = sit or {}
     start = _months_ago(today, WINDOW_MONTHS)
+    if email == "auto":
+        email = _email_evidence()
 
     moves, no_date, upcoming, older = [], [], [], 0
     by_key = {"pack": 0, "delivery": 0, "sit_pack": 0, "sit_delivery": 0, "sit_truck": 0}
@@ -246,6 +276,21 @@ def faim_snapshot(files, today=None, sit=None):
             # it was invoiced, or SIT's plan shows a truck carried it
             "proven": bool(f.get("invoiced")) or bool(from_sit.get("done")),
         }
+        # Email first: a gap only counts once the sales and coordinator mailboxes
+        # were searched for it; what the search found fills the gap.
+        ev = (email or {}).get(number.strip().upper())
+        row["email_checked"] = email is None or ev is not None
+        row["email_found"] = []
+        if ev:
+            if ev.get("survey") and not row["survey"]:
+                row["survey"] = True
+                row["email_found"].append("survey")
+            if ev.get("pack") and not row["pack"]:
+                row["pack"] = True
+                row["email_found"].append("pack date")
+            if ev.get("delivery") and not row["delivery"]:
+                row["delivery"] = True
+                row["email_found"].append("delivery date")
         if collect is None:
             no_date.append(row)
         elif collect > today:
@@ -295,7 +340,13 @@ def faim_snapshot(files, today=None, sit=None):
         key=lambda x: (-x["v"], -x["files"], x["name"]))
 
     gaps_rows = []
+    email_pending = 0
     for r in audited:
+        if not r["email_checked"]:
+            if ((r["survey_due"] and r["survey_read"] and not r["survey"]) or (r["pack_due"] and not r["pack"])
+                    or (r["delivery_due"] and not r["delivery"])):
+                email_pending += 1              # not flagged until its email is searched
+            continue
         gaps = []
         if r["survey_due"] and r["survey_read"] and not r["survey"]:
             gaps.append("survey")
@@ -325,6 +376,8 @@ def faim_snapshot(files, today=None, sit=None):
     # falls in the window: the worst gap, invisible to the audit itself.
     date_gaps = []
     for r in audited:
+        if not r["email_checked"]:
+            continue
         miss = [k for k, due, have in (("pack", r["pack_due"], r["pack"]),
                                        ("delivery", r["delivery_due"], r["delivery"])) if due and not have]
         if miss:
@@ -400,6 +453,8 @@ def faim_snapshot(files, today=None, sit=None):
             "byCoordinator": by_coordinator,
             "breaches": gaps_rows[:_MAX_GAP_ROWS],
             "gapFiles": len(gaps_rows),
+            "emailPending": email_pending,
+            "foundInEmail": sum(1 for r in audited if r["email_found"]),
         },
         "date_gaps": date_gaps,
         # every audited file, for the email document check (doc_check, FAIM MS1.4)
@@ -725,6 +780,8 @@ def faim_metrics():
         "byCriterion": _with_documents(m["byCriterion"]),
         "breaches": m["breaches"],
         "gapFiles": m["gapFiles"],
+        "emailPending": m.get("emailPending", 0),
+        "foundInEmail": m.get("foundInEmail", 0),
         "viewer": viewer,
     })
 
@@ -773,7 +830,7 @@ def _survey_inputs():
         sit = sit_days(sm.state().get("jobs"))
     except Exception:
         sit = {}
-    snap = faim_snapshot(files, sit=sit)
+    snap = faim_snapshot(files, sit=sit, email=None)   # everything Moveware lacks gets searched
     clients = {str(f.get("job") or ""): str(f.get("client") or "") for f in files or []
                if isinstance(f, dict)}
     rows = {}
@@ -1276,7 +1333,7 @@ document.getElementById('tiles').innerHTML=`
 bars(document.getElementById('byCoord'),d.byCoordinator||[]);
 bars(document.getElementById('byCrit'),d.byCriterion||[]);
 const tb=document.getElementById('breaches');
-document.getElementById('gapCount').textContent=d.gapFiles?` — showing ${(d.breaches||[]).length} of ${d.gapFiles} files with a gap`:'';
+document.getElementById('gapCount').textContent=(d.gapFiles?` — showing ${(d.breaches||[]).length} of ${d.gapFiles} files with a gap (searched in email, not found)`:'')+(d.foundInEmail?` · ${d.foundInEmail} filled from email`:'')+(d.emailPending?` · ${d.emailPending} waiting for the email search before they are flagged`:'');
 const rows=(d.breaches||[]);
 tb.innerHTML=rows.length?rows.map(b=>`
 <tr><td class="num">${b.file}</td><td>${b.cust}</td><td>${b.rule}</td><td>${b.coord}</td>

@@ -641,3 +641,26 @@ def test_documents_page_shows_found_and_missing_documents(client, monkeypatch):
     assert "0 of 1 files have every document" in page and "Not reachable yet: edgarespino" in page
     crit = faim_web._with_documents([{"name": "Survey on file", "v": 40}])
     assert {"name": "Documents found in email", "v": 50} in crit
+
+
+def test_nothing_is_flagged_before_its_email_is_searched_and_email_finds_fill_gaps():
+    """Bill, 4 Nov 2026: read sales and coordinator email for the missing survey and
+    dates before flagging anything."""
+    import datetime as _dt, faim_web
+    today = _dt.date(2026, 11, 4)
+    files = [{"job": "111001", "status": "W", "job_type": "EXP", "pack": "2026-10-10", "survey": None,
+              "coordinator": "Sara Reyes"},
+             {"job": "111002", "status": "W", "job_type": "EXP", "pack": "2026-10-11", "survey": None,
+              "coordinator": "Sara Reyes"},
+             {"job": "111003", "status": "W", "job_type": "EXP", "pack": "2026-10-12", "survey": None,
+              "coordinator": "Sara Reyes"}]
+    email = {"111001": {"survey": "2026-09-20", "pack": None, "delivery": "2026-10-30"},   # found both
+             "111002": {"survey": None, "pack": None, "delivery": None}}                   # searched, nothing
+    snap = faim_web.faim_snapshot(files, today=today, email=email)
+    m = snap["metrics"]
+    flagged = {b["file"] for b in m["breaches"]}
+    assert flagged == {"111002"}                 # 111001 found in email; 111003 not searched yet
+    assert m["emailPending"] == 1 and m["foundInEmail"] == 1
+    assert {g["file"] for g in snap["date_gaps"]} == {"111002"}
+    raw = faim_web.faim_snapshot(files, today=today, email=None)   # what the email search looks for
+    assert {r["file"] for r in raw["missing_survey"]} == {"111001", "111002", "111003"}

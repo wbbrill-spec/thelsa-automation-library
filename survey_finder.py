@@ -11,6 +11,7 @@ entered in Moveware. Nothing is sent and nothing is written anywhere.
 """
 from __future__ import annotations
 
+import os
 import re
 import threading
 import time
@@ -202,10 +203,16 @@ def surname(client: str) -> str | None:
 MAILBOXES = list(dict.fromkeys(ms_graph.TMS_COORDINATORS + ["danielamartinez@thelsa.com"]))
 
 
+# Sales (KAR 1 Pablo, KAR 2 Edwin) send the survey and the booking — searched for
+# every file along with the coordinator's own mailbox (Bill, 4 Nov 2026).
+SALES_MAILBOXES = [m.strip().lower() for m in os.environ.get(
+    "FAIM_SALES_MAILBOXES", "pablomartinez@thelsa.com,edwuinlopez@thelsa.com").split(",") if m.strip()]
+
+
 def _mailboxes_for(coord_email: str) -> list[str]:
     e = (coord_email or "").strip().lower()
     if e in MAILBOXES:
-        return [e]
+        return [e] + [m for m in SALES_MAILBOXES if m != e]
     return list(MAILBOXES)     # former staff / unknown: look everywhere
 
 

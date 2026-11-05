@@ -97,3 +97,17 @@ def test_lupitas_initials_found_by_name(monkeypatch):
     assert ma.auto_user() == "MG1"
     assert mw_live._staff_codes({"moveManager": {"code": "SR2", "text": "Sara Reyes"},
                                  "status": {"code": "W", "text": "Won"}}) == {"SR2": "Sara Reyes"}
+
+
+def test_report_text_is_plain_and_counts(monkeypatch):
+    monkeypatch.setenv("MW_AUTO_USER", "MG2")
+    res = {"written": 2, "verified": 2, "failed": 0, "left": 5, "review_left": 1,
+           "done": [{"job": "110801", "milestone": "load", "plan_date": "2026-03-14", "result": "verified"}]}
+    txt = ma.report_text(res)
+    assert "110801  Load  2026-03-14  verified" in txt and "signed MG2" in txt
+    assert "still to write: 5" in txt
+
+
+def test_default_cap_is_40(monkeypatch):
+    monkeypatch.delenv("MW_DIARY_WRITE_MAX", raising=False)
+    assert ma._max() == 40

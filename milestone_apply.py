@@ -81,9 +81,11 @@ def blocked_reason() -> str | None:
 
 def _max() -> int:
     try:
-        return max(1, int(os.environ.get("MW_DIARY_WRITE_MAX", "10")))   # gentle start: ≤10 per pass
+        # 40 per pass (Bill, 5 Nov 2026: the Plan de Viajes history back to Oct 2025
+        # is now in the folder; 10 per 3 hours would take days to catch up).
+        return max(1, int(os.environ.get("MW_DIARY_WRITE_MAX", "40")))
     except ValueError:
-        return 10
+        return 40
 
 
 def _log_path() -> str:
@@ -284,7 +286,39 @@ def run_once(min_gap_s: int = 3 * 3600) -> dict | None:
                 ids[j] = j
         steps = steps + _email_steps(steps)
         res = apply(steps, ids)
+        res["left"] = max(0, sum(1 for s in steps if s.get("action") in ("create", "update")) - _max())
+        _report(res)
     except Exception as e:                               # noqa: BLE001
         res = {"error": f"{type(e).__name__}: {e}"[:300]}
     _LAST["result"] = res
     return res
+
+
+_NAMES = {"load": "Load", "pack": "Pack", "delivery": "Delivery"}
+
+
+def report_text(res: dict) -> str:
+    """Plain-language summary of one pass, for Bill's inbox."""
+    lines = [f"Dates written into Moveware from the Plan de Viajes (signed {auto_user() or '?'}):", ""]
+    for r in res.get("done") or []:
+        lines.append(f"  {r.get('job')}  {_NAMES.get(r.get('milestone'), r.get('milestone'))}  "
+                     f"{str(r.get('plan_date') or '')[:10]}  {r.get('result')}")
+    lines += ["", f"Written: {res.get('written', 0)} (checked in Moveware: {res.get('verified', 0)}); "
+              f"failed: {res.get('failed', 0)}; still to write: {res.get('left', 0)}; "
+              f"left for a person to check (Moveware already has a different date): {res.get('review_left', 0)}."]
+    if res.get("left"):
+        lines.append("The rest go in on the next passes, up to "
+                     f"{_max()} every 3 hours.")
+    return "\n".join(lines)
+
+
+def _report(res: dict) -> None:
+    """Email Bill after a pass that wrote or failed something."""
+    if not (res.get("written") or res.get("failed")):
+        return
+    try:
+        import health
+        health._send(f"Moveware dates filled in: {res.get('written', 0)} written, "
+                     f"{res.get('left', 0)} to go", report_text(res))
+    except Exception:
+        pass

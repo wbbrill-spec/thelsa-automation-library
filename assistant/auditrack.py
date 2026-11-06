@@ -224,6 +224,9 @@ def supplier_items(rows, labels) -> list:
 def plan_items(steps, directory) -> list:
     out = []
     for s in steps or []:
+        # Bill, 5 Nov 2026: a date that differs between Moveware and the Plan de
+        # Viajes is never sent to a person; Moveware's date stands. Only "review"
+        # steps would become items, and the planner no longer makes any.
         if s.get("action") != "review":
             continue
         job = str(s.get("job") or "")

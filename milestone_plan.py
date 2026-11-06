@@ -102,9 +102,10 @@ def plan_for_job(job: str, sit_job: dict, activities: list, today: dt.date | Non
         for a in mine:
             ad = _d(a.get("date"))
             if (a.get("completed") or "").upper() == "Y" and ad and ad > today:
-                steps.append({**base, "action": "review", "activity_id": a.get("id"),
+                # Bill, 5 Nov 2026: Moveware's date stands; nobody is asked to check.
+                steps.append({**base, "action": "keep", "activity_id": a.get("id"),
                               "mw_date": a.get("date", "")[:10], "mw_completed": "Y",
-                              "why": "Marked completed with a future date; reopen until the move happens."})
+                              "why": "Moveware has a completed date in the future; Moveware's date kept."})
         if not done:
             continue
         if not mine:
@@ -126,13 +127,15 @@ def plan_for_job(job: str, sit_job: dict, activities: list, today: dt.date | Non
             continue
         if comp and ad and ad > today:
             continue                                   # already reported as review above
-        if comp and ad and ad >= TYPO_BEFORE:
-            steps.append({**base, **info, "action": "review",
-                          "why": f"Completed by {info['mw_by'] or 'someone'} on {info['mw_date']}; plan says "
-                                 f"{plan_day.isoformat()}. Left as is."})
+        if comp and ad:
+            # Bill, 5 Nov 2026: when Moveware already has a date that differs from
+            # the Plan de Viajes, Moveware's date stays and NO ONE is asked to check
+            # it ("asking them to go back and check old files is insane").
+            steps.append({**base, **info, "action": "keep",
+                          "why": f"Moveware has {info['mw_date']}; plan says {plan_day.isoformat()}. "
+                                 "Moveware's date kept."})
             continue
-        why = ("Date looks mistyped (before 2025)." if ad and ad < TYPO_BEFORE
-               else "Action open or without a date.")
+        why = "Action open (planned, not completed) or without a date."
         steps.append({**base, **info, "action": "update",
                       "body": {"date": plan_day.isoformat(), "completed": "Y",
                                "completedby": AUTO_USER,
@@ -155,7 +158,7 @@ def _stamp(existing: str | None) -> str:
 
 
 def summarize(steps: list) -> dict:
-    out = {"create": 0, "update": 0, "review": 0}
+    out = {"create": 0, "update": 0, "keep": 0}
     for s in steps:
         out[s["action"]] = out.get(s["action"], 0) + 1
     out["files"] = len({s["job"] for s in steps})

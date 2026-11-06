@@ -8,7 +8,7 @@ STEPS = [
      "body": {"type": "Uplift", "date": "2026-10-14", "comment": "Load", "completed": "Y", "completedby": "AUT"}},
     {"job": "110802", "milestone": "delivery", "action": "update", "plan_date": "2026-10-15", "activity_id": 77,
      "body": {"date": "2026-10-15", "completed": "Y", "completedby": "AUT"}},
-    {"job": "110803", "milestone": "pack", "action": "review", "plan_date": "2026-10-13", "activity_id": 5},
+    {"job": "110803", "milestone": "pack", "action": "keep", "plan_date": "2026-10-13", "activity_id": 5},
 ]
 IDS = {"110801": 9001, "110802": 9002, "110803": 9003}
 
@@ -50,7 +50,7 @@ def test_writes_create_and_update_never_review(monkeypatch, calls):
     monkeypatch.setenv("MW_DIARY_WRITE", "1")
     monkeypatch.setenv("MW_AUTO_USER", "tau")
     out = ma.apply(STEPS, IDS)
-    assert out["written"] == 2 and out["verified"] == 2 and out["review_left"] == 1
+    assert out["written"] == 2 and out["verified"] == 2 and out["kept"] == 1
     assert calls[0][0] == "POST" and calls[0][1] == "/jobs/9001/activities"
     assert calls[0][2]["completedby"] == "TAU" and calls[0][2]["type"] == "Uplift"
     assert calls[1][0] == "PATCH" and calls[1][1] == "/jobs/9002/activities/77"
@@ -68,7 +68,7 @@ def test_cap_missing_id_and_failure(monkeypatch):
         raise OSError("HTTP 500")
     monkeypatch.setattr(ma, "_send", boom)
     out = ma.apply(STEPS, {})
-    assert out["skipped"] == 2 and out["written"] == 0           # one no-id, one over the cap
+    assert out["skipped"] == 1 and out["left"] == 1 and out["written"] == 0   # one no-id, one over the cap
     out = ma.apply(STEPS, IDS)
     assert out["failed"] == 1 and "HTTP 500" in ma.recent_log()[-1]["result"]
 
@@ -101,7 +101,7 @@ def test_lupitas_initials_found_by_name(monkeypatch):
 
 def test_report_text_is_plain_and_counts(monkeypatch):
     monkeypatch.setenv("MW_AUTO_USER", "MG2")
-    res = {"written": 2, "verified": 2, "failed": 0, "left": 5, "review_left": 1,
+    res = {"written": 2, "verified": 2, "failed": 0, "left": 5, "kept": 1,
            "done": [{"job": "110801", "milestone": "load", "plan_date": "2026-03-14", "result": "verified"}]}
     txt = ma.report_text(res)
     assert "110801  Load  2026-03-14  verified" in txt and "signed MG2" in txt
@@ -111,3 +111,18 @@ def test_report_text_is_plain_and_counts(monkeypatch):
 def test_default_cap_is_40(monkeypatch):
     monkeypatch.delenv("MW_DIARY_WRITE_MAX", raising=False)
     assert ma._max() == 40
+
+
+def test_same_file_and_date_never_written_twice(env, calls):
+    out1 = ma.apply(STEPS, IDS)
+    n = len(calls)
+    out2 = ma.apply(STEPS, IDS)
+    assert out1["written"] == 2 and out2["written"] == 0 and out2["already_written"] == 2
+    assert len(calls) == n
+
+
+def test_report_lists_earlier_double_writes(env):
+    for _ in range(2):
+        ma._log({"job": "110103", "milestone": "load", "result": "written, not yet visible"})
+    assert ma.repeated_writes() == [{"job": "110103", "milestone": "load", "times": 2}]
+    assert "110103  Load  x2" in ma.report_text({"written": 0})

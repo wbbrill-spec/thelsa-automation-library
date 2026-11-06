@@ -48,16 +48,17 @@ def test_load_counts_not_pack():
     assert s == []
 
 
-def test_fix_mistyped_year():
+def test_any_moveware_date_is_kept_even_an_old_year():
+    # Bill, 5 Nov 2026: a date already in Moveware stays, whatever the plan says.
     s = mp.plan_for_job("110801", _sit(deliv=("2026-09-04", "done")),
                         [act("Delivery", "2020-09-02", "Y", "EH1")], T)
-    assert s[0]["action"] == "update" and "mistyped" in s[0]["why"]
+    assert s[0]["action"] == "keep" and "body" not in s[0]
 
 
-def test_person_date_is_reviewed_not_overwritten():
+def test_person_date_is_kept_and_nobody_is_asked():
     s = mp.plan_for_job("110859", _sit(deliv=("2026-09-30", "done")),
                         [act("Delivery", "2026-09-28", "Y", "SR2")], T)
-    assert s[0]["action"] == "review"
+    assert s[0]["action"] == "keep"
 
 
 def test_matching_completed_needs_nothing():
@@ -68,8 +69,8 @@ def test_matching_completed_needs_nothing():
 def test_future_completed_is_flagged():
     s = mp.plan_for_job("111147", _sit(pack=("2026-12-07", "scheduled")),
                         [act("Uplift", "2026-12-07", "Y", "EH1")], T)
-    assert [x["action"] for x in s] == ["review"] and "future" in s[0]["why"]
-    assert mp.summarize(s) == {"create": 0, "update": 0, "review": 1, "files": 1}
+    assert [x["action"] for x in s] == ["keep"] and "future" in s[0]["why"]
+    assert mp.summarize(s) == {"create": 0, "update": 0, "keep": 1, "files": 1}
 
 
 def test_load_and_pack_written_from_their_own_plan_rows():

@@ -18,8 +18,8 @@ Moveware (Dave Pile, MOS-51412, 15 Oct 2026):
 
 Only the steps milestone_plan marks "create" or "update" are executed: a Load or
 Delivery that SIT's Plan de Viajes shows as DONE, with no completed action yet.
-"review" steps (a person completed it with another date, a completed date in the
-future) are NEVER written — they stay for a person to decide.
+"keep" steps (Moveware already has a different completed date) are never
+written and never sent to anyone: Moveware's date stands (Bill, 5 Nov 2026).
 
 SWITCHES — nothing is written unless ALL of these hold:
   MW_DIARY_WRITE (default 1)  the write-back is on since 30 Oct 2026 (Bill); 0 = off
@@ -104,6 +104,33 @@ def _log(rec: dict) -> None:
         pass
 
 
+def already_written() -> set:
+    """(file, milestone) pairs the app has already written into Moveware."""
+    try:
+        with open(_log_path()) as fh:
+            rows = [json.loads(x) for x in fh if x.strip()]
+    except Exception:
+        return set()
+    return {(str(r.get("job") or ""), r.get("milestone")) for r in rows
+            if str(r.get("result", "")).startswith(("verified", "written"))}
+
+
+def repeated_writes() -> list:
+    """Files + dates written more than once before the guard existed."""
+    try:
+        with open(_log_path()) as fh:
+            rows = [json.loads(x) for x in fh if x.strip()]
+    except Exception:
+        return []
+    seen = {}
+    for r in rows:
+        if str(r.get("result", "")).startswith(("verified", "written")):
+            k = (str(r.get("job") or ""), r.get("milestone"))
+            seen[k] = seen.get(k, 0) + 1
+    return sorted([{"job": j, "milestone": m, "times": n} for (j, m), n in seen.items() if n > 1],
+                  key=lambda x: x["job"])
+
+
 def recent_log(n: int = 50) -> list:
     try:
         with open(_log_path()) as fh:
@@ -147,12 +174,23 @@ def apply(steps: list, job_ids: dict, now=None) -> dict:
     Returns counts; never raises."""
     now = now or dt.datetime.now(dt.timezone.utc)
     out = {"enabled": write_enabled(), "blocked": blocked_reason(), "written": 0, "verified": 0,
-           "failed": 0, "skipped": 0, "review_left": 0, "done": []}
+           "failed": 0, "skipped": 0, "kept": 0, "already_written": 0, "left": 0, "done": []}
     if not out["enabled"]:
         return out
     user = auto_user()
-    todo = [s for s in steps or [] if s.get("action") in ("create", "update")]
-    out["review_left"] = sum(1 for s in steps or [] if s.get("action") == "review")
+    # Never write the same file + date twice (5 Nov 2026: 110103's Load was
+    # POSTed on two passes because the first write did not show up on re-read).
+    done_before = already_written()
+    todo, repeats = [], 0
+    for s in steps or []:
+        if s.get("action") not in ("create", "update"):
+            continue
+        if (str(s.get("job") or ""), s.get("milestone")) in done_before:
+            repeats += 1
+            continue
+        todo.append(s)
+    out["kept"] = sum(1 for s in steps or [] if s.get("action") == "keep")
+    out["already_written"] = repeats
     for s in todo[:_max()]:
         job = str(s.get("job") or "")
         jid = job_ids.get(job)
@@ -187,7 +225,7 @@ def apply(steps: list, job_ids: dict, now=None) -> dict:
             rec["result"] = f"failed: {type(e).__name__}: {str(e)[:160]}"
         _log(rec)
         out["done"].append(rec)
-    out["skipped"] += max(0, len(todo) - _max())
+    out["left"] = max(0, len(todo) - _max())
     return out
 
 
@@ -286,7 +324,6 @@ def run_once(min_gap_s: int = 3 * 3600) -> dict | None:
                 ids[j] = j
         steps = steps + _email_steps(steps)
         res = apply(steps, ids)
-        res["left"] = max(0, sum(1 for s in steps if s.get("action") in ("create", "update")) - _max())
         _report(res)
     except Exception as e:                               # noqa: BLE001
         res = {"error": f"{type(e).__name__}: {e}"[:300]}
@@ -305,10 +342,14 @@ def report_text(res: dict) -> str:
                      f"{str(r.get('plan_date') or '')[:10]}  {r.get('result')}")
     lines += ["", f"Written: {res.get('written', 0)} (checked in Moveware: {res.get('verified', 0)}); "
               f"failed: {res.get('failed', 0)}; still to write: {res.get('left', 0)}; "
-              f"left for a person to check (Moveware already has a different date): {res.get('review_left', 0)}."]
+              f"Moveware already had a different date, kept as is: {res.get('kept', 0)}."]
     if res.get("left"):
         lines.append("The rest go in on the next passes, up to "
                      f"{_max()} every 3 hours.")
+    rep = repeated_writes()
+    if rep:
+        lines += ["", "Written twice before 5 Nov 2026 (two identical actions may sit on the file):"]
+        lines += [f"  {r['job']}  {_NAMES.get(r['milestone'], r['milestone'])}  x{r['times']}" for r in rep]
     return "\n".join(lines)
 
 

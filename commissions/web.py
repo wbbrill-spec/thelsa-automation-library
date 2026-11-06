@@ -186,6 +186,20 @@ def _register() -> dict:
     return out
 
 
+def _mw_costs() -> tuple:
+    """({base_file: summary}, "YYYY-MM-DD HH:MM") from the Library's line-item cost
+    read of Moveware (mw_costs.py), or ({}, "") when there is none. Read-only:
+    the commission app never calls Moveware itself."""
+    try:
+        import mw_costs
+        files = mw_costs.costs()
+        at = mw_costs.state().get("built_at")
+        when = dt.datetime.fromtimestamp(at, dt.timezone(dt.timedelta(hours=-6))).strftime("%Y-%m-%d %H:%M") if at else ""
+        return files or {}, when
+    except Exception:                               # noqa: BLE001
+        return {}, ""
+
+
 def _report(lines, s: E.Settings, mw=None) -> dict:
     """The report as the page and the Excel download show it: Finance's lines,
     the bookings typed in, and the booked quotes when the Removals Summary is loaded."""
@@ -193,6 +207,7 @@ def _report(lines, s: E.Settings, mw=None) -> dict:
     bookings = store.get("bookings", {})[0]
     col = _collections()["sources"]
     more = dict(payments=store.get("payments", {})[0], register=_register()["invoices"])
+    more["mw_costs"], more["mw_costs_read_on"] = _mw_costs()
     if col:
         src = [(ps, info) for ps, info, _m in col]
         more.update(collected=[p for ps, _i, _m in col for p in ps], collected_reach=R.payment_reach(src),

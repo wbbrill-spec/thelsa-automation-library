@@ -26,6 +26,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("COMMISSION_DATABASE_URL", f"sqlite:///{tmp_path}/c.db")
     monkeypatch.delenv("COMMISSION_USERS", raising=False)
     monkeypatch.setattr(W, "_fx_display", lambda: dict(FXD))        # no internet in tests
+    monkeypatch.setattr(W, "_mw_costs", lambda: ({}, ""))           # no Moveware in tests
     store.reset_for_tests()
     app = Flask(__name__)
     app.secret_key = "test"

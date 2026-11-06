@@ -58,6 +58,7 @@ LABELS = {
     "negative_cost": "Negative cost on the job",
     "credit_reference_unreadable": "Credit note: cancelled document not readable",
     "cost_not_counted": "Cost not counted: the job's billing nets to zero",
+    "cost_in_moveware": "No cost in Finance's books, but Moveware has the supplier's cost",
     "no_cost_posted": "Billed, no cost posted yet",
     "cost_without_sales": "Cost posted, nothing billed in the period",
     "currency_missing": "Invoice currency not stated",
@@ -91,6 +92,7 @@ LABELS_ES = {
     "negative_cost": "Costo negativo en el expediente",
     "credit_reference_unreadable": "Nota de crédito: no se puede leer el documento que cancela",
     "cost_not_counted": "Costo no contado: lo facturado del expediente se cancela",
+    "cost_in_moveware": "Sin costo en los libros de Finanzas, pero Moveware ya tiene el costo del proveedor",
     "no_cost_posted": "Facturado, todavía sin costo",
     "cost_without_sales": "Costo registrado, nada facturado en el periodo",
     "currency_missing": "Moneda de la factura no indicada",
@@ -426,8 +428,50 @@ def book_quotes(lines, removals, control, costings, s: E.Settings) -> tuple:
     return Q.book(removals, costings, s, pesos=pesos), Q.problems(removals, control, costings, pesos=pesos)
 
 
+def _base_file(job: str) -> str:
+    j = str(job or "").strip().upper()
+    while j and not j[-1].isdigit():
+        j = j[:-1]
+    return j
+
+
+def moveware_cost_pointers(problems, mw_costs, read_on: str = "") -> list:
+    """Bill, 5 Nov 2026: where Finance has no cost yet on a billed file, say when
+    Moveware already holds the supplier's actual cost (charge lines, read by the
+    Library's line-item cost read). A pointer for Lupita and Finance only: the
+    commission keeps using Finance's cost, and the margin part still waits."""
+    out = []
+    if not mw_costs:
+        return out
+    when = f" (Moveware read {read_on})" if read_on else ""
+    when_es = f" (lectura de Moveware {read_on})" if read_on else ""
+    for p in problems:
+        if p["kind"] != "no_cost_posted":
+            continue
+        e = mw_costs.get(_base_file(p["job"])) or {}
+        act = float(e.get("act") or 0)
+        if act <= 0:
+            continue
+        ccy = e.get("currency") or ""
+        n, n_act, n_wait = int(e.get("lines") or 0), int(e.get("lines_with_act") or 0), int(e.get("lines_pending") or 0)
+        wait = f"; {n_wait} line(s) still waiting for the supplier's invoice" if n_wait else ""
+        wait_es = f"; {n_wait} línea(s) todavía esperan la factura del proveedor" if n_wait else ""
+        item = {"kind": "cost_in_moveware", "job": p["job"],
+                "detail": f"actual supplier cost in Moveware for the whole file: {act:,.2f} {ccy or '(currency not stated)'}, "
+                          f"on {n_act} of {n} cost lines{wait}. Post it in Finance's books so the margin part can be "
+                          f"paid{when}",
+                "detail_es": f"costo real del proveedor en Moveware para todo el expediente: {act:,.2f} "
+                             f"{ccy or '(moneda no indicada)'}, en {n_act} de {n} líneas de costo{wait_es}. Regístrelo en "
+                             f"los libros de Finanzas para poder pagar la parte de margen{when_es}"}
+        if ccy == "MXN":
+            item["amount_mxn"] = round(act, 2)
+        out.append(item)
+    return out
+
+
 def build(lines, s: E.Settings, bookings=None, quotes=None, quote_problems=(), payments=None,
-          collected=None, collected_reach=None, register=None, collected_companies=None) -> dict:
+          collected=None, collected_reach=None, register=None, collected_companies=None,
+          mw_costs=None, mw_costs_read_on: str = "") -> dict:
     """`quotes` = quotes.book(...): the booked quote of each job, or None when
     the Moveware reports have not been loaded. A month's bookings are, in this
     order: the figure typed on the page; the booked quotes (when every file of
@@ -459,6 +503,7 @@ def build(lines, s: E.Settings, bookings=None, quotes=None, quote_problems=(), p
     by_month = {m: [dataclasses.replace(x, paid=paid(m, x.job)) for x in ls]
                 for m, ls in F.commission_lines(lines, s).items()}
     problems = F.problems(lines, s) + auto_problems
+    problems = problems + moveware_cost_pointers(problems, mw_costs, mw_costs_read_on)
     first, qmonths, won = {}, {}, {}
     if quotes is not None:
         first, qmonths = _quote_months(by_month, quotes)
@@ -571,6 +616,7 @@ def build(lines, s: E.Settings, bookings=None, quotes=None, quote_problems=(), p
             "rates": {"by_month": {r["month"]: r["rate"] for r in months}, "other": rate_other,
                       "from_report": rates_found},
             "placeholder_months": [r["month"] for r in months if not r["bookings_known"]],
+            "mw_costs_loaded": bool(mw_costs), "mw_costs_read_on": mw_costs_read_on,
             "quotes_loaded": quotes is not None, "bookings_basis": s.bookings_basis,
             "paid_lines": sum(r["paid_lines"] for r in months), "pending_lines": sum(r["pending_lines"] for r in months),
             "collection": collection, "register_loaded": register is not None,

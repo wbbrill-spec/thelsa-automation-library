@@ -126,3 +126,17 @@ def test_report_lists_earlier_double_writes(env):
         ma._log({"job": "110103", "milestone": "load", "result": "written, not yet visible"})
     assert ma.repeated_writes() == [{"job": "110103", "milestone": "load", "times": 2}]
     assert "110103  Load  x2" in ma.report_text({"written": 0})
+
+
+def test_no_email_when_dates_are_simply_written():
+    st = {}
+    assert ma.problems({"written": 5, "done": [{"job": "1", "milestone": "load", "result": "verified"}]},
+                       st, "2026-11-09") == []
+
+
+def test_failure_reported_once_only():
+    st = {}
+    res = {"done": [{"job": "110281B", "milestone": "pack", "result": "failed: HTTPError: 404"}]}
+    first = ma.problems(res, st, "2026-11-09")
+    assert len(first) == 1 and "110281B" in first[0]
+    assert ma.problems(res, st, "2026-11-09") == []

@@ -324,9 +324,10 @@ def run_once(min_gap_s: int = 3 * 3600) -> dict | None:
                 ids[j] = j
         steps = steps + _email_steps(steps)
         res = apply(steps, ids)
-        _report(res)
+        _report(res, ids)
     except Exception as e:                               # noqa: BLE001
         res = {"error": f"{type(e).__name__}: {e}"[:300]}
+        _report(res)
     _LAST["result"] = res
     return res
 
@@ -353,13 +354,95 @@ def report_text(res: dict) -> str:
     return "\n".join(lines)
 
 
-def _report(res: dict) -> None:
-    """Email Bill after a pass that wrote or failed something."""
-    if not (res.get("written") or res.get("failed")):
+def _alert_state_path() -> str:
+    return os.path.join(os.path.dirname(_log_path()), "milestone_alerts.json")
+
+
+def _alert_state() -> dict:
+    try:
+        with open(_alert_state_path()) as fh:
+            return json.load(fh)
+    except Exception:
+        return {}
+
+
+def _save_alert_state(st: dict) -> None:
+    try:
+        with open(_alert_state_path(), "w") as fh:
+            json.dump(st, fh)
+    except Exception:
+        pass
+
+
+def problems(res: dict, state: dict, today: str) -> list:
+    """What is BROKEN in this pass and has not been reported before.
+    Bill, 9 Nov 2026: no email when dates are simply written; only when
+    something is broken. Each problem is reported once (an error that keeps
+    happening is repeated at most once a day)."""
+    out = []
+    seen = set(state.get("failed") or [])
+    for r in res.get("done") or []:
+        if str(r.get("result", "")).startswith("failed"):
+            key = f"{r.get('job')}:{r.get('milestone')}"
+            if key not in seen:
+                out.append(f"Could not write {_NAMES.get(r.get('milestone'), r.get('milestone'))} "
+                           f"for file {r.get('job')}: {str(r.get('result'))[8:]}")
+                seen.add(key)
+    state["failed"] = sorted(seen)
+    if res.get("error") and state.get("error_day") != today + res["error"][:80]:
+        out.append(f"The write-back stopped with an error: {res['error']}")
+        state["error_day"] = today + res["error"][:80]
+    if res.get("blocked") and state.get("blocked_day") != today:
+        out.append(f"The write-back is switched on but blocked: {res['blocked']}")
+        state["blocked_day"] = today
+    return out
+
+
+def duplicate_actions(job_ids: dict) -> list:
+    """For files the app wrote more than once before the 5 Nov guard: how many
+    actions the app itself created on the file, per milestone (more than one
+    = a real duplicate sitting in Moveware)."""
+    import job_rules
+    from milestone_plan import AUTO_MARK
+    out = []
+    for r in repeated_writes():
+        jid = job_ids.get(r["job"]) or (r["job"] if r["job"].isdigit() else None)
+        if not jid:
+            continue
+        try:
+            acts = _activities(jid)
+        except Exception:
+            continue
+        mine = [a for a in acts if job_rules.is_milestone(a, r["milestone"])
+                and AUTO_MARK in str(a.get("comment") or "")]
+        if len(mine) > 1:
+            out.append({"job": r["job"], "milestone": r["milestone"], "actions": len(mine),
+                        "ids": [a.get("id") for a in mine]})
+    return out
+
+
+def _report(res: dict, job_ids: dict | None = None) -> None:
+    """Email Bill ONLY when something is broken (Bill, 9 Nov 2026)."""
+    state = _alert_state()
+    today = dt.date.today().isoformat()
+    lines = problems(res, state, today)
+    if job_ids is not None and not state.get("dupes_checked"):
+        try:
+            dupes = duplicate_actions(job_ids)
+            state["dupes_checked"] = today
+            if dupes:
+                lines.append("Duplicate actions the app created in Moveware before the 5 Nov fix "
+                             "(same file, same milestone, more than one action):")
+                lines += [f"  {d['job']}  {_NAMES.get(d['milestone'], d['milestone'])}: {d['actions']} actions"
+                          for d in dupes]
+                state["dupes"] = dupes
+        except Exception:
+            pass
+    _save_alert_state(state)
+    if not lines:
         return
     try:
         import health
-        health._send(f"Moveware dates filled in: {res.get('written', 0)} written, "
-                     f"{res.get('left', 0)} to go", report_text(res))
+        health._send("Moveware write-back needs attention", "\n".join(lines))
     except Exception:
         pass

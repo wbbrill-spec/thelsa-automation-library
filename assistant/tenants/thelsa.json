@@ -1,22 +1,45 @@
 {
   "_about": "Company settings for the AI Assistant (one file per company; adding a company = adding a file, never a code change). Secrets never go here: feed tokens are read from the environment variable named in token_env.",
-  "tenant": {"id": "thelsa", "name": "Thelsa", "logo": "/static/thelsa_logo.png",
-             "staff_domains": ["thelsa.com"],
-             "admins": ["bbrill@thelsa.com", "bill.brill@inflectionpointnow.com"]},
-
+  "tenant": {
+    "id": "thelsa",
+    "name": "Thelsa",
+    "logo": "/static/thelsa_logo.png",
+    "staff_domains": [
+      "thelsa.com"
+    ],
+    "admins": [
+      "bbrill@thelsa.com",
+      "bill.brill@inflectionpointnow.com"
+    ]
+  },
   "people": {
     "_about": "Who handles what. key_users see every to-do nobody owns, so nothing is lost. Each role lists addresses that receive that kind of to-do when the product does not name a person.",
-    "key_users": ["maria.gonzalez@thelsa.com", "sarareyes@thelsa.com"],
-    "billing": ["maria.gonzalez@thelsa.com"],
-    "procurement": ["maria.gonzalez@thelsa.com"],
-    "collections": ["maria.gonzalez@thelsa.com"]
+    "key_users": [
+      "maria.gonzalez@thelsa.com",
+      "sarareyes@thelsa.com"
+    ],
+    "billing": [
+      "maria.gonzalez@thelsa.com"
+    ],
+    "procurement": [
+      "maria.gonzalez@thelsa.com"
+    ],
+    "collections": [
+      "maria.gonzalez@thelsa.com"
+    ],
+    "consolidation": [
+      "elizabethhernandez@thelsa.com",
+      "sarareyes@thelsa.com",
+      "fernandamora@thelsa.com",
+      "maria.gonzalez@thelsa.com",
+      "mariotorres@thelsa.com",
+      "gustavogonzalez@thelsa.com"
+    ]
   },
-
   "drafts": {
     "_about": "Who a drafted request goes to when the to-do is an internal hand-off (e.g. 'please invoice file X'). Blank means the user fills in the recipient.",
     "invoice_request_to": "maria.gonzalez@thelsa.com"
   },
-
   "auditrack": {
     "enabled": true,
     "open_invoice_min_days": 30,
@@ -25,7 +48,6 @@
     "supplier_checks": true,
     "plan_reviews": true
   },
-
   "feeds": [
     {
       "id": "quoterelay",
@@ -39,5 +61,9 @@
       "url": "https://thelsa-whatsapp-groupage.onrender.com/api/assistant/tasks?t=thelsa",
       "token_env": "ASSISTANT_FEED_TOKEN_WHATSAPP"
     }
-  ]
+  ],
+  "consolidation": {
+    "enabled": true,
+    "_about": "Daily reminder to check /crossborder for loads to combine (Bill, 9 Nov 2026); who gets it: people.consolidation"
+  }
 }

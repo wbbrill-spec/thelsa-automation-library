@@ -16,7 +16,7 @@ import os
 import threading
 import time
 
-from . import auditrack, clickup_tim, db, feeds, graph, moveware, todo, triage
+from . import auditrack, clickup_tim, consolidation, db, feeds, graph, moveware, todo, triage
 
 log = logging.getLogger("assistant.scan")
 TZ = "America/Mexico_City"
@@ -85,6 +85,10 @@ def scan_user(user_id: str) -> dict:
                 au = moveware.merge_team(au, [(em, auditrack.items_for({em}) or []) for em in team])
                 db.replace_items(user_id, "auditrack", au)
                 report["auditrack"] = len(au)
+            cons = consolidation.items_for(own)        # daily reminder, listed people only
+            if cons is not None:
+                db.replace_items(user_id, "consolidation", cons)
+                report["consolidation"] = len(cons)
             team_feeds = [(em, feeds.items_for(user, {em})) for em in team]
             for src, rows in feeds.items_for(user, own).items():
                 rows = moveware.merge_team(rows, [(em, tf.get(src) or []) for em, tf in team_feeds])
@@ -116,6 +120,10 @@ def run_all(trigger: str = "schedule") -> dict:
         product_notes.append(f"auditrack: {auditrack.refresh()}")
     except Exception as exc:
         product_notes.append(f"auditrack: {exc}")
+    try:
+        product_notes.append(f"consolidation: {consolidation.refresh()}")
+    except Exception as exc:
+        product_notes.append(f"consolidation: {exc}")
     try:
         product_notes += [f"{k}: {v}" for k, v in feeds.refresh_all().items()]
     except Exception as exc:

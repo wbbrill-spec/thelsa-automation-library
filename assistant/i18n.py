@@ -175,6 +175,7 @@ S = {
 }
 
 KIND = {
+    "consolidate": ("Consolidation", "Consolidación"),
     "needs_reply": ("Needs reply", "Por responder"),
     "chased": ("Chasing you", "Te están dando seguimiento"),
     "flagged": ("Flagged", "Marcado"),
@@ -210,6 +211,7 @@ SOURCE = {
     "clickup": ("ClickUp (TIM)", "ClickUp (TIM)"),
     "whatsapp": ("WhatsApp", "WhatsApp"),
     "auditrack": ("AuditTrack", "AuditTrack"),
+    "consolidation": ("Consolidation", "Consolidación"),
     "quoterelay": ("QuoteRelay", "QuoteRelay"),
     "wa_leads": ("WhatsApp leads", "Leads WhatsApp"),
 }

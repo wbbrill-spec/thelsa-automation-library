@@ -187,7 +187,7 @@ textarea{width:100%;min-height:130px;border:1px solid var(--line);border-radius:
 .group>.gh .n{font-size:11px;color:var(--muted);font-weight:600}
 .group .card{border-radius:10px}
 .note{font-size:12px;color:var(--muted);margin-top:6px}.warn-t{color:#8a5a00}
-.tag.auditrack{background:#fdecea;color:#9b2c20}.tag.quoterelay{background:#e8f6f8;color:#16606e}.tag.wa_leads{background:#e6f6ec;color:#1e7a3c}
+.tag.auditrack{background:#fdecea;color:#9b2c20}.tag.consolidation{background:#fff4e0;color:#8a5300}.tag.quoterelay{background:#e8f6f8;color:#16606e}.tag.wa_leads{background:#e6f6ec;color:#1e7a3c}
 .empty{color:var(--muted);font-size:14px;background:#fff;border:1px dashed #dfe3e8;border-radius:12px;padding:22px;text-align:center}
 .banner{background:#fff;border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:14px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
 .banner.warn{border-color:#f0c36d;background:#fffaf0}
@@ -363,7 +363,7 @@ DASH_TPL = """
   {% if has.moveware %}<button class="chip" data-f="moveware">Moveware</button>{% endif %}
   {% if has.clickup %}<button class="chip" data-f="clickup">ClickUp</button>{% endif %}
   {% if wa_on %}<button class="chip" data-f="whatsapp">WhatsApp</button>{% endif %}
-  {% for src in ('auditrack', 'quoterelay', 'wa_leads') %}{% if has[src] %}<button class="chip" data-f="{{ src }}">{{ source_label(src) }}</button>{% endif %}{% endfor %}
+  {% for src in ('auditrack', 'consolidation', 'quoterelay', 'wa_leads') %}{% if has[src] %}<button class="chip" data-f="{{ src }}">{{ source_label(src) }}</button>{% endif %}{% endfor %}
   <span class="spacer"></span>
   <form method="post" action="/assistant/refresh"><input type="hidden" name="csrf" value="{{ csrf }}">
     <button class="btn light" type="submit">{{ t('refresh_now') }}</button></form>
@@ -503,7 +503,7 @@ def dashboard(u):
         fresh["microsoft"] = i18n.t(lang, "not_connected")
     # Only show a source's box / filter / "as of" line if this person has items from it.
     has = {src: any(i["source"] == src for i in all_ranked)
-           for src in ("moveware", "clickup", "auditrack", "quoterelay", "wa_leads")}
+           for src in ("moveware", "clickup", "auditrack", "consolidation", "quoterelay", "wa_leads")}
     counts = {t: sum(1 for i in ranked if i["tier"] == t and not i["seen"])
               for t in ("urgent", "today", "soon")}
     counts["moveware"] = sum(1 for i in ranked if i["source"] == "moveware" and not i["seen"])

@@ -13,3 +13,13 @@ threads = int(os.environ.get("GUNICORN_THREADS", "8"))
 timeout = int(os.environ.get("GUNICORN_TIMEOUT", "180"))
 graceful_timeout = 30
 keepalive = 5
+
+
+def worker_exit(server, worker):
+    """Record an orderly stop, so the health check does not report it as a
+    crash (9 Nov 2026: Render's restarts were emailed as crashes)."""
+    try:
+        import health
+        health.mark_clean_exit()
+    except Exception:
+        pass

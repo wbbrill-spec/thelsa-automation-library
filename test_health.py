@@ -5,7 +5,7 @@ import health
 def test_restart_for_a_new_version_is_an_update_not_a_crash():
     assert health.classify_previous({}, "abc") == ""
     assert health.classify_previous({"beat_at": 1, "version": "old"}, "new") == "update"
-    assert health.classify_previous({"beat_at": 1, "version": "abc", "clean": True}, "abc") == "update"
+    assert health.classify_previous({"beat_at": 1, "version": "abc", "clean": True}, "abc") == "restart"
     assert health.classify_previous({"beat_at": 1, "version": "abc"}, "abc") == "crash"
 
 
@@ -20,3 +20,15 @@ def test_healthz_is_public_and_reports():
     import app
     r = app.app.test_client().get("/healthz")
     assert r.status_code == 200 and "unexpected_restarts_24h" in r.get_json()
+
+
+def test_one_orderly_restart_is_not_emailed_three_are(monkeypatch, tmp_path):
+    import time
+    sent = []
+    monkeypatch.setattr(health, "_path", lambda: str(tmp_path / "h.json"))
+    monkeypatch.setattr(health, "_send", lambda s, b: sent.append(s))
+    monkeypatch.setattr(health, "_version", lambda: "abc")
+    for i in range(3):
+        health._save({**health._load(), "beat_at": time.time(), "version": "abc", "clean": True})
+        health._on_boot()
+    assert len(sent) == 1 and "3 times" in sent[0]

@@ -116,8 +116,17 @@ _DEEP_LINES = os.environ.get("AUDIT_DEEP_LINES", "1") == "1"
 
 def _raw_json(url: str, timeout: int):
     req = urllib.request.Request(url, headers=_headers(), method="GET")
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        # Close the error's connection now (9 Nov 2026: unclosed 404s piled up
+        # as open connections until garbage collection).
+        try:
+            e.close()
+        except Exception:
+            pass
+        raise
 
 
 def _raw_json_headers(url: str, timeout: int):

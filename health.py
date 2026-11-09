@@ -136,21 +136,38 @@ def _send(subject: str, body: str) -> None:
 
 
 def classify_previous(prev: dict, version_now: str) -> str:
-    """'' (first run / nothing known), 'update' (restart for a new version) or
-    'crash' (same version, the previous run just stopped)."""
+    """'' (first run / nothing known), 'update' (restart for a new version),
+    'restart' (same version, shut down in an orderly way: Render asked the app
+    to stop, e.g. a settings change or Render moving it to another machine) or
+    'crash' (same version, the previous run was killed without warning)."""
     if not prev.get("beat_at"):
         return ""
-    if prev.get("clean"):
-        return "update"
     if (prev.get("version") or "") != (version_now or ""):
         return "update"
+    if prev.get("clean"):
+        return "restart"
     return "crash"
+
+
+# Orderly restarts by Render (9 Nov 2026): a single one costs ~15 seconds and
+# needs nothing from anyone, so Bill is only told when they pile up.
+RESTART_ALERT_N = int(os.environ.get("HEALTH_RESTART_ALERT_N", "3"))
 
 
 def _on_boot() -> None:
     prev = _load()
     kind = classify_previous(prev, _version())
     crashes = [c for c in prev.get("crashes", []) if time.time() - c.get("at", 0) < 7 * 86400]
+    restarts = [r for r in prev.get("restarts", []) if time.time() - r < 86400]
+    if kind == "restart":
+        restarts.append(time.time())
+        if len(restarts) >= RESTART_ALERT_N and not prev.get("restart_alerted_day") == dt.date.today().isoformat():
+            prev["restart_alerted_day"] = dt.date.today().isoformat()
+            _send(f"ALERT: Render restarted the app {len(restarts)} times in 24 hours",
+                  "Render stopped and restarted the FAIM Audit Assistant in an orderly way "
+                  f"{len(restarts)} times in the last 24 hours (no update was deployed). "
+                  "Each restart takes the site down for about 15 seconds.\n\n"
+                  "Claude will look into this.")
     if kind == "crash":
         lim = prev.get("limit")
         c = {"at": time.time(), "last_beat": prev.get("beat_at"), "mem": prev.get("used"),
@@ -164,13 +181,15 @@ def _on_boot() -> None:
               f" ({prev.get('pct')}%)\n"
               f"Highest memory in that run: {_mb(prev.get('peak'))}\n"
               f"Background job running: {prev.get('job') or 'none'}\n"
+              "It was killed without warning (not an orderly restart by Render).\n"
               f"Unexpected restarts in the last 7 days: {len(crashes)}\n\n"
               "Last readings before it stopped (time, MB, what was running):\n"
               + "\n".join(f"  {dt.datetime.fromtimestamp(r['t'], dt.timezone(dt.timedelta(hours=-6))):%H:%M:%S}  "
                            f"{r.get('mb')} MB  job={r.get('job') or '-'}  audit={r.get('audit')}  threads={r.get('threads')}"
                            for r in (prev.get("recent") or [])[-12:]) + "\n\n"
               "The site is back up now. Claude will look into this.")
-    _save({"boot_at": _BOOT, "version": _version(), "crashes": crashes, "prev_recent": prev.get("recent") or [],
+    _save({"boot_at": _BOOT, "version": _version(), "crashes": crashes, "restarts": restarts,
+           "restart_alerted_day": prev.get("restart_alerted_day", ""), "prev_recent": prev.get("recent") or [],
            "last_kind": kind, "summary_day": prev.get("summary_day", "")})
 
 
@@ -191,10 +210,19 @@ def _context() -> dict:
         n = t.name.split("-")[0] if t.name.startswith(("ThreadPoolExecutor", "Thread")) else t.name
         names[n] = names.get(n, 0) + 1
     out["threads"] = names
+    try:   # open files and connections: a leak would stop new visitors getting in
+        out["fds"] = len(os.listdir("/proc/self/fd"))
+    except Exception:
+        pass
     return out
 
 
+_CLOSING = {"v": False}
+
+
 def _beat() -> None:
+    if _CLOSING["v"]:
+        return
     m = memory()
     job = _job()
     if m["used"] > _PEAK["bytes"]:
@@ -227,8 +255,12 @@ def _summary(doc: dict) -> None:
 
 
 def mark_clean_exit() -> None:
+    """Called by gunicorn when the app is told to stop (deploy, settings change,
+    Render moving it). Without this every orderly stop looked like a crash."""
+    _CLOSING["v"] = True
     doc = _load()
     doc["clean"] = True
+    doc["clean_at"] = time.time()
     _save(doc)
 
 

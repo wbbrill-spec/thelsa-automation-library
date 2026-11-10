@@ -159,6 +159,16 @@ def _on_boot() -> None:
     kind = classify_previous(prev, _version())
     crashes = [c for c in prev.get("crashes", []) if time.time() - c.get("at", 0) < 7 * 86400]
     restarts = [r for r in prev.get("restarts", []) if time.time() - r < 86400]
+    stuck = prev.get("stuck")
+    if stuck and time.time() - stuck.get("at", 0) < 3600:
+        kind = "selfheal"
+        when = dt.datetime.fromtimestamp(stuck["at"], dt.timezone(dt.timedelta(hours=-6)))
+        _send("Self-repair: the website stopped answering and restarted itself",
+              f"At {when:%Y-%m-%d %H:%M} (Mexico City) the website stopped answering its own "
+              "check three times in a row, so it restarted itself (the site was back in seconds).\n\n"
+              f"What failed: {stuck.get('why')}\nOpen connections: {stuck.get('fds')}\n\n"
+              "What every part of the app was doing at that moment (for Claude to fix the cause):\n\n"
+              + str(stuck.get("dump") or "")[-8000:])
     if kind == "restart":
         restarts.append(time.time())
         if len(restarts) >= RESTART_ALERT_N and not prev.get("restart_alerted_day") == dt.date.today().isoformat():
@@ -290,6 +300,83 @@ def _loop() -> None:
         time.sleep(BEAT_S)
 
 
+# ── Self-check of the web door (10 Nov 2026) ──────────────────────────────
+# Render's failures say "dial tcp …:10000: i/o timeout": Render could not get
+# a connection to the website while the app's own background threads (this
+# heartbeat, the Moveware reader) were still running normally and memory was
+# low (390 MB of 2 GB). So the part that answers visitors stopped answering.
+# Every 30 s the app now knocks on its own door. If three knocks in a row get
+# no answer, it writes down exactly what every thread was doing (the evidence
+# we have been missing), then restarts its own web worker. The server keeps
+# the port open meanwhile, so the site is back in seconds instead of Render
+# taking minutes to notice and replace the whole machine.
+WATCH_EVERY_S = int(os.environ.get("HEALTH_SELFCHECK_S", "30"))
+WATCH_FAILS = int(os.environ.get("HEALTH_SELFCHECK_FAILS", "3"))
+WATCH_TIMEOUT_S = float(os.environ.get("HEALTH_SELFCHECK_TIMEOUT_S", "20"))
+
+
+def knock(port: int, timeout: float = WATCH_TIMEOUT_S) -> str:
+    """'' if the website answered; otherwise what failed ('connect: …' or
+    'no reply: …')."""
+    import socket
+    try:
+        s = socket.create_connection(("127.0.0.1", port), timeout=timeout)
+    except Exception as e:
+        return f"connect: {type(e).__name__}: {e}"[:200]
+    try:
+        s.settimeout(timeout)
+        s.sendall(b"GET /healthz HTTP/1.0\r\nHost: localhost\r\n\r\n")
+        head = s.recv(64)
+        return "" if head.startswith(b"HTTP/") else f"no reply: got {head[:20]!r}"
+    except Exception as e:
+        return f"no reply: {type(e).__name__}: {e}"[:200]
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
+
+
+def thread_dump() -> str:
+    """What every thread is doing right now (file, line, code)."""
+    import sys
+    import traceback
+    names = {t.ident: t.name for t in threading.enumerate()}
+    out = []
+    for ident, frame in sys._current_frames().items():
+        out.append(f"--- thread {names.get(ident, ident)}")
+        out += [ln.rstrip() for ln in traceback.format_stack(frame)[-12:]]
+    return "\n".join(out)
+
+
+def _watch() -> None:
+    port = int(os.environ.get("PORT", "0") or 0)
+    if not port:
+        return
+    time.sleep(180)                               # let the site finish starting
+    fails = []
+    while True:
+        why = knock(port)
+        if not why:
+            fails = []
+        else:
+            fails.append(why)
+            if len(fails) >= WATCH_FAILS:
+                dump = thread_dump()
+                print("SELF-CHECK FAILED: the website stopped answering:", fails, flush=True)
+                print(dump, flush=True)
+                try:
+                    fds = len(os.listdir("/proc/self/fd"))
+                except Exception:
+                    fds = None
+                doc = _load()
+                doc["stuck"] = {"at": time.time(), "why": fails, "fds": fds, "dump": dump[-12000:]}
+                doc["clean"] = True                  # our own restart, not a crash
+                _save(doc)
+                os._exit(3)                          # gunicorn starts a fresh worker
+        time.sleep(WATCH_EVERY_S)
+
+
 def start() -> None:
     """Once per process, outside tests."""
     global _STARTED
@@ -309,6 +396,7 @@ def start() -> None:
     except Exception:
         pass
     threading.Thread(target=_loop, daemon=True, name="health").start()
+    threading.Thread(target=_watch, name="selfcheck", daemon=True).start()
 
 
 def status() -> dict:

@@ -32,3 +32,21 @@ def test_one_orderly_restart_is_not_emailed_three_are(monkeypatch, tmp_path):
         health._save({**health._load(), "beat_at": time.time(), "version": "abc", "clean": True})
         health._on_boot()
     assert len(sent) == 1 and "3 times" in sent[0]
+
+
+def test_knock_tells_answer_from_no_answer():
+    import socket, threading
+    srv = socket.socket(); srv.bind(("127.0.0.1", 0)); srv.listen(5)
+    port = srv.getsockname()[1]
+    def serve():
+        c, _ = srv.accept(); c.recv(100); c.sendall(b"HTTP/1.0 200 OK\r\n\r\n"); c.close()
+    threading.Thread(target=serve, daemon=True).start()
+    assert health.knock(port, 5) == ""
+    # a listener that never answers
+    assert health.knock(port, 0.5).startswith("no reply")
+    srv.close()
+    assert health.knock(port, 0.5).startswith("connect")
+
+
+def test_thread_dump_names_threads():
+    assert "--- thread MainThread" in health.thread_dump()

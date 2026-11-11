@@ -9,6 +9,9 @@ We read only the 12 TMS coordinator mailboxes and only "FINAL CHARGES" threads.
 Credential (app-only, client_credentials). No secret is ever hard-coded. It is
 resolved at import from env, preferring a dedicated app but FALLING BACK to the
 engine's existing Graph credential so nothing new needs configuring:
+    0. MAILBOX_APP_CLIENT_SECRET (+ optional MAILBOX_APP_CLIENT_ID / MAILBOX_APP_TENANT_ID):
+       "TMS Coordinator Automation" (07ee6f4e-…), Mail.Read limited by RBAC to the
+       coordinators' mailboxes — the intended production credential (11 Nov 2026)
     1. MS_TENANT_ID / MS_CLIENT_ID / MS_CLIENT_SECRET   (dedicated app, if secret set)
     2. GRAPH_TENANT_ID / GRAPH_CLIENT_ID / GRAPH_CLIENT_SECRET   (the SAME app-only
        credential engine/mailer.py already uses to read/write employee mailboxes)
@@ -25,6 +28,7 @@ import requests
 
 MS_TENANT_DEFAULT = "b054f5d3-0c08-46c0-8e80-cc38cbd9e58e"
 MS_CLIENT_DEFAULT = "8210a2b4-4bc5-4eef-abbc-03ac092ff11f"
+MAILBOX_APP_CLIENT_DEFAULT = "07ee6f4e-bdca-45d7-9d4f-2decf4708e43"  # "TMS Coordinator Automation"
 
 
 def _resolve_creds():
@@ -39,6 +43,15 @@ def _resolve_creds():
     Each option is a MATCHED triplet — we never mix a secret from one app with the
     client id of another.
     """
+    # 0. The dedicated mailbox-reading app César created on 5 Nov 2026, "TMS Coordinator
+    #    Automation" (07ee6f4e-…): application Mail.Read, limited by Exchange RBAC for
+    #    Applications to the TMS coordinators' mailboxes. Its own setting names so it can
+    #    never overwrite the sign-in secret (MS_CLIENT_SECRET, shared with the TMS dashboard)
+    #    or the mail-sending secret (GRAPH_CLIENT_SECRET). Bill, 11 Nov 2026.
+    if os.environ.get("MAILBOX_APP_CLIENT_SECRET"):
+        return (os.environ.get("MAILBOX_APP_TENANT_ID", MS_TENANT_DEFAULT).strip(),
+                os.environ.get("MAILBOX_APP_CLIENT_ID", MAILBOX_APP_CLIENT_DEFAULT).strip(),
+                os.environ["MAILBOX_APP_CLIENT_SECRET"].strip())
     if os.environ.get("MS_CLIENT_SECRET"):
         return (os.environ.get("MS_TENANT_ID", MS_TENANT_DEFAULT).strip(),
                 os.environ.get("MS_CLIENT_ID", MS_CLIENT_DEFAULT).strip(),
@@ -53,6 +66,10 @@ def _resolve_creds():
 
 
 MS_TENANT_ID, MS_CLIENT_ID, MS_CLIENT_SECRET = _resolve_creds()
+# Which app the mailbox reader authenticates as (ids only, never the secret) — for diagnostics.
+CRED_SOURCE = ('mailbox-app' if os.environ.get('MAILBOX_APP_CLIENT_SECRET') else
+               'sign-in-app' if os.environ.get('MS_CLIENT_SECRET') else
+               'mail-app' if os.environ.get('GRAPH_CLIENT_SECRET') else 'none')
 
 GRAPH = "https://graph.microsoft.com/v1.0"
 _TIMEOUT = 20

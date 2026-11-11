@@ -1973,6 +1973,35 @@ def audit_financecheck():
     return jsonify(res)
 
 
+@audit_bp.route("/audit/mailbox-check")
+@_login_required
+def audit_mailbox_check():
+    """Signed-in, read-only: can the mailbox-reading app open each TMS coordinator mailbox?
+    Reads one message id per mailbox (no subjects, bodies or attachments). Shows which app is
+    in use (ids only, never a secret). Added 11 Nov 2026 for the "TMS Coordinator Automation"
+    app (MAILBOX_APP_CLIENT_SECRET)."""
+    from flask import jsonify
+    import requests, ms_graph
+    out = {"app": ms_graph.CRED_SOURCE, "client_id": ms_graph.MS_CLIENT_ID,
+           "token_ok": False, "mailboxes": {}, "ok": 0, "forbidden": 0, "other": 0}
+    h = ms_graph._headers()
+    out["token_ok"] = bool(h)
+    if not h:
+        return jsonify(out)
+    for mbx in ms_graph.TMS_COORDINATORS:
+        try:
+            r = requests.get(f"{ms_graph.GRAPH}/users/{mbx}/messages",
+                             params={"$top": "1", "$select": "id"}, headers=h, timeout=20)
+            code = r.status_code
+        except Exception as e:  # network error: report, don't guess
+            code = f"error: {type(e).__name__}"
+        out["mailboxes"][mbx] = code
+        if code == 200: out["ok"] += 1
+        elif code == 403: out["forbidden"] += 1
+        else: out["other"] += 1
+    return jsonify(out)
+
+
 @audit_bp.route("/audit/costcheck")
 def audit_costcheck():
     """PUBLIC, read-only status check: has MoveWare's cost-fields update reached

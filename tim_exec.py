@@ -40,7 +40,7 @@ LINES = [
     ("corp_exp",     "Corporate expense",      "Gastos corporativos",        "cost", False),
     ("total_exp",    "Total expense",          "Gastos totales",             "cost", True),
     ("op_profit",    "Operating profit",       "Utilidad de operación",      "rev",  True),
-    ("cif",          "Financial result (CIF)", "Resultado financiero (CIF)", "cost", False),
+    ("cif",          "Net financing cost (interest & FX)", "Resultado financiero (CIF)", "cost", False),
     ("taxes",        "Taxes",                  "Impuestos",                  "cost", False),
     ("net",          "Net profit",             "Utilidad neta",              "rev",  True),
 ]
@@ -51,6 +51,8 @@ CLOSE = {
     "period_en": "September 2026",
     "period_es": "Septiembre 2026",
     "source": "Rogelio Franco (Finance) monthly close, 9 Oct 2026",
+    "source_en": "Finance monthly statement, September 2026 (Rogelio Franco, 9 Oct 2026)",
+    "source_es": "Estado de resultados de Finanzas, septiembre 2026 (Rogelio Franco, 9 oct 2026)",
     "fx_note_en": "USD at Finance's blended rate (MXN ≈ 18.1 at Sept month-end).",
     "fx_note_es": "USD al tipo combinado de Finanzas (MXN ≈ 18.1 al cierre de septiembre).",
     "units": {
@@ -129,16 +131,18 @@ SALES = {
     "period_en": "October 2026",
     "period_es": "Octubre 2026",
     "source": "Rogelio Franco (Finance), Resumen Ventas Netas, Oct 2026 close, 2 Nov 2026",
+    "source_en": "Finance net sales report, October 2026 (Rogelio Franco, 2 Nov 2026)",
+    "source_es": "Resumen Ventas Netas de Finanzas, octubre 2026 (Rogelio Franco, 2 nov 2026)",
     # each period: usd = [actual, budget], mxn = [actual, prior year]  (thousands);
     # October's USD to two decimals from TIM's scorecard (same figures, less rounding)
     "lines": {
-        "mud": {"en": "Consolidados Mudanza", "es": "Consolidados Mudanza", "unit": "cons",
+        "mud": {"en": "Consolidated: household moves", "es": "Consolidados Mudanza", "unit": "cons",
                 "month": {"usd": [111.66, 92.66], "mxn": [2100.9, 1456.6], "py_usd": 83.05},
                 "ytd": {"usd": [1057.5, 1160.3], "mxn": [18675.2, 14167.2]}},
-        "com": {"en": "Consolidados Comercial", "es": "Consolidados Comercial", "unit": "cons",
+        "com": {"en": "Consolidated: commercial", "es": "Consolidados Comercial", "unit": "cons",
                 "month": {"usd": [97.64, 108.0], "mxn": [1837.2, 606.5], "py_usd": 32.70},
                 "ytd": {"usd": [943.9, 691.2], "mxn": [16590.9, 9181.5]}},
-        "imp": {"en": "Import Muebles", "es": "Importación Muebles", "unit": "imp",
+        "imp": {"en": "Furniture import", "es": "Importación Muebles", "unit": "imp",
                 "month": {"usd": [25.99, 40.63], "mxn": [488.2, 109.1], "py_usd": 5.88},
                 "ytd": {"usd": [138.8, 297.8], "mxn": [2458.8, 4572.2]}},
     },
@@ -154,6 +158,8 @@ SALES = {
 SCORECARD = {
     "period_en": "October 2026", "period_es": "Octubre 2026",
     "source": "TIM scorecard, Cierre Octubre 2026 (Juan Pastrana)",
+    "source_en": "TIM scorecard, October 2026 (Juan Pastrana)",
+    "source_es": "Scorecard TIM, Cierre Octubre 2026 (Juan Pastrana)",
     "lines": [
         {"k": "agentes", "en": "Agents", "es": "Agentes", "unit": "cons", "group": "Mudanzas", "v": [66.44, 52.66, 55.94]},
         {"k": "texas", "en": "Texas", "es": "Texas", "unit": "cons", "group": "Mudanzas", "v": [30.48, 20.00, 6.35]},
@@ -168,6 +174,8 @@ SCORECARD = {
 # Mudanzas (HHG) = agents + Texas + rest of USA; Consolidados = HHG + commercial.
 BUDGET_2026 = {
     "source": "PRESUPUESTO TOTAL TIM 2026 (final, July)",
+    "source_en": "TIM 2026 budget (final, July)",
+    "source_es": "Presupuesto Total TIM 2026 (final, julio)",
     "agents":     [37951.38, 49106.40, 47723.75, 47723.75, 75225.81, 74697.27, 91934.81, 104575.61, 82748.25, 52658.50, 43029.84, 42127.26],
     "texas":      [15000, 18000, 20000, 20000, 25000, 35000, 35000, 35000, 25000, 20000, 15000, 17000],
     "resto_usa":  [15000, 18000, 20000, 20000, 25000, 35000, 35000, 35000, 25000, 20000, 15000, 17000],
@@ -277,6 +285,7 @@ def render_page(close=CLOSE, sales=SALES):
         "lines": [{"k": k, "en": en, "es": es, "kind": kind, "total": tot}
                   for k, en, es, kind, tot in LINES],
         "meta": {k: close[k] for k in ("period_en", "period_es", "source", "fx_note_en", "fx_note_es")},
+        "src_en": close.get("source_en", close["source"]), "src_es": close.get("source_es", close["source"]),
         "sales": {"units": sales_units(sales), "period_en": sales["period_en"], "period_es": sales["period_es"],
                   "source": sales["source"],
                   "lines": {k: {"en": v["en"], "es": v["es"], "unit": v["unit"], "month": v["month"], "ytd": v["ytd"]}
@@ -284,7 +293,9 @@ def render_page(close=CLOSE, sales=SALES):
                   "fy": full_year(sales),
                   "score": {"lines": SCORECARD["lines"], "stated": SCORECARD["stated"],
                             "period_en": SCORECARD["period_en"], "period_es": SCORECARD["period_es"]},
-                  "sources": [sales["source"], SCORECARD["source"], BUDGET_2026["source"]]},
+                  "sources": [sales["source"], SCORECARD["source"], BUDGET_2026["source"]],
+                  "sources_en": [x.get("source_en", x["source"]) for x in (sales, SCORECARD, BUDGET_2026)],
+                  "sources_es": [x.get("source_es", x["source"]) for x in (sales, SCORECARD, BUDGET_2026)]},
     }
     return PAGE.replace("/*__DATA__*/null", json.dumps(data).replace("</", "<\\/"))
 
@@ -357,7 +368,7 @@ PAGE = r"""<!DOCTYPE html>
       · <span class="en">Profit &amp; loss through</span><span class="es">Estado de resultados a</span> <b id="perLabel"></b></div>
   </div>
   <div class="controls">
-    <div class="seg" id="unitSeg"><button data-v="total"><span class="en">Total TIM</span><span class="es">Total TIM</span></button><button data-v="cons">Consolidados</button><button data-v="imp">Import Muebles</button></div>
+    <div class="seg" id="unitSeg"><button data-v="total"><span class="en">Total TIM</span><span class="es">Total TIM</span></button><button data-v="cons"><span class="en">Consolidated shipments</span><span class="es">Consolidados</span></button><button data-v="imp"><span class="en">Furniture import</span><span class="es">Import Muebles</span></button></div>
     <div class="seg" id="perSeg"><button data-v="ytd"><span class="en">YTD</span><span class="es">Acumulado</span></button><button data-v="month"><span class="en">Month</span><span class="es">Mes</span></button></div>
     <div class="seg" id="cmpSeg"><button data-v="1"><span class="en">vs Budget</span><span class="es">vs Presupuesto</span></button><button data-v="2"><span class="en">vs 2025</span><span class="es">vs 2025</span></button></div>
     <div class="seg" id="langSeg"><button data-v="en">EN</button><button data-v="es">ES</button></div>
@@ -383,9 +394,9 @@ PAGE = r"""<!DOCTYPE html>
   <h2><span class="en">What the numbers say</span><span class="es">Lectura de los números</span></h2>
   <div class="tile">
     <ul class="read en">
-      <li><b>October revenue was on budget overall:</b> TIM $235.3K vs $241.3K budget (−2.5%), and $2.14M vs $2.15M for the year (−0.4%). Consolidados beat October's budget by 4%: agents +26% and Texas +52% over budget, rest of USA −26% and commercial −10% under. Import Muebles came in 36% under. Against October 2025, TIM's revenue nearly doubled (+93% in dollars). To hit the 2026 budget, November and December need $349K, $9K more than budgeted for those months.</li>
-      <li><b>Consolidados is the engine.</b> YTD revenue is up 52% on 2025 and net profit is close to double both budget and last year.</li>
-      <li><b>Import Muebles is losing money.</b> YTD net is −$98.6K, worse than budget (−$62.7K) and 2025 (−$58.0K). In September, cost of sales ran at 210% of revenue.</li>
+      <li><b>October revenue was on budget overall:</b> TIM $235.3K vs $241.3K budget (−2.5%), and $2.14M vs $2.15M for the year (−0.4%). Consolidated shipments beat October's budget by 4%: agents +26% and Texas +52% over budget, rest of USA −26% and commercial −10% under. Furniture import came in 36% under. Against October 2025, TIM's revenue nearly doubled (+93% in dollars). To hit the 2026 budget, November and December need $349K, $9K more than budgeted for those months.</li>
+      <li><b>Consolidated shipments are the engine.</b> YTD revenue is up 52% on 2025 and net profit is close to double both budget and last year.</li>
+      <li><b>Furniture import is losing money.</b> YTD net is −$98.6K, worse than budget (−$62.7K) and 2025 (−$58.0K). In September, cost of sales ran at 210% of revenue.</li>
       <li><b>Read margin and profit, not individual cost lines, against budget.</b> The budget put almost all cost in "Direct cost" and "Selling expense"; actuals spread it across other lines (including other-company lines budgeted at zero). Large line variances are mostly reclassification, not savings.</li>
     </ul>
     <ul class="read es">
@@ -413,7 +424,7 @@ PAGE = r"""<!DOCTYPE html>
   if (['1','2'].indexOf(S.cmp) < 0) S.cmp = '1';
   if (['en','es'].indexOf(S.lang) < 0) S.lang = 'en';
   var KIND = {}; D.lines.forEach(function(l){ KIND[l.k] = l.kind; });
-  var UNAME = {total:{en:'Total TIM',es:'Total TIM'}, cons:{en:'Consolidados',es:'Consolidados'}, imp:{en:'Import Muebles',es:'Import Muebles'}};
+  var UNAME = {total:{en:'Total TIM',es:'Total TIM'}, cons:{en:'Consolidated shipments',es:'Consolidados'}, imp:{en:'Furniture import',es:'Import Muebles'}};
 
   function T(en, es){ return S.lang === 'es' ? es : en; }
   function fmt(v){ var f = new Intl.NumberFormat(S.lang==='es'?'es-MX':'en-US',{maximumFractionDigits:0});
@@ -517,21 +528,21 @@ PAGE = r"""<!DOCTYPE html>
     document.getElementById('salesNote').innerHTML = T(
       '<b>Revenue only</b>, from Finance\'s monthly sales report, TIM\'s scorecard and the 2026 budget (USD, thousands). Costs and profit come from the full monthly statement and are shown below through '+D.meta.period_en+' until the '+SA.period_en+' statement arrives. '+
       (S.cmp==='2' && S.per==='ytd' ? 'Year to date, 2025 is available only in pesos, so that comparison is peso growth. ' : '')+
-      ' <b>Check:</b> through September this report puts Consolidados revenue about $29K below the September statement; the '+SA.period_en+' statement will confirm which is right.',
+      ' <b>Check:</b> through September this report puts consolidated-shipments revenue about $29K below the September statement; the '+SA.period_en+' statement will confirm which is right.',
       '<b>Solo ingresos</b>, del reporte mensual de ventas de Finanzas, el scorecard de TIM y el presupuesto 2026 (USD, miles). Costos y utilidad vienen del estado de resultados mensual y se muestran abajo a '+D.meta.period_es+' hasta que llegue el de '+SA.period_es+'. '+
       (S.cmp==='2' && S.per==='ytd' ? 'En el acumulado, 2025 solo está en pesos, así que esa comparación es crecimiento en pesos. ' : '')+
       ' <b>Revisión:</b> a septiembre este reporte muestra ingresos de Consolidados unos $29K por debajo del estado de septiembre; el estado de '+SA.period_es+' confirmará cuál es correcto.');
     document.getElementById('salesKpis').innerHTML = salesKpis();
     document.getElementById('salesFy').innerHTML = fyTiles();
     document.getElementById('scoreTbl').innerHTML = scoreTable();
-    document.getElementById('salesSrc').textContent = SA.sources.join(' · ');
+    document.getElementById('salesSrc').textContent = (S.lang==='es' ? SA.sources_es : SA.sources_en).join(' · ');
     document.getElementById('fxNote').innerHTML = '<b>'+UNAME[S.unit][S.lang]+' · '+perTxt+'</b> — '+(S.lang==='es'?D.meta.fx_note_es:D.meta.fx_note_en)+
       ' '+T('Green = favorable, red = unfavorable.','Verde = favorable, rojo = desfavorable.');
     document.getElementById('kpis').innerHTML = kpis(U);
     document.getElementById('barsRev').innerHTML = bars('total_rev');
     document.getElementById('barsNet').innerHTML = bars('net');
     document.getElementById('pl').innerHTML = table(U);
-    document.getElementById('src').textContent = D.meta.source;
+    document.getElementById('src').textContent = S.lang==='es' ? D.src_es : D.src_en;
     [['unitSeg','unit'],['perSeg','per'],['cmpSeg','cmp'],['langSeg','lang']].forEach(function(c){
       document.querySelectorAll('#'+c[0]+' button').forEach(function(b){ b.classList.toggle('on', b.getAttribute('data-v') === S[c[1]]); });
     });

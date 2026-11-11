@@ -118,6 +118,104 @@ CLOSE = {
 }
 
 
+# Latest revenue — Rogelio's "Resumen Ventas Netas" (group sales report), which
+# arrives before the full statement. Revenue only, in THOUSANDS: USD actual and
+# budget; MXN actual and prior year (the report gives 2025 only in pesos, so the
+# "vs 2025" view for this section is a peso growth rate, never a USD figure).
+# When a new month's report arrives, replace SALES; when its full statement
+# arrives, replace CLOSE too. test_tim_exec.py checks the lines add up to the
+# report's own TIM totals.
+SALES = {
+    "period_en": "October 2026",
+    "period_es": "Octubre 2026",
+    "source": "Rogelio Franco (Finance), Resumen Ventas Netas, Oct 2026 close, 2 Nov 2026",
+    # each period: usd = [actual, budget], mxn = [actual, prior year]  (thousands);
+    # October's USD to two decimals from TIM's scorecard (same figures, less rounding)
+    "lines": {
+        "mud": {"en": "Consolidados Mudanza", "es": "Consolidados Mudanza", "unit": "cons",
+                "month": {"usd": [111.66, 92.66], "mxn": [2100.9, 1456.6], "py_usd": 83.05},
+                "ytd": {"usd": [1057.5, 1160.3], "mxn": [18675.2, 14167.2]}},
+        "com": {"en": "Consolidados Comercial", "es": "Consolidados Comercial", "unit": "cons",
+                "month": {"usd": [97.64, 108.0], "mxn": [1837.2, 606.5], "py_usd": 32.70},
+                "ytd": {"usd": [943.9, 691.2], "mxn": [16590.9, 9181.5]}},
+        "imp": {"en": "Import Muebles", "es": "Importación Muebles", "unit": "imp",
+                "month": {"usd": [25.99, 40.63], "mxn": [488.2, 109.1], "py_usd": 5.88},
+                "ytd": {"usd": [138.8, 297.8], "mxn": [2458.8, 4572.2]}},
+    },
+    # the report's own TIM totals, for the tie-out test
+    "stated_tim": {"month": {"usd": [235.29, 241.28], "mxn": [4426.2, 2172.2], "py_usd": 121.63},
+                   "ytd": {"usd": [2140.2, 2149.4], "mxn": [37724.9, 27920.9]}},
+}
+
+
+# TIM's own monthly scorecard (Juan Pastrana) — the month's revenue by customer
+# type, thousands of USD: [actual, budget, same month 2025]. "Mudanzas" is the
+# sum of Agentes + Texas + Resto USA and equals Consolidados Mudanza above.
+SCORECARD = {
+    "period_en": "October 2026", "period_es": "Octubre 2026",
+    "source": "TIM scorecard, Cierre Octubre 2026 (Juan Pastrana)",
+    "lines": [
+        {"k": "agentes", "en": "Agents", "es": "Agentes", "unit": "cons", "group": "Mudanzas", "v": [66.44, 52.66, 55.94]},
+        {"k": "texas", "en": "Texas", "es": "Texas", "unit": "cons", "group": "Mudanzas", "v": [30.48, 20.00, 6.35]},
+        {"k": "resto", "en": "Rest of USA", "es": "Resto USA", "unit": "cons", "group": "Mudanzas", "v": [14.75, 20.00, 20.76]},
+        {"k": "comercial", "en": "Commercial", "es": "Comercial", "unit": "cons", "group": None, "v": [97.64, 108.00, 32.70]},
+        {"k": "imp", "en": "Furniture import", "es": "Importación de Muebles", "unit": "imp", "group": None, "v": [25.99, 40.63, 5.88]},
+    ],
+    "stated": {"Mudanzas": [111.66, 92.66, 83.05], "Total": [235.29, 241.28, 121.63]},
+}
+
+# TIM 2026 budget by stream and month, USD (PRESUPUESTO TOTAL TIM 2026 FINAL, July).
+# Mudanzas (HHG) = agents + Texas + rest of USA; Consolidados = HHG + commercial.
+BUDGET_2026 = {
+    "source": "PRESUPUESTO TOTAL TIM 2026 (final, July)",
+    "agents":     [37951.38, 49106.40, 47723.75, 47723.75, 75225.81, 74697.27, 91934.81, 104575.61, 82748.25, 52658.50, 43029.84, 42127.26],
+    "texas":      [15000, 18000, 20000, 20000, 25000, 35000, 35000, 35000, 25000, 20000, 15000, 17000],
+    "resto_usa":  [15000, 18000, 20000, 20000, 25000, 35000, 35000, 35000, 25000, 20000, 15000, 17000],
+    "commercial": [27000, 27000, 65000, 39050, 62900, 81000, 88500, 87750, 105000, 108000, 64800, 54000],
+    "furniture":  [16500, 26490, 32980, 29820, 30250, 28250, 26750, 29000, 37150, 40625, 37625, 34375],
+    "stated_total_year": 2489317.62,
+}
+SALES_MONTH = 10  # the month SALES covers (October)
+
+
+def budget_by_unit(b=BUDGET_2026):
+    """Monthly 2026 budget (USD) for Total / Consolidados / Import Muebles."""
+    cons = [b["agents"][i] + b["texas"][i] + b["resto_usa"][i] + b["commercial"][i] for i in range(12)]
+    imp = list(b["furniture"])
+    return {"cons": cons, "imp": imp, "total": [cons[i] + imp[i] for i in range(12)]}
+
+
+def full_year(sales=SALES, month=SALES_MONTH):
+    """Full-year view per unit, thousands USD: budget for the year, actual so
+    far, budget for the months left, and what those months need to reach it."""
+    bu, su = budget_by_unit(), sales_units(sales)
+    out = {}
+    for unit in ("total", "cons", "imp"):
+        year = sum(bu[unit]) / 1000
+        rest = sum(bu[unit][month:]) / 1000
+        actual = su[unit]["ytd"]["usd"][0]
+        out[unit] = {"year": round(year, 1), "actual": actual, "rest_budget": round(rest, 1),
+                     "needed": round(year - actual, 1), "months_left": 12 - month}
+    return out
+
+
+def sales_units(sales=SALES):
+    """Roll the report's lines up to Total / Consolidados / Import Muebles."""
+    out = {}
+    for unit, members in (("total", ("mud", "com", "imp")), ("cons", ("mud", "com")), ("imp", ("imp",))):
+        out[unit] = {per: {cur: [round(sum(sales["lines"][m][per][cur][i] for m in members), 2) for i in range(2)]
+                           for cur in ("usd", "mxn")}
+                     for per in ("month", "ytd")}
+    # Total TIM shows the report's own stated totals, so the dashboard matches
+    # Finance's figure exactly (the lines can differ from it by 0.1 in rounding).
+    out["total"] = {per: {cur: list(sales["stated_tim"][per][cur]) for cur in ("usd", "mxn")}
+                    for per in ("month", "ytd")}
+    out["total"]["month"]["py_usd"] = sales["stated_tim"]["month"]["py_usd"]
+    out["cons"]["month"]["py_usd"] = round(sum(sales["lines"][m]["month"]["py_usd"] for m in ("mud", "com")), 2)
+    out["imp"]["month"]["py_usd"] = sales["lines"]["imp"]["month"]["py_usd"]
+    return out
+
+
 def with_total(close=CLOSE):
     """Add the 'total' unit (Consolidados + Import Muebles), line by line."""
     units = dict(close["units"])
@@ -173,12 +271,20 @@ def _restricted(f):
     return wrapped
 
 
-def render_page(close=CLOSE):
+def render_page(close=CLOSE, sales=SALES):
     data = {
         "units": with_total(close),
         "lines": [{"k": k, "en": en, "es": es, "kind": kind, "total": tot}
                   for k, en, es, kind, tot in LINES],
         "meta": {k: close[k] for k in ("period_en", "period_es", "source", "fx_note_en", "fx_note_es")},
+        "sales": {"units": sales_units(sales), "period_en": sales["period_en"], "period_es": sales["period_es"],
+                  "source": sales["source"],
+                  "lines": {k: {"en": v["en"], "es": v["es"], "unit": v["unit"], "month": v["month"], "ytd": v["ytd"]}
+                            for k, v in sales["lines"].items()},
+                  "fy": full_year(sales),
+                  "score": {"lines": SCORECARD["lines"], "stated": SCORECARD["stated"],
+                            "period_en": SCORECARD["period_en"], "period_es": SCORECARD["period_es"]},
+                  "sources": [sales["source"], SCORECARD["source"], BUDGET_2026["source"]]},
     }
     return PAGE.replace("/*__DATA__*/null", json.dumps(data).replace("</", "<\\/"))
 
@@ -247,7 +353,8 @@ PAGE = r"""<!DOCTYPE html>
   <div>
     <h1><span class="en">TIM Executive</span><span class="es">Tablero Ejecutivo</span> <span class="accent"><span class="en">Dashboard</span><span class="es">TIM</span></span></h1>
     <div class="meta"><a class="back" href="/">← <span class="en">Automation Library</span><span class="es">Biblioteca de automatizaciones</span></a>
-      · <span class="en">Finance close</span><span class="es">Cierre de Finanzas</span> · <b id="perLabel"></b></div>
+      · <span class="en">Revenue through</span><span class="es">Ingresos a</span> <b id="salesLabel"></b>
+      · <span class="en">Profit &amp; loss through</span><span class="es">Estado de resultados a</span> <b id="perLabel"></b></div>
   </div>
   <div class="controls">
     <div class="seg" id="unitSeg"><button data-v="total"><span class="en">Total TIM</span><span class="es">Total TIM</span></button><button data-v="cons">Consolidados</button><button data-v="imp">Import Muebles</button></div>
@@ -257,9 +364,14 @@ PAGE = r"""<!DOCTYPE html>
   </div>
 </header>
 <main>
-  <div class="note" id="fxNote"></div>
+  <h2><span class="en">Latest revenue</span><span class="es">Ingresos más recientes</span> · <span id="salesPer"></span></h2>
+  <div class="note" id="salesNote"></div>
+  <div class="grid" id="salesKpis"></div>
+  <div class="grid" id="salesFy" style="margin-top:14px"></div>
+  <div class="tbl"><table id="scoreTbl"></table></div>
 
-  <h2><span class="en">Headline</span><span class="es">Resumen</span></h2>
+  <h2><span class="en">Profit &amp; loss</span><span class="es">Estado de resultados</span> · <span id="plPer"></span></h2>
+  <div class="note" id="fxNote"></div>
   <div class="grid" id="kpis"></div>
 
   <h2><span class="en">By business unit</span><span class="es">Por unidad de negocio</span></h2>
@@ -271,21 +383,23 @@ PAGE = r"""<!DOCTYPE html>
   <h2><span class="en">What the numbers say</span><span class="es">Lectura de los números</span></h2>
   <div class="tile">
     <ul class="read en">
+      <li><b>October revenue was on budget overall:</b> TIM $235.3K vs $241.3K budget (−2.5%), and $2.14M vs $2.15M for the year (−0.4%). Consolidados beat October's budget by 4%: agents +26% and Texas +52% over budget, rest of USA −26% and commercial −10% under. Import Muebles came in 36% under. Against October 2025, TIM's revenue nearly doubled (+93% in dollars). To hit the 2026 budget, November and December need $349K, $9K more than budgeted for those months.</li>
       <li><b>Consolidados is the engine.</b> YTD revenue is up 52% on 2025 and net profit is close to double both budget and last year.</li>
       <li><b>Import Muebles is losing money.</b> YTD net is −$98.6K, worse than budget (−$62.7K) and 2025 (−$58.0K). In September, cost of sales ran at 210% of revenue.</li>
       <li><b>Read margin and profit, not individual cost lines, against budget.</b> The budget put almost all cost in "Direct cost" and "Selling expense"; actuals spread it across other lines (including other-company lines budgeted at zero). Large line variances are mostly reclassification, not savings.</li>
     </ul>
     <ul class="read es">
+      <li><b>Los ingresos de octubre quedaron en presupuesto:</b> TIM $235.3K vs $241.3K presupuestado (−2.5%), y $2.14M vs $2.15M en el año (−0.4%). Consolidados superó el presupuesto de octubre en 4%: agentes +26% y Texas +52% sobre presupuesto; resto USA −26% y comercial −10% abajo. Import Muebles quedó 36% abajo. Contra octubre 2025, los ingresos de TIM casi se duplicaron (+93% en dólares). Para cumplir el presupuesto 2026, noviembre y diciembre necesitan $349K, $9K más de lo presupuestado para esos meses.</li>
       <li><b>Consolidados es el motor.</b> Los ingresos acumulados crecen 52% vs 2025 y la utilidad neta casi duplica tanto el presupuesto como el año anterior.</li>
       <li><b>Import Muebles pierde dinero.</b> La utilidad neta acumulada es −$98.6K, peor que el presupuesto (−$62.7K) y que 2025 (−$58.0K). En septiembre el costo de ventas fue 210% de los ingresos.</li>
       <li><b>Contra presupuesto, lea el margen y la utilidad, no cada línea de costo.</b> El presupuesto cargó casi todo el costo en "Costo directo" y "Gastos de venta"; el real lo reparte en otras líneas (incluidas las de otras empresas, presupuestadas en cero). Las grandes variaciones por línea son sobre todo reclasificación, no ahorro.</li>
     </ul>
   </div>
 
-  <h2><span class="en">Profit &amp; loss</span><span class="es">Estado de resultados</span></h2>
+  <h2><span class="en">Profit &amp; loss detail</span><span class="es">Detalle del estado de resultados</span> · <span id="plPer2"></span></h2>
   <div class="tbl"><table id="pl"></table></div>
 
-  <footer><span class="en">Source:</span><span class="es">Fuente:</span> <span id="src"></span></footer>
+  <footer><span class="en">Sources:</span><span class="es">Fuentes:</span> <span id="salesSrc"></span> · <span id="src"></span></footer>
 </main>
 <script>
 (function(){
@@ -341,13 +455,76 @@ PAGE = r"""<!DOCTYPE html>
     });
     return h;
   }
+  var SA = D.sales;
+  var SPARTS = {total:['mud','com','imp'], cons:['mud','com'], imp:['imp']};
+  function fmtK(v){ var f = new Intl.NumberFormat(S.lang==='es'?'es-MX':'en-US',{minimumFractionDigits:1,maximumFractionDigits:1});
+    return (v < 0 ? '−' : '') + '$' + f.format(Math.abs(v)) + 'K'; }
+  function sfmtK(v){ return (v > 0 ? '+' : '') + fmtK(v); }
+  function sTile(label, X){
+    var a = X.usd[0], sub;
+    if (S.cmp === '1') {
+      var b = X.usd[1], d = Math.round((a - b) * 10) / 10;
+      sub = '<span class="'+(d>0?'good':(d<0?'bad':''))+'"><b>'+sfmtK(d)+'</b> ('+pfmt(pct(a,b))+')</span> '+T('vs budget','vs presupuesto')+' ('+fmtK(b)+')';
+    } else if (X.py_usd !== undefined) {
+      var p = X.py_usd, d2 = Math.round((a - p) * 10) / 10;
+      sub = '<span class="'+(d2>0?'good':(d2<0?'bad':''))+'"><b>'+sfmtK(d2)+'</b> ('+pfmt(pct(a,p))+')</span> '+T('vs 2025','vs 2025')+' ('+fmtK(p)+')';
+    } else {
+      var g = pct(X.mxn[0], X.mxn[1]);
+      sub = '<span class="'+(g>0?'good':(g<0?'bad':''))+'"><b>'+pfmt(g)+'</b></span> '+T('vs 2025, in pesos','vs 2025, en pesos');
+    }
+    return '<div class="tile"><div class="label">'+label+'</div><div class="value">'+fmtK(a)+'</div><div class="sub">'+sub+'</div></div>';
+  }
+  function salesKpis(){
+    var U = SA.units[S.unit][S.per];
+    var h = sTile(T('Revenue','Ingresos')+' · '+UNAME[S.unit][S.lang], U);
+    if (SPARTS[S.unit].length > 1) SPARTS[S.unit].forEach(function(k){ h += sTile(SA.lines[k][S.lang], SA.lines[k][S.per]); });
+    return h;
+  }
+  function fyTiles(){
+    var F = SA.fy[S.unit], ach = F.actual / F.year * 100, gap = Math.round((F.needed - F.rest_budget) * 10) / 10;
+    var lbl = UNAME[S.unit][S.lang];
+    return '<div class="tile"><div class="label">'+T('2026 budget','Presupuesto 2026')+' · '+lbl+'</div><div class="value">'+fmtK(F.year)+'</div><div class="sub">'+T('full year','año completo')+'</div></div>'+
+      '<div class="tile"><div class="label">'+T('Achieved so far','Logrado a la fecha')+'</div><div class="value">'+ach.toFixed(1)+'%</div><div class="sub">'+fmtK(F.actual)+' '+T('of','de')+' '+fmtK(F.year)+', '+T('with','con')+' '+F.months_left+' '+T('months left','meses por delante')+'</div></div>'+
+      '<div class="tile"><div class="label">'+T('Needed in Nov–Dec','Necesario en nov–dic')+'</div><div class="value">'+fmtK(F.needed)+'</div><div class="sub"><span class="'+(gap>0?'bad':'good')+'"><b>'+sfmtK(gap)+'</b></span> '+T('vs the','vs el')+' '+fmtK(F.rest_budget)+' '+T('budgeted for those months','presupuestado para esos meses')+'</div></div>';
+  }
+  function scoreTable(){
+    var SC = SA.score, rows = SC.lines.filter(function(l){ return S.unit === 'total' || l.unit === S.unit; });
+    var h = '<tr><th>'+T('Customer type','Tipo de cliente')+' · '+(S.lang==='es'?SC.period_es:SC.period_en)+'</th><th class="r">'+T('Actual','Real')+'</th><th class="r">'+T('Budget','Presupuesto')+'</th><th class="r">'+T('Variance','Variación')+'</th><th class="r">%</th><th class="r">2025</th><th class="r">'+T('vs 2025','vs 2025')+'</th><th class="r">%</th></tr>';
+    function row(name, v, tot){
+      var d = v[0]-v[1], e = v[0]-v[2];
+      return '<tr'+(tot?' class="tot"':'')+'><td>'+name+'</td><td class="r num">'+fmtK(v[0])+'</td><td class="r num">'+fmtK(v[1])+'</td>'+
+        '<td class="r num '+(d>0?'good':(d<0?'bad':''))+'">'+sfmtK(Math.round(d*100)/100)+'</td><td class="r num '+(d>0?'good':(d<0?'bad':''))+'">'+pfmt(pct(v[0],v[1]))+'</td>'+
+        '<td class="r num">'+fmtK(v[2])+'</td><td class="r num '+(e>0?'good':(e<0?'bad':''))+'">'+sfmtK(Math.round(e*100)/100)+'</td><td class="r num '+(e>0?'good':(e<0?'bad':''))+'">'+pfmt(pct(v[0],v[2]))+'</td></tr>';
+    }
+    rows.forEach(function(l){ h += row((l.group ? '&nbsp;&nbsp;' : '')+l[S.lang], l.v, false); });
+    if (S.unit !== 'imp') h += row(T('Household moves (agents + Texas + rest of USA)','Mudanzas (agentes + Texas + resto USA)'), SC.stated.Mudanzas, true);
+    if (S.unit === 'total') h += row('Total TIM', SC.stated.Total, true);
+    return h;
+  }
   function render(){
     document.body.className = S.lang === 'es' ? 'es' : '';
     document.documentElement.lang = S.lang;
     var U = D.units[S.unit][S.per];
     var perTxt = S.per === 'ytd' ? T('YTD through ','Acumulado a ') + (S.lang==='es'?D.meta.period_es:D.meta.period_en)
                                  : (S.lang==='es'?D.meta.period_es:D.meta.period_en);
-    document.getElementById('perLabel').textContent = perTxt;
+    document.getElementById('perLabel').textContent = S.lang==='es'?D.meta.period_es:D.meta.period_en;
+    var sP = S.lang==='es'?SA.period_es:SA.period_en;
+    var sPerTxt = S.per === 'ytd' ? T('YTD through ','Acumulado a ') + sP : sP;
+    document.getElementById('salesLabel').textContent = sP;
+    document.getElementById('salesPer').textContent = sPerTxt;
+    document.getElementById('plPer').textContent = perTxt;
+    document.getElementById('plPer2').textContent = perTxt;
+    document.getElementById('salesNote').innerHTML = T(
+      '<b>Revenue only</b>, from Finance\'s monthly sales report, TIM\'s scorecard and the 2026 budget (USD, thousands). Costs and profit come from the full monthly statement and are shown below through '+D.meta.period_en+' until the '+SA.period_en+' statement arrives. '+
+      (S.cmp==='2' && S.per==='ytd' ? 'Year to date, 2025 is available only in pesos, so that comparison is peso growth. ' : '')+
+      ' <b>Check:</b> through September this report puts Consolidados revenue about $29K below the September statement; the '+SA.period_en+' statement will confirm which is right.',
+      '<b>Solo ingresos</b>, del reporte mensual de ventas de Finanzas, el scorecard de TIM y el presupuesto 2026 (USD, miles). Costos y utilidad vienen del estado de resultados mensual y se muestran abajo a '+D.meta.period_es+' hasta que llegue el de '+SA.period_es+'. '+
+      (S.cmp==='2' && S.per==='ytd' ? 'En el acumulado, 2025 solo está en pesos, así que esa comparación es crecimiento en pesos. ' : '')+
+      ' <b>Revisión:</b> a septiembre este reporte muestra ingresos de Consolidados unos $29K por debajo del estado de septiembre; el estado de '+SA.period_es+' confirmará cuál es correcto.');
+    document.getElementById('salesKpis').innerHTML = salesKpis();
+    document.getElementById('salesFy').innerHTML = fyTiles();
+    document.getElementById('scoreTbl').innerHTML = scoreTable();
+    document.getElementById('salesSrc').textContent = SA.sources.join(' · ');
     document.getElementById('fxNote').innerHTML = '<b>'+UNAME[S.unit][S.lang]+' · '+perTxt+'</b> — '+(S.lang==='es'?D.meta.fx_note_es:D.meta.fx_note_en)+
       ' '+T('Green = favorable, red = unfavorable.','Verde = favorable, rojo = desfavorable.');
     document.getElementById('kpis').innerHTML = kpis(U);

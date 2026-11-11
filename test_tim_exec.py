@@ -116,3 +116,75 @@ def test_home_tile_only_for_named_people():
         assert "TIM_EXEC_TILE" not in page
         assert "TMS Executive Dashboard" in page
         assert page.count("<div") == page.count("</div>")
+
+
+# ── Latest revenue (sales report) ──────────────────────────────────────────────
+@pytest.mark.parametrize("per", ["month", "ytd"])
+@pytest.mark.parametrize("cur", ["usd", "mxn"])
+def test_sales_lines_tie_to_reports_tim_total(per, cur):
+    units = T.sales_units()
+    stated = T.SALES["stated_tim"][per][cur]
+    for i in range(2):
+        assert abs(units["total"][per][cur][i] - stated[i]) <= 0.15, (per, cur, i)
+        assert abs(units["cons"][per][cur][i] + units["imp"][per][cur][i] - units["total"][per][cur][i]) <= 0.15
+
+
+def test_sales_budget_ties_to_close_budget():
+    # The budget is the same plan in both reports: October YTD budget minus
+    # October's budget must equal the September statement's YTD budget.
+    u = T.sales_units()
+    for unit in ("cons", "imp"):
+        sept_bp = T.CLOSE["units"][unit]["ytd"]["total_rev"][1] / 1000
+        implied = u[unit]["ytd"]["usd"][1] - u[unit]["month"]["usd"][1]
+        assert abs(implied - sept_bp) <= 0.2, unit
+
+
+def test_page_shows_both_periods():
+    page = T.render_page()
+    blob = json.loads(page.split("var D = ", 1)[1].split(";\n", 1)[0])
+    assert blob["sales"]["period_en"] == "October 2026"
+    assert blob["meta"]["period_en"] == "September 2026"
+    assert 'id="salesKpis"' in page and 'id="kpis"' in page
+
+
+# ── Scorecard and 2026 budget ──────────────────────────────────────────────────
+def _sc(k):
+    return next(l["v"] for l in T.SCORECARD["lines"] if l["k"] == k)
+
+
+def test_scorecard_adds_up():
+    st = T.SCORECARD["stated"]
+    for i in range(3):
+        mud = sum(_sc(k)[i] for k in ("agentes", "texas", "resto"))
+        assert abs(mud - st["Mudanzas"][i]) <= 0.02
+        assert abs(st["Mudanzas"][i] + _sc("comercial")[i] + _sc("imp")[i] - st["Total"][i]) <= 0.02
+
+
+def test_scorecard_matches_sales_report():
+    L = T.SALES["lines"]
+    assert abs(T.SCORECARD["stated"]["Mudanzas"][0] - L["mud"]["month"]["usd"][0]) <= 0.1
+    assert abs(_sc("comercial")[0] - L["com"]["month"]["usd"][0]) <= 0.1
+    assert abs(_sc("imp")[0] - L["imp"]["month"]["usd"][0]) <= 0.1
+    assert abs(T.SCORECARD["stated"]["Total"][1] - T.SALES["stated_tim"]["month"]["usd"][1]) <= 0.1
+
+
+def test_budget_ties_to_every_other_source():
+    b, bu = T.BUDGET_2026, T.budget_by_unit()
+    assert abs(sum(bu["total"]) - b["stated_total_year"]) <= 0.05
+    # October budget = scorecard budget, line by line
+    assert abs(b["agents"][9] / 1000 - _sc("agentes")[1]) <= 0.01
+    assert abs(b["texas"][9] / 1000 - _sc("texas")[1]) <= 0.01
+    assert abs(b["resto_usa"][9] / 1000 - _sc("resto")[1]) <= 0.01
+    assert abs(b["commercial"][9] / 1000 - _sc("comercial")[1]) <= 0.01
+    assert abs(b["furniture"][9] / 1000 - _sc("imp")[1]) <= 0.01
+    # January–September budget = the September statement's YTD budget, per unit
+    for unit in ("cons", "imp"):
+        assert abs(sum(bu[unit][:9]) - T.CLOSE["units"][unit]["ytd"]["total_rev"][1]) <= 1, unit
+    # January–October budget = the sales report's YTD budget
+    assert abs(sum(bu["total"][:10]) / 1000 - T.SALES["stated_tim"]["ytd"]["usd"][1]) <= 0.1
+
+
+def test_full_year_math():
+    F = T.full_year()
+    assert F["total"]["year"] == 2489.3 and F["total"]["needed"] == 349.1 and F["total"]["rest_budget"] == 340.0
+    assert abs(F["cons"]["needed"] + F["imp"]["needed"] - F["total"]["needed"]) <= 0.2

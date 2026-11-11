@@ -1,3 +1,4 @@
+import pytest
 import mw_costs as mc
 
 # File 111136, option 1, first charge line as Moveware returned it on 3 Nov 2026.
@@ -143,3 +144,43 @@ def test_the_option_total_line_is_left_out_by_its_name():
     lines = mc.lines_from_charges(charges)
     assert [ln["id"] for ln in lines] == [564309, 571533]
     assert mc.is_total_line("  OPTION   total ") and not mc.is_total_line("Origin Services")
+
+
+def _server(pages, key="charges", ignore_paging=False, fail_on=None):
+    calls = []
+
+    def fetch(path):
+        calls.append(path)
+        n = 1 if ("page=" not in path or ignore_paging) else int(path.split("page=")[1].split("&")[0])
+        if fail_on == n:
+            return None
+        if n > len(pages):
+            return {key: []}
+        return {key: pages[n - 1]}
+    return fetch, calls
+
+
+def test_every_page_of_a_per_job_list_is_read():
+    p1 = [{"id": i} for i in range(1, 21)]
+    p2 = [{"id": i} for i in range(21, 41)]
+    p3 = [{"id": 41}]
+    fetch, calls = _server([p1, p2, p3])
+    assert [x["id"] for x in mc.get_all("/options/9/charges", "charges", fetch)] == list(range(1, 42))
+    assert len(calls) == 4                                   # pages 1-3 + one empty page
+
+
+def test_a_server_that_ignores_paging_costs_one_extra_read():
+    fetch, calls = _server([[{"id": 1}, {"id": 2}]], ignore_paging=True)
+    assert len(mc.get_all("/options/9/charges", "charges", fetch)) == 2 and len(calls) == 2
+
+
+def test_a_failed_page_fails_the_whole_read():
+    fetch, _ = _server([[{"id": 1}], [{"id": 2}]], fail_on=2)
+    with pytest.raises(mc.ReadFailed):
+        mc.get_all("/options/9/charges", "charges", fetch)
+
+    def gone(path):
+        if "page=" in path:
+            raise RuntimeError("HTTP Error 404: Not Found")
+        return {"charges": [{"id": 1}]}
+    assert len(mc.get_all("/options/9/charges", "charges", gone)) == 1     # 404 past the end = the end

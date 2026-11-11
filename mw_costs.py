@@ -30,7 +30,7 @@ import threading
 import time
 
 # Bump when the reading rules change, so a build saved by older rules is redone.
-RULES_VERSION = 5
+RULES_VERSION = 6      # 6: every page of options and charges (11 Nov 2026)
 
 WON_WORDS = ("w", "won", "accepted", "selected", "confirmed", "booked")
 LOST_WORDS = ("c", "l", "cancelled", "canceled", "lost", "declined")
@@ -159,6 +159,52 @@ def summarize_file(job: str, parts: list, lines: list) -> dict:
     return e
 
 
+MAX_PAGES = 50
+
+
+class ReadFailed(RuntimeError):
+    """A page of a per-job list could not be read: the whole read counts as failed."""
+
+
+def _key(item) -> str:
+    if isinstance(item, dict) and item.get("id") is not None:
+        return f"id:{item['id']}"
+    return json.dumps(item, sort_keys=True, default=str)
+
+
+def get_all(path: str, key: str, fetch=None, timeout: int = 15) -> list:
+    """Every item of a per-job Moveware list, page after page (lessons learned,
+    11 Nov 2026: per-job lists are paged too; reading page 1 only cut cost on
+    labour-heavy jobs by 50-75 %). Asks for page 2, 3 ... until a page brings
+    nothing new, so a server that ignores paging costs one extra read. A page
+    that fails makes the whole read fail (ReadFailed): a short cost total is
+    worse than none."""
+    import mw_live
+    fetch = fetch or (lambda p: mw_live._get_timed(p, timeout))
+    items, seen = [], set()
+    for page in range(1, MAX_PAGES + 1):
+        sep = "&" if "?" in path else "?"
+        try:
+            data = fetch(path if page == 1 else f"{path}{sep}page={page}&offset={page}")
+        except Exception as e:                    # noqa: BLE001
+            if page > 1 and "404" in str(e):
+                break                             # past the last page
+            raise ReadFailed(f"{path} page {page}: {type(e).__name__}") from None
+        if data is None:
+            raise ReadFailed(f"{path} page {page}")
+        got = data.get(key) if isinstance(data, dict) else (data if isinstance(data, list) else None)
+        if got is None:
+            if page == 1 and isinstance(data, dict):
+                return []                         # an empty answer: nothing on this job
+            raise ReadFailed(f"{path} page {page}: unexpected answer")
+        new = [x for x in got if _key(x) not in seen]
+        if not new:
+            break
+        seen.update(_key(x) for x in new)
+        items += new
+    return items
+
+
 def read_file(job_id, client: str = "") -> list:
     """All counted charge lines of one Moveware job (one lot)."""
     import mw_live
@@ -168,12 +214,10 @@ def read_file(job_id, client: str = "") -> list:
         scrub = (lambda t: cs._scrub(t, parts))
     except Exception:
         scrub = None
-    od = mw_live._get_timed(f"/jobs/{job_id}/options", 15) or {}
-    options = od.get("options") if isinstance(od, dict) else None
+    options = get_all(f"/jobs/{job_id}/options", "options")
     lines = []
-    for o in won_options(options or []):
-        cd = mw_live._get_timed(f"/options/{o['id']}/charges", 15) or {}
-        got = lines_from_charges(cd.get("charges") if isinstance(cd, dict) else [], scrub)
+    for o in won_options(options):
+        got = lines_from_charges(get_all(f"/options/{o['id']}/charges", "charges"), scrub)
         for ln in got:     # amounts are in the option's currency (live 3 Nov 2026)
             ln["option_currency"] = o.get("currency") or ""
         lines += drop_total_line(got, o.get("valueExclusive"))

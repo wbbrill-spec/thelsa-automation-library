@@ -30,7 +30,7 @@ import threading
 import time
 
 # Bump when the reading rules change, so a build saved by older rules is redone.
-RULES_VERSION = 6      # 6: every page of options and charges (11 Nov 2026)
+RULES_VERSION = 7      # 6: every page of options and charges; 7: placeholder costs (11 Nov 2026)
 
 WON_WORDS = ("w", "won", "accepted", "selected", "confirmed", "booked")
 LOST_WORDS = ("c", "l", "cancelled", "canceled", "lost", "declined")
@@ -152,9 +152,15 @@ def summarize_file(job: str, parts: list, lines: list) -> dict:
             e["est_pending"] += ln["est"]
     for k in ("est", "act", "sell", "est_pending", "est_inc"):
         e[k] = round(e[k], 2)
+    # A placeholder is not a cost (lessons learned + Thelsa check, 11 Nov 2026):
+    # some files carry an estimated cost equal to the sale price, with no actual
+    # cost yet (e.g. 111228: sell 27,193.93, estimate 27,193.93). That is "cost
+    # not in yet", never a real cost at 0 % margin.
+    e["placeholder"] = (e["lines_with_act"] == 0 and e["sell"] > 0
+                        and abs(e["est"] - e["sell"]) <= max(1.0, 0.005 * e["sell"]))
     e["complete"] = e["lines_with_act"] > 0 and e["lines_pending"] == 0
     e["cost_best"] = round(e["act"] + e["est_pending"], 2) if e["lines_with_act"] else None
-    e["profit_est"] = round(e["sell"] - e["est"], 2)
+    e["profit_est"] = None if e["placeholder"] else round(e["sell"] - e["est"], 2)
     e["profit_best"] = round(e["sell"] - e["cost_best"], 2) if e["cost_best"] is not None else None
     return e
 

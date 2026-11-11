@@ -184,3 +184,15 @@ def test_a_failed_page_fails_the_whole_read():
             raise RuntimeError("HTTP Error 404: Not Found")
         return {"charges": [{"id": 1}]}
     assert len(mc.get_all("/options/9/charges", "charges", gone)) == 1     # 404 past the end = the end
+
+
+def test_estimate_equal_to_sale_with_no_actuals_is_a_placeholder():
+    ln = [{"sell": 27193.93, "est": 27193.93, "act": 0.0, "currency": "MXN"}]
+    e = mc.summarize_file("111228", ["111228"], ln)
+    assert e["placeholder"] is True and e["profit_est"] is None and e["cost_best"] is None
+
+
+def test_real_estimate_is_not_a_placeholder():
+    ln = [{"sell": 1000.0, "est": 720.0, "act": 0.0, "currency": "USD"}]
+    e = mc.summarize_file("1", ["1"], ln)
+    assert e["placeholder"] is False and e["profit_est"] == 280.0

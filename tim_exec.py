@@ -180,8 +180,18 @@ def full_year(sales=SALES, month=SALES_MONTH, close=CLOSE):
         rest = sum(bu[unit][month:]) / 1000
         actual = su[unit]["ytd"]["usd"][0]
         out[unit] = {"year": round(year, 1), "actual": actual, "rest_budget": round(rest, 1),
-                     "needed": round(year - actual, 1), "months_left": 12 - month}
+                     "needed": round(year - actual, 1), "months_left": 12 - month,
+                     # the month itself, for the Month view
+                     "month_budget": round(bu[unit][month - 1] / 1000, 2),
+                     "month_actual": su[unit]["month"]["usd"][0],
+                     "next_budget": round(bu[unit][month] / 1000, 2) if month < 12 else None}
     return out
+
+
+MONTHS_EN = ["January", "February", "March", "April", "May", "June", "July", "August",
+             "September", "October", "November", "December"]
+MONTHS_ES = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto",
+             "septiembre", "octubre", "noviembre", "diciembre"]
 
 
 def sales_units(sales=SALES, close=CLOSE):
@@ -283,6 +293,7 @@ def render_page(close=CLOSE, sales=SALES):
                   "lines": {k: {"en": v["en"], "es": v["es"], "unit": v["unit"], "month": v["month"], "ytd": v["ytd"]}
                             for k, v in sales["lines"].items()},
                   "fy": full_year(sales, close=close),
+                  "month_idx": SALES_MONTH, "months_en": MONTHS_EN, "months_es": MONTHS_ES,
                   "score": {"lines": SCORECARD["lines"], "stated": SCORECARD["stated"],
                             "period_en": SCORECARD["period_en"], "period_es": SCORECARD["period_es"]},
                   "sources": [sales["source"], SCORECARD["source"], BUDGET_2026["source"]],
@@ -487,11 +498,22 @@ PAGE = r"""<!DOCTYPE html>
     return h;
   }
   function fyTiles(){
-    var F = SA.fy[S.unit], ach = F.actual / F.year * 100, gap = Math.round((F.needed - F.rest_budget) * 10) / 10;
-    var lbl = UNAME[S.unit][S.lang];
+    var F = SA.fy[S.unit], lbl = UNAME[S.unit][S.lang], i = SA.month_idx;
+    var MN = S.lang === 'es' ? SA.months_es : SA.months_en;
+    function cap(x){ return x.charAt(0).toUpperCase() + x.slice(1); }
+    var mName = cap(MN[i - 1]), nName = i < 12 ? cap(MN[i]) : null;
+    if (S.per === 'month') {
+      var mAch = F.month_actual / F.month_budget * 100, mGap = Math.round((F.month_actual - F.month_budget) * 10) / 10;
+      var h = '<div class="tile"><div class="label">'+T(mName+' budget','Presupuesto '+MN[i - 1])+' · '+lbl+'</div><div class="value">'+fmtK(F.month_budget)+'</div><div class="sub">'+T('for the month','del mes')+'</div></div>'+
+        '<div class="tile"><div class="label">'+T('Achieved in '+mName,'Logrado en '+MN[i - 1])+'</div><div class="value">'+mAch.toFixed(1)+'%</div><div class="sub">'+fmtK(F.month_actual)+' '+T('of','de')+' '+fmtK(F.month_budget)+' · <span class="'+(mGap<0?'bad':'good')+'"><b>'+sfmtK(mGap)+'</b></span></div></div>';
+      if (nName) h += '<div class="tile"><div class="label">'+T(nName+' budget','Presupuesto '+MN[i])+'</div><div class="value">'+fmtK(F.next_budget)+'</div><div class="sub">'+T('next month\'s target','meta del próximo mes')+'</div></div>';
+      return h;
+    }
+    var ach = F.actual / F.year * 100, gap = Math.round((F.needed - F.rest_budget) * 10) / 10;
+    var rest = nName ? (nName === cap(MN[11]) ? nName : T(nName.slice(0,3)+'–Dec', MN[i].slice(0,3)+'–dic')) : '';
     return '<div class="tile"><div class="label">'+T('2026 budget','Presupuesto 2026')+' · '+lbl+'</div><div class="value">'+fmtK(F.year)+'</div><div class="sub">'+T('full year','año completo')+'</div></div>'+
-      '<div class="tile"><div class="label">'+T('Achieved so far','Logrado a la fecha')+'</div><div class="value">'+ach.toFixed(1)+'%</div><div class="sub">'+fmtK(F.actual)+' '+T('of','de')+' '+fmtK(F.year)+', '+T('with','con')+' '+F.months_left+' '+T('months left','meses por delante')+'</div></div>'+
-      '<div class="tile"><div class="label">'+T('Needed in Nov–Dec','Necesario en nov–dic')+'</div><div class="value">'+fmtK(F.needed)+'</div><div class="sub"><span class="'+(gap>0?'bad':'good')+'"><b>'+sfmtK(gap)+'</b></span> '+T('vs the','vs el')+' '+fmtK(F.rest_budget)+' '+T('budgeted for those months','presupuestado para esos meses')+'</div></div>';
+      '<div class="tile"><div class="label">'+T('Achieved so far','Logrado a la fecha')+'</div><div class="value">'+ach.toFixed(1)+'%</div><div class="sub">'+fmtK(F.actual)+' '+T('of','de')+' '+fmtK(F.year)+', '+T('with','con')+' '+F.months_left+' '+T(F.months_left===1?'month left':'months left', F.months_left===1?'mes por delante':'meses por delante')+'</div></div>'+
+      (F.months_left > 0 ? '<div class="tile"><div class="label">'+T('Needed in '+rest,'Necesario en '+rest)+'</div><div class="value">'+fmtK(F.needed)+'</div><div class="sub"><span class="'+(gap>0?'bad':'good')+'"><b>'+sfmtK(gap)+'</b></span> '+T('vs the','vs el')+' '+fmtK(F.rest_budget)+' '+T('budgeted for those months','presupuestado para esos meses')+'</div></div>' : '');
   }
   function scoreTable(){
     var SC = SA.score, rows = SC.lines.filter(function(l){ return S.unit === 'total' || l.unit === S.unit; });

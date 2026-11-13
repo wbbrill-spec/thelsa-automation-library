@@ -270,6 +270,8 @@ def faim_snapshot(files, today=None, sit=None, email="auto"):
             "sit_pack": sit_pack if (sit_pack and sit_pack <= today) else None,
             "type": job_type,
             "coord_email": str(f.get("coordinator_email") or "").strip(),
+            "job_id": f.get("job_id"),                 # Moveware id (estimate vs actual volume)
+            "est_m3": f.get("est_vol"), "est_kg": f.get("est_wt"),   # survey estimate (mw_live)
             "pack_day": pack, "delivery_day": delivered,
             "insured": _insured(f.get("ins")),     # insurance premium on the file (mw_live)
             "booked": _as_date(f.get("booked")),
@@ -461,6 +463,7 @@ def faim_snapshot(files, today=None, sit=None, email="auto"):
         # every audited file, for the email document check (doc_check, FAIM MS1.4)
         "doc_rows": [{"file": r["number"], "type": r["type"], "coord": r["coord"],
                       "coord_email": r["coord_email"], "insured": r["insured"],
+                      "job_id": r.get("job_id"), "est_m3": r.get("est_m3"), "est_kg": r.get("est_kg"),
                       "load_day": r["pack_day"].isoformat() if r["pack_day"] else "",
                       "delivery_day": (r["delivery_day"].isoformat() if r["delivery_day"]
                                        else (r["sit_delivery"].isoformat() if r["sit_delivery"] else ""))}
@@ -561,6 +564,7 @@ def _heavy_busy() -> str:
     restart and the server ran out of memory)."""
     checks = (("survey_finder", lambda m: m.state()["running"]),
               ("doc_check", lambda m: m.state()["running"]),
+              ("shipment_measures", lambda m: m.state()["running"]),
               ("mw_costs", lambda m: m.state()["running"]),
               ("invoice_mail", lambda m: m.state()["running"]),
               ("sit_milestones", lambda m: m._STATE["running"]))
@@ -658,6 +662,18 @@ def _keeper_tick():
                 rows = _doc_rows()
                 if rows:
                     dc.start(rows)
+    except Exception:
+        pass
+    try:  # estimated vs actual volume and weight (survey vs shipping documents), once a day
+        import shipment_measures as smx
+        st = smx.state()
+        if _t.feature("measures") and _heavy_ok() and not st["running"] and not _crashed_recently("measures") \
+                and (not st["finished"] or time.time() - st["finished"] > 20 * 3600):
+            prog = mw_live.audit_progress()
+            if prog.get("window_complete") or prog.get("complete"):
+                rows = _measure_rows()
+                if rows:
+                    smx.start(rows)
     except Exception:
         pass
     try:  # Finance's monthly invoicing report (Wendy), read from email once a day
@@ -823,6 +839,12 @@ def _doc_rows():
     return faim_snapshot(files, sit=sit).get("doc_rows") or []
 
 
+def _measure_rows():
+    """Audited files that have loaded and have a Moveware id."""
+    import shipment_measures as smx
+    return smx.rows_for(_doc_rows())
+
+
 def _survey_inputs():
     # read what's loaded; never (re)start the book or the plan from here
     files = mw_live.audited_in_window()
@@ -931,6 +953,118 @@ Signatures on the inventory are not checked. Read-only: nothing is sent or chang
 <h2>Files</h2>
 <table><tr><th>File</th><th>Type</th><th>Coordinator</th><th>Documents</th></tr>{''.join(rows)}</table>
 <p class=m><a href="/faim/documents?run=1">Search again</a> &middot; Runs by itself once a day.</p>
+</body></html>"""
+
+
+@faim_bp.route("/faim/measures.json")
+@_login_required
+def faim_measures_json():
+    """Estimated (survey) vs actual (shipping documents) volume and weight."""
+    import shipment_measures as smx
+    st = smx.state()
+    if request.args.get("run") and not st["running"]:
+        rows = _measure_rows()
+        if rows:
+            smx.start(rows)
+        st = smx.state()
+    out = dict(st, summary=smx.summary(st["results"]))
+    if request.args.get("brief"):
+        out.pop("results", None)
+    return jsonify(out)
+
+
+def _pct_txt(v):
+    return "" if v is None else (f"+{v:.0f}%" if v > 0 else f"{v:.0f}%")
+
+
+@faim_bp.route("/faim/measures")
+@_login_required
+def faim_measures():
+    """Per file: survey estimate vs the actual on the shipping documents."""
+    import html as _h
+    import shipment_measures as smx
+    st = smx.state()
+    if not st["running"] and (request.args.get("run") or not st["started"]):
+        rows = _measure_rows()
+        if rows:
+            smx.start(rows)
+            st = smx.state()
+    e = _h.escape
+    sm = smx.summary(st["results"])
+    d = st.get("diag") or {}
+    band = sm["within_pct_band"]
+    if st["running"]:
+        status = (f"Reading the shipping documents&hellip; {st['done']} of {st['files']} files done. "
+                  "This page refreshes by itself.")
+    elif st.get("error"):
+        status = f"Could not finish: {e(st['error'])}"
+    elif not st["started"]:
+        status = "Not run yet."
+    else:
+        status = (f"Done. {sm['compared']} of {sm['files_checked']} loaded files could be compared "
+                  f"(estimate in Moveware and an actual figure on a shipping document). "
+                  f"PDFs read: {d.get('pdfs', 0)}; scanned PDFs with no readable text: {d.get('pdf_no_text', 0)}; "
+                  f"figures left out as not this file's: {d.get('implausible', 0)}.")
+
+    def stat_cells(x):
+        if not x.get("files"):
+            return "<td class=n>&ndash;</td><td class=n>&ndash;</td><td class=n>&ndash;</td><td class=n>&ndash;</td>"
+        return (f"<td class=n>{x['files']}</td><td class=n>{x['within_pct']}%</td>"
+                f"<td class=n>{x['avg_abs_pct']}%</td><td class=n>{_pct_txt(x['median_pct'])}</td>")
+    overall = (f"<tr><td>Volume (m&sup3;)</td>{stat_cells(sm['volume'])}</tr>"
+               f"<tr><td>Weight (kg)</td>{stat_cells(sm['weight'])}</tr>")
+    coord_rows = "".join(
+        f"<tr><td>{e(c)}</td><td class=n>{v['files']}</td>{stat_cells(v['volume'])}{stat_cells(v['weight'])}</tr>"
+        for c, v in sorted(sm["by_coord"].items(), key=lambda x: -x[1]["files"]))
+    L = smx.SOURCE_LABELS
+
+    def cell(r, u, fmt):
+        est, act = (r.get("est") or {}).get(u), (r.get("act") or {}).get(u)
+        diff = r.get(f"{u}_diff_pct")
+        cls = "" if diff is None else ("ok" if abs(diff) <= band else "miss")
+        src = (r.get("act_src") or {}).get(u) or {}
+        where = ""
+        if src:
+            label = L.get(src.get("kind"), ("",))[0]
+            name = src.get("attachment") or src.get("subject") or "email"
+            link = (f"<a href='{e(src['link'])}' target=_blank>{e(name)}</a>" if src.get("link") else e(name))
+            where = f"<div class=m>{e(label)} &middot; {e(src.get('date') or '')} &middot; {link}</div>"
+        return (f"<td class=n>{fmt(est) if est else '&ndash;'}</td>"
+                f"<td class=n>{fmt(act) if act else '<span class=m>not found</span>'}{where}</td>"
+                f"<td class='n {cls}'>{_pct_txt(diff)}</td>")
+    m3 = lambda v: f"{v:,.1f}"
+    kg = lambda v: f"{v:,.0f}"
+    res = sorted(st["results"], key=lambda r: (-(abs(r.get("m3_diff_pct") or 0) + abs(r.get("kg_diff_pct") or 0)),
+                                              r.get("coord") or "", r.get("file") or ""))
+    rows = "".join(f"<tr><td class=n>{e(str(r.get('file') or ''))}</td><td>{e(r.get('type') or '')}</td>"
+                   f"<td>{e(r.get('coord') or '')}</td>{cell(r, 'm3', m3)}{cell(r, 'kg', kg)}</tr>" for r in res)
+    refresh = "<meta http-equiv=refresh content=20>" if st["running"] else ""
+    return f"""<!doctype html><html><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">{refresh}
+<title>Estimate vs actual</title><style>
+body{{font:14px/1.45 system-ui,sans-serif;margin:24px auto;max-width:1250px;padding:0 16px;color:#1d1d1f;background:#fafaf9}}
+table{{border-collapse:collapse;width:100%;background:#fff;margin:12px 0 28px}}
+td,th{{border-bottom:1px solid #e7e5e4;padding:8px;text-align:left;vertical-align:top}}
+th{{font-size:12px;text-transform:uppercase;color:#78716c}} .n{{white-space:nowrap}}
+.ok{{color:#166534;font-weight:600}} .miss{{color:#b91c1c;font-weight:600}} .m{{color:#78716c;font-size:12px;white-space:normal}}
+.box{{background:#eef4ff;border:1px solid #c9dafc;padding:10px 14px;border-radius:8px}} a{{color:#1d4ed8}}</style></head><body>
+<p><a href="/faim">&larr; Dashboard</a></p>
+<h1>Estimated vs actual volume and weight</h1>
+<p>The estimate is the survey / cube sheet in Moveware. The actual is read from the shipping documents in the
+coordinators' and sales email: weight certificates and scale tickets first, then the bill of lading or air
+waybill, then the packing list / inventory, then the email text. Only files that have loaded are checked.
+A difference is the actual compared with the estimate: <b>+</b> means the shipment was bigger than estimated,
+<b>&minus;</b> smaller. Within &plusmn;{band}% counts as accurate. Read-only: nothing is sent or changed.</p>
+<p class=box>{status}</p>
+<h2>Overall</h2>
+<table><tr><th></th><th>Files compared</th><th>Within &plusmn;{band}%</th><th>Average difference</th><th>Typical (median)</th></tr>{overall}</table>
+<h2>By coordinator</h2>
+<table><tr><th rowspan=2>Coordinator</th><th rowspan=2>Files</th><th colspan=4>Volume</th><th colspan=4>Weight</th></tr>
+<tr><th>Compared</th><th>Within</th><th>Avg diff</th><th>Median</th><th>Compared</th><th>Within</th><th>Avg diff</th><th>Median</th></tr>{coord_rows}</table>
+<h2>Files</h2>
+<table><tr><th>File</th><th>Type</th><th>Coordinator</th><th>Est. m&sup3;</th><th>Actual m&sup3;</th><th>Diff</th>
+<th>Est. kg</th><th>Actual kg</th><th>Diff</th></tr>{rows}</table>
+<p class=m><a href="/faim/measures?run=1">Check again</a> &middot; Runs by itself once a day.</p>
 </body></html>"""
 
 
@@ -1294,6 +1428,12 @@ td.num{font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
 <span class="k"><span class="thr-key"></span> 80% target</span>
 </div>
 
+<div class="card" id="measCard">
+<h2>Survey accuracy — estimated vs actual volume and weight</h2>
+<p class="note">Survey / cube-sheet estimate in Moveware against the actual on the shipping documents in email (weight certificate, bill of lading or waybill, packing list), for files that have loaded. Within ±10% counts as accurate; + means the shipment was bigger than estimated. <a href="/faim/measures">Every file, with its document</a>.</p>
+<div id="measBody"><p style="font-size:12px;color:var(--muted);margin:0">Loading…</p></div>
+</div>
+
 <div class="card">
 <h2>Files missing evidence</h2>
 <p class="note">What's not on record, worst first<span id="gapCount"></span>. Found in the coordinators' email: <a href="/faim/documents">FAIM documents per file</a> · <a href="/faim/survey-finder">missing surveys and dates</a>.</p>
@@ -1342,7 +1482,23 @@ tb.innerHTML=rows.length?rows.map(b=>`
 if(d.window==='loading'){setTimeout(load,30000);}
 document.getElementById('foot').textContent='Evidence coverage is read from Moveware; a file counts as covered only when the evidence is actually on record. Full FAIM compliance scoring (deadlines, documents, signed inventories) resumes once the remaining Moveware endpoints and field mapping are confirmed.';
 }
+function esc(t){return String(t).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+function sg(v){return v==null?'–':(v>0?'+':'')+v+'%';}
+async function loadMeasures(){
+const el=document.getElementById('measBody');
+let m;try{const r=await fetch('/faim/measures.json?brief=1');if(!r.ok)throw 0;m=await r.json();}catch{el.innerHTML='<p style="font-size:12px;color:var(--muted);margin:0">Not available right now.</p>';return;}
+const s=m.summary||{};
+if(m.running){el.innerHTML=`<p style="font-size:12px;color:var(--muted);margin:0">Reading the shipping documents… ${m.done} of ${m.files} files.</p>`;setTimeout(loadMeasures,30000);return;}
+if(!s.compared){el.innerHTML=`<p style="font-size:12px;color:var(--muted);margin:0">${m.started?('No file could be compared yet ('+(s.files_checked||0)+' loaded files checked; '+(s.with_actual||0)+' with an actual figure in email).'):'The first check runs once a day; it has not run yet.'}</p>`;return;}
+const tot=(k,x)=>x&&x.files?`<td class="num">${x.files}</td><td class="num">${x.within_pct}%</td><td class="num">${x.avg_abs_pct}%</td><td class="num">${sg(x.median_pct)}</td>`:'<td class="num">–</td><td class="num">–</td><td class="num">–</td><td class="num">–</td>';
+const coords=Object.entries(s.by_coord||{}).filter(([c,v])=>(v.volume.files||v.weight.files)).sort((a,b)=>(b[1].volume.files+b[1].weight.files)-(a[1].volume.files+a[1].weight.files));
+el.innerHTML=`<table><thead><tr><th></th><th class="num">Volume files</th><th class="num">Within ±10%</th><th class="num">Avg diff</th><th class="num">Median</th><th class="num">Weight files</th><th class="num">Within ±10%</th><th class="num">Avg diff</th><th class="num">Median</th></tr></thead><tbody>
+<tr><td><b>All coordinators</b></td>${tot('v',s.volume)}${tot('w',s.weight)}</tr>
+${coords.map(([c,v])=>`<tr><td>${esc(c)}</td>${tot('v',v.volume)}${tot('w',v.weight)}</tr>`).join('')}</tbody></table>
+<p class="note" style="margin:10px 0 0">${s.compared} of ${s.files_checked} loaded files compared · the rest have no readable weight or volume in email yet.</p>`;
+}
 load();
+loadMeasures();
 </script>
 </body>
 </html>

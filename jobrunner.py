@@ -34,6 +34,7 @@ JOBS = {
     "doc_check": ("doc_check", "run"),
     "invoice_mail": ("invoice_mail", "refresh"),
     "mw_costs": ("mw_costs", "build"),
+    "measures": ("shipment_measures", "run"),
 }
 _PROCS: dict = {}
 _LOCK = threading.Lock()

@@ -21,4 +21,4 @@ def test_a_runaway_job_is_stopped_by_its_memory_cap(monkeypatch):
 
 
 def test_every_heavy_job_is_known():
-    assert set(jobrunner.JOBS) == {"survey_finder", "doc_check", "invoice_mail", "mw_costs"}
+    assert set(jobrunner.JOBS) == {"survey_finder", "doc_check", "invoice_mail", "mw_costs", "measures"}

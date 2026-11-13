@@ -664,3 +664,20 @@ def test_nothing_is_flagged_before_its_email_is_searched_and_email_finds_fill_ga
     assert {g["file"] for g in snap["date_gaps"]} == {"111002"}
     raw = faim_web.faim_snapshot(files, today=today, email=None)   # what the email search looks for
     assert {r["file"] for r in raw["missing_survey"]} == {"111001", "111002", "111003"}
+
+
+def test_measures_page_and_dashboard_card(client, monkeypatch):
+    import shipment_measures as smx
+    st = {"running": False, "started": 1.0, "finished": 2.0, "error": None, "files": 1, "done": 1,
+          "diag": {"pdfs": 2, "pdf_no_text": 1, "implausible": 0},
+          "results": [{"file": "110895", "type": "EXP", "coord": "Ana", "est": {"m3": 64, "kg": 6664},
+                       "act": {"m3": 66, "kg": 6900}, "m3_diff_pct": 3.1, "kg_diff_pct": 3.5,
+                       "act_src": {"kg": {"kind": "weight", "date": "2026-08-30", "subject": "s",
+                                          "link": "https://x/b", "attachment": "boleta.pdf"}}}]}
+    monkeypatch.setattr(smx, "state", lambda: st)
+    page = client.get("/faim/measures").data.decode()
+    assert "110895" in page and "boleta.pdf" in page and "+3%" in page and "Weight certificate" in page
+    j = client.get("/faim/measures.json?brief=1").get_json()
+    assert j["summary"]["compared"] == 1 and "results" not in j
+    dash = client.get("/faim").data.decode()
+    assert "measCard" in dash and "/faim/measures.json" in dash

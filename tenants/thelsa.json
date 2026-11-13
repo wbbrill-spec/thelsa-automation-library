@@ -145,6 +145,7 @@
     "schema": true,
     "survey_finder": true,
     "doc_check": true,
+    "measures": true,
     "mw_costs": true,
     "invoice_alerts": true,
     "date_gap_alerts": true,

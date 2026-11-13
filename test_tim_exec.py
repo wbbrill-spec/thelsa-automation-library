@@ -31,9 +31,21 @@ def test_statement_ties_out(u, per, col, L):
 
 
 def test_total_is_sum_of_units():
-    units = T.with_total()
-    assert units["total"]["ytd"]["net"][0] == 295975 - 98610
-    assert units["total"]["month"]["total_rev"][0] == 244738 + 6757
+    units, C = T.with_total(), T.CLOSE["units"]
+    for per in ("month", "ytd"):
+        for k in ("total_rev", "net"):
+            for i in range(3):
+                assert units["total"][per][k][i] == C["cons"][per][k][i] + C["imp"][per][k][i]
+
+
+def test_october_statement_values():
+    # spot checks against Rogelio's Est Financ TIM 2610 (12 Nov 2026)
+    C = T.CLOSE["units"]
+    assert T.CLOSE["period_en"] == "October 2026"
+    assert C["cons"]["month"]["net"] == [87845, 13582, 6104]
+    assert C["cons"]["ytd"]["net"] == [383820, 180584, 164665]
+    assert C["imp"]["month"]["total_rev"] == [25949, 40625, 5883]
+    assert C["imp"]["ytd"]["net"] == [-98277, -75612, -80101]
 
 
 def test_page_embeds_data():
@@ -122,28 +134,40 @@ def test_home_tile_only_for_named_people():
 @pytest.mark.parametrize("per", ["month", "ytd"])
 @pytest.mark.parametrize("cur", ["usd", "mxn"])
 def test_sales_lines_tie_to_reports_tim_total(per, cur):
-    units = T.sales_units()
-    stated = T.SALES["stated_tim"][per][cur]
+    # the sales report's own lines add up to its own TIM total
+    L, stated = T.SALES["lines"], T.SALES["stated_tim"][per][cur]
     for i in range(2):
-        assert abs(units["total"][per][cur][i] - stated[i]) <= 0.15, (per, cur, i)
-        assert abs(units["cons"][per][cur][i] + units["imp"][per][cur][i] - units["total"][per][cur][i]) <= 0.15
+        assert abs(sum(L[m][per][cur][i] for m in ("mud", "com", "imp")) - stated[i]) <= 0.15, (per, cur, i)
+
+
+def test_unit_totals_come_from_statement_when_it_covers_the_month():
+    assert T.statement_covers_sales()
+    u, W = T.sales_units(), T.with_total()
+    for unit in ("total", "cons", "imp"):
+        for per in ("month", "ytd"):
+            rev = W[unit][per]["total_rev"]
+            assert u[unit][per]["usd"] == [round(rev[0] / 1000, 2), round(rev[1] / 1000, 2)]
+            assert u[unit][per]["py_usd"] == round(rev[2] / 1000, 2)
+    # October itself: statement and sales report agree (to rounding)
+    for unit, lines in (("cons", ("mud", "com")), ("imp", ("imp",))):
+        sales_month = sum(T.SALES["lines"][m]["month"]["usd"][0] for m in lines)
+        assert abs(u[unit]["month"]["usd"][0] - sales_month) <= 0.1, unit
 
 
 def test_sales_budget_ties_to_close_budget():
-    # The budget is the same plan in both reports: October YTD budget minus
-    # October's budget must equal the September statement's YTD budget.
-    u = T.sales_units()
-    for unit in ("cons", "imp"):
-        sept_bp = T.CLOSE["units"][unit]["ytd"]["total_rev"][1] / 1000
-        implied = u[unit]["ytd"]["usd"][1] - u[unit]["month"]["usd"][1]
-        assert abs(implied - sept_bp) <= 0.2, unit
+    # the same 2026 plan in both reports, month and year to date
+    for unit, lines in (("cons", ("mud", "com")), ("imp", ("imp",))):
+        for per in ("month", "ytd"):
+            sales_bp = sum(T.SALES["lines"][m][per]["usd"][1] for m in lines)
+            assert abs(sales_bp - T.CLOSE["units"][unit][per]["total_rev"][1] / 1000) <= 0.2, (unit, per)
 
 
 def test_page_shows_both_periods():
     page = T.render_page()
     blob = json.loads(page.split("var D = ", 1)[1].split(";\n", 1)[0])
     assert blob["sales"]["period_en"] == "October 2026"
-    assert blob["meta"]["period_en"] == "September 2026"
+    assert blob["meta"]["period_en"] == "October 2026"
+    assert blob["sales"]["official"] is True
     assert 'id="salesKpis"' in page and 'id="kpis"' in page
 
 
@@ -177,14 +201,17 @@ def test_budget_ties_to_every_other_source():
     assert abs(b["resto_usa"][9] / 1000 - _sc("resto")[1]) <= 0.01
     assert abs(b["commercial"][9] / 1000 - _sc("comercial")[1]) <= 0.01
     assert abs(b["furniture"][9] / 1000 - _sc("imp")[1]) <= 0.01
-    # January–September budget = the September statement's YTD budget, per unit
+    # January–<statement month> budget = the statement's YTD budget, per unit
+    m = T.CLOSE["month"]
     for unit in ("cons", "imp"):
-        assert abs(sum(bu[unit][:9]) - T.CLOSE["units"][unit]["ytd"]["total_rev"][1]) <= 1, unit
+        assert abs(sum(bu[unit][:m]) - T.CLOSE["units"][unit]["ytd"]["total_rev"][1]) <= 1, unit
+        assert abs(bu[unit][m - 1] - T.CLOSE["units"][unit]["month"]["total_rev"][1]) <= 1, unit
     # January–October budget = the sales report's YTD budget
     assert abs(sum(bu["total"][:10]) / 1000 - T.SALES["stated_tim"]["ytd"]["usd"][1]) <= 0.1
 
 
 def test_full_year_math():
     F = T.full_year()
-    assert F["total"]["year"] == 2489.3 and F["total"]["needed"] == 349.1 and F["total"]["rest_budget"] == 340.0
+    assert F["total"]["year"] == 2489.3 and F["total"]["rest_budget"] == 340.0
+    assert F["total"]["actual"] == 2169.61 and F["total"]["needed"] == 319.7   # official statement YTD
     assert abs(F["cons"]["needed"] + F["imp"]["needed"] - F["total"]["needed"]) <= 0.2

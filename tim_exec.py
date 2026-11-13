@@ -48,72 +48,49 @@ KEYS = [k for k, *_ in LINES]
 
 # Each line: [actual 2026, BP 2026, 2025] in USD.
 CLOSE = {
-    "period_en": "September 2026",
-    "period_es": "Septiembre 2026",
-    "source": "Rogelio Franco (Finance) monthly close, 9 Oct 2026",
-    "source_en": "Finance monthly statement, September 2026 (Rogelio Franco, 9 Oct 2026)",
-    "source_es": "Estado de resultados de Finanzas, septiembre 2026 (Rogelio Franco, 9 oct 2026)",
-    "fx_note_en": "USD at Finance's blended rate (MXN ≈ 18.1 at Sept month-end).",
-    "fx_note_es": "USD al tipo combinado de Finanzas (MXN ≈ 18.1 al cierre de septiembre).",
+    "period_en": "October 2026",
+    "period_es": "Octubre 2026",
+    "month": 10,
+    "source": "Rogelio Franco (Finance) monthly close, 12 Nov 2026 (Est Financ TIM 2610)",
+    "source_en": "Finance monthly statement, October 2026 (Rogelio Franco, 12 Nov 2026)",
+    "source_es": "Estado de resultados de Finanzas, octubre 2026 (Rogelio Franco, 12 nov 2026)",
+    "fx_note_en": "USD at Finance's blended exchange rate.",
+    "fx_note_es": "USD al tipo de cambio combinado de Finanzas.",
     "units": {
         "cons": {
             "month": {
-                "direct_rev": [244507, 237748, 190633], "other_rev": [231, 0, 231],
-                "total_rev": [244738, 237748, 190864],
-                "direct_cost": [77092, 146849, 57170], "op_exp": [5214, 10137, 1709],
-                "admin_fac": [-77, 0, 491], "other_cost": [81127, 0, 51130],
-                "total_cos": [163356, 156986, 110500],
-                "direct_margin": [81382, 80762, 80363],
-                "admin_exp": [10821, 11006, 13381], "selling_exp": [6503, 21765, 4867],
-                "other_exp": [19310, 0, 15534], "corp_exp": [8898, 8712, 7511],
-                "total_exp": [45532, 41482, 41292],
-                "op_profit": [35850, 39280, 39071],
-                "cif": [-473, 1355, -138], "taxes": [0, 0, 11132],
-                "net": [36323, 37925, 28077],
+                "direct_rev": [209073, 200659, 115532], "other_rev": [232, 0, 231], "total_rev": [209305, 200659, 115763],
+                "direct_cost": [9472, 124715, 36749], "op_exp": [4742, 10000, 796], "admin_fac": [552, 0, 473],
+                "other_cost": [54327, 0, 32804], "total_cos": [69093, 134715, 70822], "direct_margin": [140211, 65943, 44941],
+                "admin_exp": [9860, 12026, 10355], "selling_exp": [12234, 22554, 4472], "other_exp": [21945, 0, 16181],
+                "corp_exp": [8185, 8959, 7778], "total_exp": [52223, 43539, 38786], "op_profit": [87988, 22404, 6155],
+                "cif": [143, 251, 51], "taxes": [0, 8571, 0], "net": [87845, 13582, 6104],
             },
             "ytd": {
-                "direct_rev": [1689494, 1650887, 1188761], "other_rev": [131675, 0, 8323],
-                "total_rev": [1821169, 1650887, 1197084],
-                "direct_cost": [435108, 1013860, 342001], "op_exp": [45793, 90007, 17364],
-                "admin_fac": [17829, 0, 11429], "other_cost": [627258, 0, 313844],
-                "total_cos": [1125988, 1103867, 684638],
-                "direct_margin": [695181, 547020, 512446],
-                "admin_exp": [99972, 99907, 102264], "selling_exp": [33472, 196637, 36806],
-                "other_exp": [177742, 0, 131995], "corp_exp": [74972, 78259, 68361],
-                "total_exp": [386158, 374803, 339426],
-                "op_profit": [309023, 172217, 173021],
-                "cif": [-1172, 5214, 3328], "taxes": [14220, 0, 11132],
-                "net": [295975, 167003, 158561],
+                "direct_rev": [1898567, 1851546, 1304293], "other_rev": [131907, 0, 8554], "total_rev": [2030474, 1851546, 1312847],
+                "direct_cost": [444580, 1138575, 378750], "op_exp": [50535, 100007, 18160], "admin_fac": [18381, 0, 11902],
+                "other_cost": [681585, 0, 346648], "total_cos": [1195081, 1238582, 755460], "direct_margin": [835393, 612963, 557387],
+                "admin_exp": [109832, 111933, 112619], "selling_exp": [45706, 219191, 41278], "other_exp": [199687, 0, 148176],
+                "corp_exp": [83156, 87218, 76138], "total_exp": [438382, 418342, 378211], "op_profit": [397011, 194621, 179176],
+                "cif": [-1029, 5465, 3379], "taxes": [14220, 8571, 11132], "net": [383820, 180584, 164665],
             },
         },
         "imp": {
             "month": {
-                "direct_rev": [6426, 37150, 19570], "other_rev": [331, 0, 3446],
-                "total_rev": [6757, 37150, 23016],
-                "direct_cost": [227, 26005, 6057], "op_exp": [3333, 8225, 293],
-                "admin_fac": [20, 0, 3564], "other_cost": [10645, 0, 9483],
-                "total_cos": [14225, 34230, 19397],
-                "direct_margin": [-7468, 2920, 3620],
-                "admin_exp": [14, 0, 6511], "selling_exp": [1919, 4752, 909],
-                "other_exp": [717, 0, 962], "corp_exp": [4468, 4673, 3771],
-                "total_exp": [7118, 9425, 12154],
-                "op_profit": [-14586, -6505, -8534],
-                "cif": [79, 150, -240], "taxes": [0, 0, 0],
-                "net": [-14665, -6655, -8294],
+                "direct_rev": [23943, 40625, 5883], "other_rev": [2005, 0, 0], "total_rev": [25949, 40625, 5883],
+                "direct_cost": [947, 28438, 3768], "op_exp": [3298, 8055, 502], "admin_fac": [270, 0, 114],
+                "other_cost": [7516, 0, 10424], "total_cos": [12030, 36492, 14807], "direct_margin": [13919, 4133, -8924],
+                "admin_exp": [158, 1008, 6630], "selling_exp": [8021, 2401, 1366], "other_exp": [1202, 0, 1235],
+                "corp_exp": [4110, 4806, 3905], "total_exp": [13490, 8215, 13136], "op_profit": [428, -4082, -22061],
+                "cif": [96, 211, 62], "taxes": [0, 8571, 0], "net": [333, -12864, -22123],
             },
             "ytd": {
-                "direct_rev": [111708, 257190, 203981], "other_rev": [1485, 0, 27266],
-                "total_rev": [113192, 257190, 231247],
-                "direct_cost": [38531, 180033, 41418], "op_exp": [27312, 71526, 6841],
-                "admin_fac": [18334, 0, 22563], "other_cost": [52095, 0, 80961],
-                "total_cos": [136272, 251559, 151781],
-                "direct_margin": [-23080, 5631, 79466],
-                "admin_exp": [240, 552, 62028], "selling_exp": [10357, 24706, 18663],
-                "other_exp": [12200, 0, 22681], "corp_exp": [37645, 41980, 34325],
-                "total_exp": [60443, 67238, 137698],
-                "op_profit": [-83522, -61607, -58232],
-                "cif": [868, 1141, -255], "taxes": [14220, 0, 0],
-                "net": [-98610, -62748, -57978],
+                "direct_rev": [135651, 297815, 209864], "other_rev": [3490, 0, 27266], "total_rev": [139141, 297815, 237130],
+                "direct_cost": [39478, 208471, 45185], "op_exp": [30610, 79581, 7343], "admin_fac": [18604, 0, 22676],
+                "other_cost": [59611, 0, 91384], "total_cos": [148302, 288051, 166589], "direct_margin": [-9161, 9764, 70541],
+                "admin_exp": [398, 1560, 68658], "selling_exp": [18378, 27107, 20029], "other_exp": [13402, 0, 23917],
+                "corp_exp": [41755, 46786, 38231], "total_exp": [73933, 75453, 150834], "op_profit": [-83094, -65689, -80293],
+                "cif": [963, 1352, -192], "taxes": [14220, 8571, 0], "net": [-98277, -75612, -80101],
             },
         },
     },
@@ -193,10 +170,10 @@ def budget_by_unit(b=BUDGET_2026):
     return {"cons": cons, "imp": imp, "total": [cons[i] + imp[i] for i in range(12)]}
 
 
-def full_year(sales=SALES, month=SALES_MONTH):
+def full_year(sales=SALES, month=SALES_MONTH, close=CLOSE):
     """Full-year view per unit, thousands USD: budget for the year, actual so
     far, budget for the months left, and what those months need to reach it."""
-    bu, su = budget_by_unit(), sales_units(sales)
+    bu, su = budget_by_unit(), sales_units(sales, close)
     out = {}
     for unit in ("total", "cons", "imp"):
         year = sum(bu[unit]) / 1000
@@ -207,7 +184,7 @@ def full_year(sales=SALES, month=SALES_MONTH):
     return out
 
 
-def sales_units(sales=SALES):
+def sales_units(sales=SALES, close=CLOSE):
     """Roll the report's lines up to Total / Consolidados / Import Muebles."""
     out = {}
     for unit, members in (("total", ("mud", "com", "imp")), ("cons", ("mud", "com")), ("imp", ("imp",))):
@@ -221,7 +198,21 @@ def sales_units(sales=SALES):
     out["total"]["month"]["py_usd"] = sales["stated_tim"]["month"]["py_usd"]
     out["cons"]["month"]["py_usd"] = round(sum(sales["lines"][m]["month"]["py_usd"] for m in ("mud", "com")), 2)
     out["imp"]["month"]["py_usd"] = sales["lines"]["imp"]["month"]["py_usd"]
+    if statement_covers_sales(close, sales):
+        units = with_total(close)
+        for unit in ("total", "cons", "imp"):
+            for per in ("month", "ytd"):
+                rev = units[unit][per]["total_rev"]
+                out[unit][per]["usd"] = [round(rev[0] / 1000, 2), round(rev[1] / 1000, 2)]
+                out[unit][per]["py_usd"] = round(rev[2] / 1000, 2)
     return out
+
+
+def statement_covers_sales(close=CLOSE, sales=SALES):
+    """True when Finance's full statement is for the same month as the sales
+    report: then revenue totals come from the statement (the official figure)
+    and the sales report and scorecard only supply the split by line."""
+    return close.get("month") == SALES_MONTH and close["period_en"] == sales["period_en"]
 
 
 def with_total(close=CLOSE):
@@ -286,11 +277,12 @@ def render_page(close=CLOSE, sales=SALES):
                   for k, en, es, kind, tot in LINES],
         "meta": {k: close[k] for k in ("period_en", "period_es", "source", "fx_note_en", "fx_note_es")},
         "src_en": close.get("source_en", close["source"]), "src_es": close.get("source_es", close["source"]),
-        "sales": {"units": sales_units(sales), "period_en": sales["period_en"], "period_es": sales["period_es"],
+        "sales": {"units": sales_units(sales, close), "official": statement_covers_sales(close, sales),
+                  "period_en": sales["period_en"], "period_es": sales["period_es"],
                   "source": sales["source"],
                   "lines": {k: {"en": v["en"], "es": v["es"], "unit": v["unit"], "month": v["month"], "ytd": v["ytd"]}
                             for k, v in sales["lines"].items()},
-                  "fy": full_year(sales),
+                  "fy": full_year(sales, close=close),
                   "score": {"lines": SCORECARD["lines"], "stated": SCORECARD["stated"],
                             "period_en": SCORECARD["period_en"], "period_es": SCORECARD["period_es"]},
                   "sources": [sales["source"], SCORECARD["source"], BUDGET_2026["source"]],
@@ -394,15 +386,17 @@ PAGE = r"""<!DOCTYPE html>
   <h2><span class="en">What the numbers say</span><span class="es">Lectura de los números</span></h2>
   <div class="tile">
     <ul class="read en">
-      <li><b>October revenue was on budget overall:</b> TIM $235.3K vs $241.3K budget (−2.5%), and $2.14M vs $2.15M for the year (−0.4%). Consolidated shipments beat October's budget by 4%: agents +26% and Texas +52% over budget, rest of USA −26% and commercial −10% under. Furniture import came in 36% under. Against October 2025, TIM's revenue nearly doubled (+93% in dollars). To hit the 2026 budget, November and December need $349K, $9K more than budgeted for those months.</li>
-      <li><b>Consolidated shipments are the engine.</b> YTD revenue is up 52% on 2025 and net profit is close to double both budget and last year.</li>
-      <li><b>Furniture import is losing money.</b> YTD net is −$98.6K, worse than budget (−$62.7K) and 2025 (−$58.0K). In September, cost of sales ran at 210% of revenue.</li>
+      <li><b>October was TIM's strongest month of the year:</b> net profit $88.2K on $235.3K of revenue, against a budget of $0.7K. Year to date, TIM's net profit is $285.5K, 2.7× budget ($105.0K) and 3.4× 2025 ($84.6K), on revenue of $2,169.6K (+0.9% vs budget, +40.0% vs 2025).</li>
+      <li><b>Consolidated shipments drove it:</b> October net profit $87.8K, a 42% margin. Cost of sales was only 33% of revenue in October, against 59% for the year, and direct cost was $9.5K against $77.1K in September. <b>Worth asking Finance whether some October costs are still to be booked</b> before reading October as the new normal.</li>
+      <li><b>Furniture import broke even in October</b> (+$0.3K) but is still losing money for the year: −$98.3K, worse than budget (−$75.6K) and 2025 (−$80.1K). October revenue was 36% under budget.</li>
+      <li><b>Full year:</b> TIM has reached 87% of its $2.49M revenue budget. November and December need $319.7K, $20.3K less than budgeted for those months. Consolidated shipments need $89.0K of the $268.0K budgeted; furniture import needs $230.7K against $72.0K budgeted, so it won't reach its year.</li>
       <li><b>Read margin and profit, not individual cost lines, against budget.</b> The budget put almost all cost in "Direct cost" and "Selling expense"; actuals spread it across other lines (including other-company lines budgeted at zero). Large line variances are mostly reclassification, not savings.</li>
     </ul>
     <ul class="read es">
-      <li><b>Los ingresos de octubre quedaron en presupuesto:</b> TIM $235.3K vs $241.3K presupuestado (−2.5%), y $2.14M vs $2.15M en el año (−0.4%). Consolidados superó el presupuesto de octubre en 4%: agentes +26% y Texas +52% sobre presupuesto; resto USA −26% y comercial −10% abajo. Import Muebles quedó 36% abajo. Contra octubre 2025, los ingresos de TIM casi se duplicaron (+93% en dólares). Para cumplir el presupuesto 2026, noviembre y diciembre necesitan $349K, $9K más de lo presupuestado para esos meses.</li>
-      <li><b>Consolidados es el motor.</b> Los ingresos acumulados crecen 52% vs 2025 y la utilidad neta casi duplica tanto el presupuesto como el año anterior.</li>
-      <li><b>Import Muebles pierde dinero.</b> La utilidad neta acumulada es −$98.6K, peor que el presupuesto (−$62.7K) y que 2025 (−$58.0K). En septiembre el costo de ventas fue 210% de los ingresos.</li>
+      <li><b>Octubre fue el mejor mes del año para TIM:</b> utilidad neta de $88.2K sobre ingresos de $235.3K, contra un presupuesto de $0.7K. En el acumulado, la utilidad neta de TIM es $285.5K, 2.7× el presupuesto ($105.0K) y 3.4× 2025 ($84.6K), con ingresos de $2,169.6K (+0.9% vs presupuesto, +40.0% vs 2025).</li>
+      <li><b>Consolidados lo impulsó:</b> utilidad neta de octubre $87.8K, margen de 42%. El costo de ventas fue solo 33% de los ingresos en octubre, contra 59% en el año, y el costo directo fue $9.5K contra $77.1K en septiembre. <b>Conviene preguntar a Finanzas si faltan costos de octubre por registrar</b> antes de tomar octubre como la nueva normalidad.</li>
+      <li><b>Import Muebles quedó en equilibrio en octubre</b> (+$0.3K), pero sigue perdiendo en el año: −$98.3K, peor que el presupuesto (−$75.6K) y que 2025 (−$80.1K). Los ingresos de octubre quedaron 36% abajo del presupuesto.</li>
+      <li><b>Año completo:</b> TIM lleva 87% de su presupuesto de ingresos de $2.49M. Noviembre y diciembre necesitan $319.7K, $20.3K menos de lo presupuestado para esos meses. Consolidados necesita $89.0K de los $268.0K presupuestados; Import Muebles necesita $230.7K contra $72.0K presupuestados, así que no alcanzará su año.</li>
       <li><b>Contra presupuesto, lea el margen y la utilidad, no cada línea de costo.</b> El presupuesto cargó casi todo el costo en "Costo directo" y "Gastos de venta"; el real lo reparte en otras líneas (incluidas las de otras empresas, presupuestadas en cero). Las grandes variaciones por línea son sobre todo reclasificación, no ahorro.</li>
     </ul>
   </div>
@@ -488,7 +482,8 @@ PAGE = r"""<!DOCTYPE html>
   function salesKpis(){
     var U = SA.units[S.unit][S.per];
     var h = sTile(T('Revenue','Ingresos')+' · '+UNAME[S.unit][S.lang], U);
-    if (SPARTS[S.unit].length > 1) SPARTS[S.unit].forEach(function(k){ h += sTile(SA.lines[k][S.lang], SA.lines[k][S.per]); });
+    // furniture import is a whole unit, so its tile shows the unit figure (official statement when available)
+    if (SPARTS[S.unit].length > 1) SPARTS[S.unit].forEach(function(k){ h += sTile(SA.lines[k][S.lang], k === 'imp' ? SA.units.imp[S.per] : SA.lines[k][S.per]); });
     return h;
   }
   function fyTiles(){
@@ -525,13 +520,17 @@ PAGE = r"""<!DOCTYPE html>
     document.getElementById('salesPer').textContent = sPerTxt;
     document.getElementById('plPer').textContent = perTxt;
     document.getElementById('plPer2').textContent = perTxt;
-    document.getElementById('salesNote').innerHTML = T(
+    var ytdPeso = (S.cmp==='2' && S.per==='ytd' && !SA.official);
+    document.getElementById('salesNote').innerHTML = SA.official ? T(
+      '<b>Revenue.</b> Totals for TIM, consolidated shipments and furniture import come from Finance\'s official '+SA.period_en+' statement. The split into household moves and commercial comes from Finance\'s sales report, and the customer-type table from TIM\'s scorecard (USD, thousands). '+
+      (S.per==='ytd' ? 'Year to date, the sales report\'s household and commercial lines add up to about $29K less than the official consolidated-shipments total ($2,001.4K vs $2,030.5K); '+SA.period_en+' itself matches, so the gap is in earlier months.' : ''),
+      '<b>Ingresos.</b> Los totales de TIM, Consolidados e Import Muebles vienen del estado de resultados oficial de '+SA.period_es+'. La división entre Mudanza y Comercial viene del reporte de ventas de Finanzas, y la tabla por tipo de cliente del scorecard de TIM (USD, miles). '+
+      (S.per==='ytd' ? 'En el acumulado, las líneas Mudanza y Comercial del reporte de ventas suman unos $29K menos que el total oficial de Consolidados ($2,001.4K vs $2,030.5K); '+SA.period_es+' coincide, así que la diferencia está en meses anteriores.' : '')
+    ) : T(
       '<b>Revenue only</b>, from Finance\'s monthly sales report, TIM\'s scorecard and the 2026 budget (USD, thousands). Costs and profit come from the full monthly statement and are shown below through '+D.meta.period_en+' until the '+SA.period_en+' statement arrives. '+
-      (S.cmp==='2' && S.per==='ytd' ? 'Year to date, 2025 is available only in pesos, so that comparison is peso growth. ' : '')+
-      ' <b>Check:</b> through September this report puts consolidated-shipments revenue about $29K below the September statement; the '+SA.period_en+' statement will confirm which is right.',
+      (ytdPeso ? 'Year to date, 2025 is available only in pesos, so that comparison is peso growth.' : ''),
       '<b>Solo ingresos</b>, del reporte mensual de ventas de Finanzas, el scorecard de TIM y el presupuesto 2026 (USD, miles). Costos y utilidad vienen del estado de resultados mensual y se muestran abajo a '+D.meta.period_es+' hasta que llegue el de '+SA.period_es+'. '+
-      (S.cmp==='2' && S.per==='ytd' ? 'En el acumulado, 2025 solo está en pesos, así que esa comparación es crecimiento en pesos. ' : '')+
-      ' <b>Revisión:</b> a septiembre este reporte muestra ingresos de Consolidados unos $29K por debajo del estado de septiembre; el estado de '+SA.period_es+' confirmará cuál es correcto.');
+      (ytdPeso ? 'En el acumulado, 2025 solo está en pesos, así que esa comparación es crecimiento en pesos.' : ''));
     document.getElementById('salesKpis').innerHTML = salesKpis();
     document.getElementById('salesFy').innerHTML = fyTiles();
     document.getElementById('scoreTbl').innerHTML = scoreTable();

@@ -215,3 +215,13 @@ def test_full_year_math():
     assert F["total"]["year"] == 2489.3 and F["total"]["rest_budget"] == 340.0
     assert F["total"]["actual"] == 2169.61 and F["total"]["needed"] == 319.7   # official statement YTD
     assert abs(F["cons"]["needed"] + F["imp"]["needed"] - F["total"]["needed"]) <= 0.2
+
+
+def test_month_view_budget_figures():
+    F, bu = T.full_year(), T.budget_by_unit()
+    m = T.SALES_MONTH
+    for unit in ("total", "cons", "imp"):
+        assert F[unit]["month_budget"] == round(bu[unit][m - 1] / 1000, 2)
+        assert F[unit]["next_budget"] == round(bu[unit][m] / 1000, 2)
+        assert F[unit]["month_actual"] == T.sales_units()[unit]["month"]["usd"][0]
+    assert F["total"]["month_budget"] == 241.28 and F["total"]["next_budget"] == 175.45
